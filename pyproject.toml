@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pgrealign"
+version = "0.1.0"
+description = "Realign regions of a pangenome graph: extract each region's haplotypes, realign them, and splice the new alignment back in"
+readme = "pgrealign/README.md"
+requires-python = ">=3.9"
+dependencies = []
+
+[project.scripts]
+pgrealign = "pgrealign.cli:main"
+
+[tool.setuptools]
+packages = ["pgrealign"]
+
+[tool.setuptools.package-data]
+pgrealign = ["c/*.c"]

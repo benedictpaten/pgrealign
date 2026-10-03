@@ -1,0 +1,212 @@
+{
+ "command": [
+  "/Users/benedictpaten/PycharmProjects/vntr-eval/pgrealign/cli.py",
+  "catalog",
+  "--repeatmasker",
+  "/Users/benedictpaten/PycharmProjects/vg-call-eval/data/chm13v2.0_RepeatMasker_4.1.2p1.2022Apr14.bed",
+  "--reference",
+  "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr1/chr1.fa",
+  "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr2/chr2.fa",
+  "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr3/chr3.fa",
+  "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr4/chr4.fa",
+  "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr5/chr5.fa",
+  "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr6/chr6.fa",
+  "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr7/chr7.fa",
+  "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr8/chr8.fa",
+  "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr9/chr9.fa",
+  "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr10/chr10.fa",
+  "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr11/chr11.fa",
+  "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr12/chr12.fa",
+  "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr13/chr13.fa",
+  "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr14/chr14.fa",
+  "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr15/chr15.fa",
+  "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr16/chr16.fa",
+  "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr17/chr17.fa",
+  "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr18/chr18.fa",
+  "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr19/chr19.fa",
+  "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr20/chr20.fa",
+  "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr21/chr21.fa",
+  "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr22/chr22.fa",
+  "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chrX/chrX.fa",
+  "-j",
+  "6",
+  "-o",
+  "catalogs/chm13v2.0_tr.bed.gz"
+ ],
+ "inputs": {
+  "reference_0": {
+   "bytes": 251492176,
+   "mtime": "2026-08-14T13:36:20",
+   "path": "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr1/chr1.fa"
+  },
+  "reference_1": {
+   "bytes": 245730468,
+   "mtime": "2026-08-14T13:37:45",
+   "path": "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr2/chr2.fa"
+  },
+  "reference_10": {
+   "bytes": 136816874,
+   "mtime": "2026-08-14T13:49:18",
+   "path": "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr11/chr11.fa"
+  },
+  "reference_11": {
+   "bytes": 134991112,
+   "mtime": "2026-08-14T13:50:34",
+   "path": "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr12/chr12.fa"
+  },
+  "reference_12": {
+   "bytes": 114986277,
+   "mtime": "2026-08-14T13:51:52",
+   "path": "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr13/chr13.fa"
+  },
+  "reference_13": {
+   "bytes": 102426018,
+   "mtime": "2026-08-14T13:53:09",
+   "path": "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr14/chr14.fa"
+  },
+  "reference_14": {
+   "bytes": 101000117,
+   "mtime": "2026-08-14T13:54:25",
+   "path": "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr15/chr15.fa"
+  },
+  "reference_15": {
+   "bytes": 97534511,
+   "mtime": "2026-08-14T13:55:40",
+   "path": "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr16/chr16.fa"
+  },
+  "reference_16": {
+   "bytes": 85330366,
+   "mtime": "2026-08-14T13:56:54",
+   "path": "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr17/chr17.fa"
+  },
+  "reference_17": {
+   "bytes": 81549327,
+   "mtime": "2026-08-14T13:58:06",
+   "path": "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr18/chr18.fa"
+  },
+  "reference_18": {
+   "bytes": 62478714,
+   "mtime": "2026-08-14T13:59:17",
+   "path": "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr19/chr19.fa"
+  },
+  "reference_19": {
+   "bytes": 67037891,
+   "mtime": "2026-08-14T14:00:29",
+   "path": "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr20/chr20.fa"
+  },
+  "reference_2": {
+   "bytes": 203619779,
+   "mtime": "2026-08-14T13:39:02",
+   "path": "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr3/chr3.fa"
+  },
+  "reference_20": {
+   "bytes": 45654323,
+   "mtime": "2026-08-14T13:29:44",
+   "path": "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr21/chr21.fa"
+  },
+  "reference_21": {
+   "bytes": 51966495,
+   "mtime": "2026-08-14T14:01:43",
+   "path": "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr22/chr22.fa"
+  },
+  "reference_22": {
+   "bytes": 156187817,
+   "mtime": "2026-08-14T14:03:00",
+   "path": "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chrX/chrX.fa"
+  },
+  "reference_3": {
+   "bytes": 195994638,
+   "mtime": "2026-08-14T13:40:21",
+   "path": "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr4/chr4.fa"
+  },
+  "reference_4": {
+   "bytes": 184321013,
+   "mtime": "2026-08-14T13:41:38",
+   "path": "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr5/chr5.fa"
+  },
+  "reference_5": {
+   "bytes": 174278217,
+   "mtime": "2026-08-14T13:42:54",
+   "path": "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr6/chr6.fa"
+  },
+  "reference_6": {
+   "bytes": 162574527,
+   "mtime": "2026-08-14T13:44:12",
+   "path": "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr7/chr7.fa"
+  },
+  "reference_7": {
+   "bytes": 148087579,
+   "mtime": "2026-08-14T13:45:27",
+   "path": "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr8/chr8.fa"
+  },
+  "reference_8": {
+   "bytes": 152499969,
+   "mtime": "2026-08-14T13:46:45",
+   "path": "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr9/chr9.fa"
+  },
+  "reference_9": {
+   "bytes": 136442618,
+   "mtime": "2026-08-14T13:48:02",
+   "path": "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr10/chr10.fa"
+  },
+  "repeatmasker": {
+   "bytes": 342862439,
+   "mtime": "2026-08-19T08:22:09",
+   "path": "/Users/benedictpaten/PycharmProjects/vg-call-eval/data/chm13v2.0_RepeatMasker_4.1.2p1.2022Apr14.bed"
+  }
+ },
+ "params": {
+  "contigs": [
+   "chr1",
+   "chr2",
+   "chr3",
+   "chr4",
+   "chr5",
+   "chr6",
+   "chr7",
+   "chr8",
+   "chr9",
+   "chr10",
+   "chr11",
+   "chr12",
+   "chr13",
+   "chr14",
+   "chr15",
+   "chr16",
+   "chr17",
+   "chr18",
+   "chr19",
+   "chr20",
+   "chr21",
+   "chr22",
+   "chrX"
+  ],
+  "gap": 50,
+  "max_period": 2000,
+  "min_period": 7
+ },
+ "pgrealign": "0.1.0",
+ "python": "3.14.7",
+ "stage": "catalog",
+ "started": "2026-10-02T20:50:35",
+ "summary": {
+  "bp": 265583158,
+  "records": 1604479,
+  "records_by_source_class": {
+   "rm/LC": 103244,
+   "rm/SAT": 32836,
+   "rm/STR": 670714,
+   "rm/VNTR": 63420,
+   "trfind/STR": 80793,
+   "trfind/VNTR": 653472
+  },
+  "regions": 845357,
+  "regions_by_class": {
+   "LC": 95032,
+   "SAT": 4124,
+   "STR": 597687,
+   "VNTR": 148514
+  }
+ },
+ "tools": {}
+}
