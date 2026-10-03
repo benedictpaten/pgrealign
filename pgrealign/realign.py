@@ -17,8 +17,10 @@ The default method is the **medoid star**, chosen on chr20 (vntr-eval results, s
   R, and `internal` touches neither.
 - A fragment is placed at the leftmost occurrence of its sequence, in the right position, in an
   allele that contains it. Its row is that allele's row, cut to the matching bases.
-- So every path still spells its sequence. Only alleles are aligned.
-- A fragment found in no allele makes the region `unplaced_fragment`, and it is left as it is.
+- A fragment found in no allele (on chr6, 433 of 593) is aligned to the centre like an allele, and
+  joins the merge. abPOA's global alignment keeps every base, and the walk's missing end becomes one
+  end gap.
+- Fragments do not take part in choosing the centre.
 
 **Limits.**
 - A region is `too_big` when its centre times its longest allele exceeds `max_cells`. Unbanded abPOA
@@ -41,6 +43,8 @@ import time
 
 K = 15
 MAX_CELLS = 450_000_000
+MAX_TOTAL_BP = 40_000_000     # the medoid holds every allele's k-mer tokens: about 50 bytes per base
+MEDOID_COMPARATORS = 64       # each candidate is compared with at most this many alleles, the heaviest
 _CODE = {'A': 0, 'C': 1, 'G': 2, 'T': 3}
 
 
@@ -73,12 +77,17 @@ def kmer_tokens(seq, k=K):
 
 def medoid(seqs, weights, k=K):
     """Index of the sequence minimising sum_j w_j (1 - Jaccard(i, j)) over the others; ties go to the lower
-    index."""
+    index. Only sequences of positive weight (carried by some path of the panel) are candidates, when
+    there are any; the sum runs over the MEDOID_COMPARATORS heaviest alleles (all of them on chr20's
+    median region of 45)."""
     toks = [kmer_tokens(s, k) for s in seqs]
+    cands = [i for i in range(len(seqs)) if weights[i] > 0] or list(range(len(seqs)))
+    # the weighted sum is dominated by the heaviest alleles: compare with at most MEDOID_COMPARATORS of them
+    comp = sorted(range(len(seqs)), key=lambda j: (-weights[j], j))[:MEDOID_COMPARATORS]
     best = None
-    for i in range(len(seqs)):
+    for i in cands:
         d = 0.0
-        for j in range(len(seqs)):
+        for j in comp:
             if i != j:
                 inter = len(toks[i] & toks[j])
                 uni = len(toks[i]) + len(toks[j]) - inter
@@ -245,9 +254,15 @@ def realign_package(pkg, abpoa='abpoa', timeout=900, max_cells=MAX_CELLS, workdi
     try:
         if not alleles:
             raise Capped('no_alleles', 'no spanning allele to align')
+        longest = max(len(s) for _, s in alleles)
+        shortest = min(len(s) for (_, s), w in zip(alleles, weights) if w > 0) if any(weights) else 0
+        total = sum(len(s) for _, s in alleles)
+        # the centre is at least the shortest candidate, so this bounds the cells from below
+        if max(1, shortest) * max(1, longest) > max_cells or total > MAX_TOTAL_BP:
+            raise Capped('too_big', 'shortest %d bp x longest %d bp > %d cells, or %d bp in all' % (
+                shortest, longest, max_cells, total))
         ci = medoid([s for _, s in alleles], weights)
         cid, cseq = alleles[ci]
-        longest = max(len(s) for _, s in alleles)
         if max(1, len(cseq)) * max(1, longest) > max_cells:
             raise Capped('too_big', 'centre %d bp x longest %d bp > %d cells' % (len(cseq), longest, max_cells))
         pairs = collections.OrderedDict()
@@ -266,19 +281,34 @@ def realign_package(pkg, abpoa='abpoa', timeout=900, max_cells=MAX_CELLS, workdi
             if ca.replace('-', '') != cseq or sa.replace('-', '') != s:
                 raise ValueError('abPOA rows do not spell their inputs (%s)' % aid)
             pairs[aid] = left_normalise_pair(ca, sa)
-        rows = star_merge(cseq, pairs, wd, deadline, stats, abpoa)
+        exact, aligned = [], 0
         for f in pkg['fragments']:
-            r = place_fragment(f['seq'].upper(), f['side'], alleles, rows)
-            if r is None:
-                raise Capped('unplaced_fragment', 'fragment %s (%s, %d bp) is in no allele' % (
-                    f['id'], f['side'], len(f['seq'])))
-            rows[f['id']] = r
+            fs = f['seq'].upper()
+            if place_fragment(fs, f['side'], alleles, {aid: s for aid, s in alleles}) is not None:
+                exact.append(f)
+                continue
+            if not cseq or not fs:
+                pairs[f['id']] = (cseq + '-' * len(fs), '-' * len(cseq) + fs)
+                continue
+            got = abpoa_rows([('c', cseq), ('q', fs)], wd, ['-b', '-1'], deadline, abpoa)
+            ca, sa = got['c'], got['q']
+            keep = [i for i in range(len(ca)) if ca[i] != '-' or sa[i] != '-']
+            ca, sa = ''.join(ca[i] for i in keep), ''.join(sa[i] for i in keep)
+            if ca.replace('-', '') != cseq or sa.replace('-', '') != fs:
+                raise ValueError('abPOA rows do not spell their inputs (%s)' % f['id'])
+            pairs[f['id']] = left_normalise_pair(ca, sa)
+            aligned += 1
+        rows = star_merge(cseq, pairs, wd, deadline, stats, abpoa)
+        for f in exact:
+            rows[f['id']] = place_fragment(f['seq'].upper(), f['side'], alleles, rows)
+        stats['fragments_exact'], stats['fragments_aligned'] = len(exact), aligned
         rows = drop_gap_columns(rows)
         for mid, s in alleles + [(f['id'], f['seq'].upper()) for f in pkg['fragments']]:
             if rows[mid].replace('-', '') != s:
                 raise ValueError('row %s does not spell its sequence' % mid)
         res.update(status='ok', centre=cid, rows=rows, columns=len(next(iter(rows.values()), '')),
-                   slot_alignments=stats['slot_alignments'])
+                   slot_alignments=stats['slot_alignments'], fragments_exact=stats['fragments_exact'],
+                   fragments_aligned=stats['fragments_aligned'])
     except Capped as e:
         res.update(status=e.status, message=str(e))
     finally:

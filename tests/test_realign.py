@@ -54,11 +54,13 @@ class TestStar(unittest.TestCase):
         # the fragment lies inside a2, the only allele long enough to hold it
         self.assertTrue(all(f == '-' or f == a for f, a in zip(rows['f1'], rows['a2'])))
 
-    def test_unplaced_and_too_big(self):
+    def test_aligned_fragment_and_too_big(self):
         pkg = {'id': 'R', 'alleles': [{'id': 'a1', 'weight': 1, 'seq': 'ACGTACGT'},
                                       {'id': 'a2', 'weight': 1, 'seq': 'ACGTTCGT'}],
                'fragments': [{'id': 'f1', 'side': 'internal', 'seq': 'GGGG'}]}
-        self.assertEqual(realign.realign_package(pkg)['status'], 'unplaced_fragment')
+        r = realign.realign_package(pkg)
+        self.assertEqual((r['status'], r['fragments_aligned'], r['fragments_exact']), ('ok', 1, 0))
+        self.assertEqual(r['rows']['f1'].replace('-', ''), 'GGGG')
         pkg['fragments'] = []
         self.assertEqual(realign.realign_package(pkg, max_cells=10)['status'], 'too_big')
 

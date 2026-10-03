@@ -93,6 +93,35 @@ def cmd_replace(a):
     print()
 
 
+def cmd_union(a):
+    from . import provenance, union
+    summary = union.union_packages(a.base, a.add, a.out)
+    provenance.write_manifest(a.out, 'union', {'base': a.base, 'add': a.add}, {}, extra={'summary': summary})
+    json.dump(summary, sys.stdout, indent=1)
+    print()
+
+
+def cmd_project(a):
+    from . import provenance, union
+    summary = union.project(a.union, a.msas, a.out)
+    provenance.write_manifest(a.out, 'project', {'union': a.union, 'msas': a.msas}, {}, extra={'summary': summary})
+    json.dump(summary, sys.stdout, indent=1)
+    print()
+
+
+def cmd_verify(a):
+    from . import provenance, verify
+    res = verify.verify(a.before, a.after, vg=a.vg)
+    if a.out:
+        with open(a.out, 'w') as f:
+            json.dump(res, f, indent=1)
+        provenance.write_manifest(a.out, 'verify', {'before': a.before, 'after': a.after}, {}, tools=['vg'])
+    json.dump(res, sys.stdout, indent=1)
+    print()
+    if not res['ok']:
+        sys.exit(1)
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog='pgrealign', description=__doc__)
     p.add_argument('--version', action='version', version='pgrealign ' + __version__)
@@ -167,6 +196,25 @@ def main(argv=None):
     c.add_argument('--vg', help='vg binary [vg on PATH]')
     c.add_argument('-t', '--threads', type=int, default=4)
     c.set_defaults(func=cmd_replace)
+
+    c = sub.add_parser('union', help="merge a panel's packages with a target graph's, region by region")
+    c.add_argument('--base', required=True, help="the panel graph's packages.jsonl.gz")
+    c.add_argument('--add', required=True, help="the target graph's packages.jsonl.gz (same regions)")
+    c.add_argument('-o', '--out', required=True, help='union packages.jsonl.gz (realign this)')
+    c.set_defaults(func=cmd_union)
+
+    c = sub.add_parser('project', help="the union's MSAs restricted to the target's members")
+    c.add_argument('--union', required=True, help='union packages.jsonl.gz')
+    c.add_argument('--msas', required=True, help="realign's msas.jsonl.gz for the union")
+    c.add_argument('-o', '--out', required=True, help="msas.jsonl.gz for the target's replace")
+    c.set_defaults(func=cmd_project)
+
+    c = sub.add_parser('verify', help='every path of the realigned graph spells what it did before (stage 6)')
+    c.add_argument('--before', required=True, help='the original contig GBZ')
+    c.add_argument('--after', required=True, help='the realigned contig GBZ')
+    c.add_argument('-o', '--out', help='write the report here too')
+    c.add_argument('--vg', help='vg binary [vg on PATH]')
+    c.set_defaults(func=cmd_verify)
 
     a = p.parse_args(argv)
     if getattr(a, 'drop_sample', 'unset') is None:
