@@ -1,6 +1,8 @@
 # Realigning regions of a pangenome graph: pipeline design (draft)
 
-**Status:** agreed 2026-10-02; the build has started.
+**Status:** agreed 2026-10-02. On 2026-10-03 the stages were built and the full chr20 graph was realigned
+and tested ([results/full_graph_chr20.md](../results/full_graph_chr20.md)). chr6 waits for disk, and WDL is not
+written yet.
 
 **Decisions (2026-10-02):**
 - **Scope:** every catalogued tandem repeat whose spanning alleles are not all identical.

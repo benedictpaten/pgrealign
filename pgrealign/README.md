@@ -11,7 +11,9 @@ regions and any aligner.
 
 The design and its validation are in [docs/pipeline-design.md](../docs/pipeline-design.md).
 
-**Status:** under construction. Only `catalog` exists so far.
+**Status:** every stage works end to end on chr20 of the HPRC v2.1 eval graph. See
+[results/full_graph_chr20.md](../results/full_graph_chr20.md): SV F1 +0.040 for short reads and +0.084 for ONT
+(refined), significant per region, with small variants unchanged. WDL/Toil packaging is not written yet.
 
 ## Install
 
@@ -29,12 +31,15 @@ External tools, found on `PATH`:
 | stage | what it does | status |
 |---|---|---|
 | `catalog` | tandem-repeat catalogue of the reference (RepeatMasker + trfind) | done |
-| `regions` | anchor each target in the graph's own snarl tree; merge; size policy | planned |
-| `extract` | one streaming pass: every path's run through every region, with identity and fragments | planned |
-| `realign` | per region: alleles (+ fragments) -> MSA; default the full-panel medoid star | planned |
-| `induce` | per region: MSA -> column graph + one walk per row | planned |
-| `replace` | per contig: splice new regions in, re-thread every path, check spellings | planned |
-| `merge` / `verify` | assemble the contigs into one GBZ; report | planned |
+| `prepare` | cut a contig from a whole-genome GBZ, drop the gref cover, snarls, reference index | done |
+| `regions` | anchor each target in the graph's own snarl tree; merge; size policy | done |
+| `extract` | one streaming pass: every path's run through every region, with identity and fragments | done |
+| `realign` | per region: alleles (+ fragments) -> MSA; default the full-panel medoid star | done |
+| `induce` | per region: MSA -> column graph + one walk per row | done |
+| `replace` | per contig: splice new regions in, re-thread every path, check spellings | done |
+| `union` / `project` | realign on one panel, apply to a graph of other haplotypes | done |
+| `verify` | every path spells what it did before | done |
+| `merge` | assemble contigs into one GBZ (needs a global renumbering) | planned |
 
 ### catalog
 
