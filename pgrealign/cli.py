@@ -81,7 +81,8 @@ def cmd_replace(a):
     import subprocess
     from . import provenance, replace
     from .graph import find_vg
-    summary = replace.replace(a.graph, a.extract, a.msas, a.out, a.id_start, vg=a.vg, threads=a.threads)
+    summary = replace.replace(a.graph, a.extract, a.msas, a.out, a.id_start, vg=a.vg, threads=a.threads,
+                              id_mode=a.id_mode)
     if a.gbz:
         subprocess.run([find_vg(a.vg), 'gbwt', '-G', a.out, '--gbz-format', '-g', a.gbz], check=True)
         if not a.keep_gfa:
@@ -189,8 +190,10 @@ def main(argv=None):
     c.add_argument('--extract', required=True, help='the extract output directory')
     c.add_argument('--msas', required=True, help='msas.jsonl.gz from realign')
     c.add_argument('-o', '--out', required=True, help='output GFA')
-    c.add_argument('--id-start', type=int, required=True,
-                   help='first id for new nodes that do not fit in the freed ids; must be free genome-wide')
+    c.add_argument('--id-mode', choices=['dense', 'reuse'], default='dense',
+                   help="'dense' renumbers every node, new ones next to their regions; 'reuse' keeps old ids "
+                        "and puts overflow at --id-start [dense]")
+    c.add_argument('--id-start', type=int, help="with --id-mode reuse: first id for overflow nodes")
     c.add_argument('--gbz', help='also build this GBZ from the output GFA (vg gbwt -G)')
     c.add_argument('--keep-gfa', action='store_true', help='keep the GFA after --gbz')
     c.add_argument('--vg', help='vg binary [vg on PATH]')

@@ -39,12 +39,16 @@ def find_vg(vg=None):
 class GfaStream:
     """Iterate over the lines of a GFA file or of `vg convert -f GBZ`, as a context manager."""
 
-    def __init__(self, path, vg=None, threads=4):
+    def __init__(self, path, vg=None, threads=4, drop_haplotypes=False):
         self.path, self.vg, self.threads, self.proc, self.fh = path, vg, threads, None, None
+        self.drop_haplotypes = drop_haplotypes
 
     def __enter__(self):
         if self.path.endswith('.gbz'):
-            cmd = [find_vg(self.vg), 'convert', '-f', '-t', str(self.threads), self.path]
+            cmd = [find_vg(self.vg), 'convert', '-f', '-t', str(self.threads)]
+            if self.drop_haplotypes:
+                cmd.append('-H')
+            cmd.append(self.path)
             self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, text=True, bufsize=1 << 20)
             self.fh = self.proc.stdout
         else:

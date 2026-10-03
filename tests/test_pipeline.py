@@ -83,22 +83,30 @@ class TestPipeline(unittest.TestCase):
         res = realign.realign_package(pk)
         self.assertEqual(res['status'], 'ok', res)
         realign.write_jsonl(os.path.join(d, 'msas.jsonl.gz'), [res])
-        out = os.path.join(d, 'out.gfa')
-        st = replace.replace(g, os.path.join(d, 'x'), os.path.join(d, 'msas.jsonl.gz'), out, id_start=1000)
-        self.assertEqual(st['regions'], 1)
         seq0, _, walks0 = read_gfa(g)
-        seq1, edges1, walks1 = read_gfa(out)
-        self.assertEqual(set(walks0), set(walks1))
-        for k in walks0:
-            self.assertEqual(spell(walks1[k], seq1), spell(walks0[k], seq0), k)
-            for a, b in zip(walks1[k], walks1[k][1:]):
-                self.assertTrue(has_edge(edges1, a, b), (k, a, b))
-        # the old copy nodes are gone unless reused; anchors and flanks are untouched
-        for n in (0, 1, 9, 10):
-            self.assertEqual(seq1[n], S[n])
-        used = {n for w in walks1.values() for _, n in w}
-        self.assertEqual(used, set(seq1))  # no orphan nodes
-
+        for mode in ('reuse', 'dense'):
+            out = os.path.join(d, 'out.%s.gfa' % mode)
+            st = replace.replace(g, os.path.join(d, 'x'), os.path.join(d, 'msas.jsonl.gz'), out, id_start=1000,
+                                 id_mode=mode)
+            self.assertEqual(st['regions'], 1)
+            seq1, edges1, walks1 = read_gfa(out)
+            self.assertEqual(set(walks0), set(walks1))
+            for k in walks0:
+                self.assertEqual(spell(walks1[k], seq1), spell(walks0[k], seq0), (mode, k))
+                for a, b in zip(walks1[k], walks1[k][1:]):
+                    self.assertTrue(has_edge(edges1, a, b), (mode, k, a, b))
+            used = {n for w in walks1.values() for _, n in w}
+            self.assertEqual(used, set(seq1))  # no orphan nodes
+            if mode == 'reuse':
+                # anchors and flanks keep their ids and sequences
+                for n in (0, 1, 9, 10):
+                    self.assertEqual(seq1[n], S[n])
+            else:
+                # ids run densely from the smallest old id, and every edge goes forward except at the
+                # reverse-walk flanks, which keep their order
+                self.assertEqual(sorted(seq1), list(range(min(S), min(S) + len(seq1))))
+                ref = walks1['CHM13#0']
+                self.assertEqual([n for _, n in ref], sorted(n for _, n in ref))
 
 if __name__ == '__main__':
     unittest.main()
