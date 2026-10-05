@@ -345,10 +345,24 @@ It always realigns a region that has fragments.
 `replace` leaves a region that `realign` cannot align as it is, and the region's record names the
 reason in its status ([statuses](#msasjsonlgz)).
 
-- `--max-cells` bounds the cells of one pairwise alignment, and so its memory: abPOA needs about 15
-  bytes per cell. An alignment to the centre whose matrix, the product of the two sequences'
-  lengths, would exceed the cap is run with abPOA's adaptive band instead; every other one is
-  unbanded. The record's `banded_pairs` counts the banded ones.
+- `--max-cells` bounds the cells of one unbanded pairwise alignment, and so its memory: abPOA
+  touches about 18 bytes per cell, so the default allows about 8 GB per worker. An alignment to the
+  centre whose matrix, the product of the two sequences' lengths, would exceed the cap is run with
+  abPOA's adaptive band instead; every other one is unbanded. The record's `banded_pairs` counts the
+  banded ones.
+- A banded alignment's memory is set by the centre's length rather than by the band's cells, because
+  abPOA reserves 20 bytes of address space per cell of the whole matrix, banded or not, and a band
+  touches at least one page of each of its five score matrices per base of the centre. Measured on
+  macOS (16 KB pages), with abPOA 1.5.7:
+
+  | alignment | memory |
+  |---|---|
+  | unbanded, two sequences of 7.5, 15, 30 kb | 1.1, 4.2, 16.2 GB |
+  | banded, two sequences of 7.5, 15, 30, 58.7 kb | 0.6, 1.2, 2.7, 5.8 GB |
+  | banded, a 58.7 kb centre with a 40.1 kb or a 103.2 kb allele | 10.1, 11.4 GB |
+
+  With 4 KB pages, as on most Linux systems, the per-page part should be a quarter of that; this
+  has not been measured.
 - A region is `too_big` when even a banded alignment of its longest allele or fragment would exceed
   the cap: when `realign.banded_cells(n)`, min(n², 2n(10 + ⌊n / 100⌋)) for a sequence of n bases,
   is larger than `--max-cells`, so the cap sets the longest sequence a region can hold. Raise it,
@@ -1254,6 +1268,13 @@ its check, after renaming it to `<out_gbz>.failed`.
   vg gbwt -G g.gref.gfa --gbz-format -g chr1.realigned.gref.gbz
   ```
 
+- abPOA reserves address space for the whole matrix of each alignment, banded or not: about 120 GB
+  for a 58.7 kb centre and a 103.2 kb allele. macOS grants it and only the pages touched take memory.
+  Linux's default overcommit policy refuses a single reservation larger than its RAM and swap, which
+  should make abPOA fail and the region `aligner_failed`, so on a smaller Linux machine the regions
+  that need a band may not realign. This follows from abPOA's allocation code, and has not been
+  tested on Linux. `realign`'s summary counts the `aligner_failed` regions, and each one's `message`
+  says what abPOA reported.
 - On the command line, `realign` and `qc` align with abPOA only. Another aligner needs the Python
   API and an `msas.jsonl.gz` written with `realign.write_msas`.
 - `qc`'s pairwise alignments have no time limit: `realign`'s `--timeout` does not apply to them.

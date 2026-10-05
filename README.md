@@ -170,6 +170,10 @@ for name, row in msa.rows.items():                      # one gapped row per all
   rebuild it once verify has passed.
 - run takes a stage as done when its output exists, whatever options made it: after changing an
   option, delete the outputs of that stage and of every stage after it.
+- abPOA reserves address space for the whole matrix of every alignment, even a banded one: over
+  100 GB for two 100 kb alleles. macOS grants it; on Linux, a reservation larger than RAM and swap
+  should be refused, and the region left as it was (`aligner_failed`). This is untested on Linux
+  ([docs/reference.md](docs/reference.md#limits)).
 
 ## Documentation
 

@@ -3,16 +3,22 @@
 `realign_package` aligns one package from extract.py; `run` aligns a whole packages.jsonl.gz in
 parallel and writes msas.jsonl.gz.
 
-**Limits.** abPOA's alignment of two sequences fills a matrix of cells, one per pair of their bases, at
-about 15 bytes each. An alignment to the centre whose matrix would exceed `max_cells` cells is banded
+**Limits.** abPOA's alignment of two sequences works in a matrix of cells, one per pair of their bases.
+It reserves 20 bytes of address space per cell, five matrices of 4-byte scores, banded or not, and an
+unbanded alignment touches nearly all of it: about 18 bytes per cell measured, so `max_cells` cells
+take about 8 GB. An alignment to the centre whose matrix would exceed `max_cells` cells is banded
 instead: abPOA then fills only a band around its best path, adaptive in width (about 10 cells plus 1%
-of the sequence's length on either side). A region the star cannot be built for keeps its old
+of the sequence's length on either side). Its memory is then set by the centre's length, not by the
+band: each base of the centre touches at least one page of each of the five matrices, about 80 KB per
+base with 16 KB pages (macOS on Apple silicon), and about twice that where the two lengths differ by
+tens of kb (docs/reference.md#limits). A region the star cannot be built for keeps its old
 alignment, and replace leaves it as it is. Its status says why:
 - `too_big`: even a banded alignment of the region's longest allele or fragment would exceed
   `max_cells` cells (with the default, sequences longer than about 150 kb), or its alleles hold more
   than MAX_TOTAL_BP bases in all, the bound on what choosing the centre holds in memory.
 - `timeout`: the region ran longer than `timeout` seconds.
-- `aligner_failed`: abPOA exited with an error or returned the wrong rows.
+- `aligner_failed`: abPOA exited with an error or returned the wrong rows, as when the system refuses
+  its reservation of address space.
 - `no_alleles`: no walk spans the region.
 - `error`: any other failure, with its message; it means a bug.
 

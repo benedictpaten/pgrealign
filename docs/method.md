@@ -340,9 +340,12 @@ extract's packages.
 Every alignment is computed by abPOA, a partial-order aligner, under the scores below, run as
 `abpoa -m 0 -r 1`: globally, from end to end of every sequence, writing the alignment's rows. To
 align two sequences abPOA fills a dynamic-programming matrix of one cell per pair of positions, one
-from each sequence, at about 15 bytes per cell. A band limits it to the cells near the alignment's
+from each sequence, at about 18 bytes per cell. A band limits it to the cells near the alignment's
 path. abPOA's own band is adaptive, reaching about 10 cells plus 1% of the sequence's length either
-side of the path, and `-b -1` turns it off. The aligner is told, for each alignment, whether a band
+side of the path, and `-b -1` turns it off. A band saves time, but less memory than its cells
+suggest: abPOA reserves the whole matrix either way, and a banded alignment still touches at least
+one page per base of the centre in each of its five score matrices
+([limits](reference.md#limits)). The aligner is told, for each alignment, whether a band
 is wanted: alignments to the centre are unbanded unless too large, and alignments of inserted
 sequences to one another are banded, as the sections below say.
 
