@@ -1,17 +1,26 @@
-"""Stage 6, `verify`: the realigned graph spells exactly what the original did.
+"""Stage 6, `verify`: every path of the realigned graph spells exactly what it spelled before.
 
-The check compares two GBZs (or GFAs):
-- The path metadata (`vg paths -M`) must be identical.
-- Every path's full sequence (`vg paths -F`) must have the same length and MD5.
-- The graph sizes before and after are reported.
+`replace` gives every run through a replaced region new steps, and under its default dense numbering
+every walk's node ids change, so walks cannot be compared step by step. `verify` compares two graphs
+(GBZ or GFA) by what their paths spell and how they are named:
+- The path metadata (`vg paths -M`: name, sense, sample, haplotype, locus, phase block and subrange)
+  must be identical.
+- Every path's sequence (`vg paths -F`), upper-cased, must have the same length and MD5 in both.
+- The node and edge counts and sequence length of both graphs (`vg stats -lz`) are reported.
 
-`replace` already checks every run it rewrites, and walks outside the regions are copied unchanged.
-So this is the end-to-end confirmation, and it streams every base of every path once per graph.
+The report counts the paths missing from `after`, the paths extra in it, and the paths in both whose
+sequences differ (`paths_missing`, `paths_extra`, `paths_differ`), and names up to SHOW of each, the
+first in sorted order. It is `ok` when the metadata is identical and all three counts are 0.
+
+`replace` checks each run as it rewrites it. This is the end-to-end check, on the GBZ built from its
+output, and it streams every base of every path once per graph.
 """
 import hashlib
 import subprocess
 
 from .graph import find_vg
+
+SHOW = 20
 
 
 def path_digests(graph, vg=None):
@@ -46,14 +55,16 @@ def stats(graph, vg=None):
 
 
 def verify(before, after, vg=None):
+    """The report described in the module docstring, for `after` against `before`."""
     res = {'before': stats(before, vg), 'after': stats(after, vg)}
     res['metadata_identical'] = metadata(before, vg) == metadata(after, vg)
     a, b = path_digests(before, vg), path_digests(after, vg)
     res['paths'] = len(a)
-    res['paths_missing'] = sorted(set(a) - set(b))[:20]
-    res['paths_extra'] = sorted(set(b) - set(a))[:20]
-    res['paths_differ'] = sorted(k for k in set(a) & set(b) if a[k] != b[k])[:20]
     res['bases'] = sum(v[0] for v in a.values())
-    res['ok'] = (res['metadata_identical'] and not res['paths_missing'] and not res['paths_extra']
-                 and not res['paths_differ'])
+    diff = {'missing': set(a) - set(b), 'extra': set(b) - set(a),
+            'differ': {k for k in set(a) & set(b) if a[k] != b[k]}}
+    for kind, names in diff.items():
+        res['paths_' + kind] = len(names)
+        res['paths_%s_names' % kind] = sorted(names)[:SHOW]
+    res['ok'] = res['metadata_identical'] and not any(diff.values())
     return res
