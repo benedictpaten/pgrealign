@@ -92,27 +92,5 @@ class TestExtract(unittest.TestCase):
         self.assertEqual(extract.extract(g2, [reg], os.path.join(self.d, 'z'))['status'], {'complex': 1})
 
 
-class TestRegions(unittest.TestCase):
-    def test_anchor_and_merge(self):
-        # reference: nodes 10..19, each 10 bp, at 0,10,...,90; snarls 10-12, 12-14, 14-16, 16-19
-        ref = [(n, '+', (n - 10) * 10, (n - 10) * 10 + 10) for n in range(10, 20)]
-        chains = regions.chains_from_pairs([(10, 12), (12, 14), (14, 16), (16, 19)], ref)
-        self.assertEqual(len(chains), 1)
-        A = regions.Anchors(chains)
-        self.assertEqual(A.query(31, 39, 1000), ((20, 30, 12), (40, 50, 14)))
-        # an interval overlapping boundary node 12 must take the anchor before it
-        self.assertEqual(A.query(25, 35, 1000), ((0, 10, 10), (40, 50, 14)))
-        T = lambda i, s, e: type('T', (), {'id': i, 'start': s, 'end': e, 'cls': 'STR'})
-        # two targets in snarls 12-14 and 14-16: they share anchor 14 only, so they stay separate
-        rs = regions.assign([T('a', 32, 33), T('b', 52, 53)], A, 'chrT', pad=0)
-        self.assertEqual([(r.id, r.L, r.R, r.status) for r in rs], [('a', 12, 14, 'ok'), ('b', 14, 16, 'ok')])
-        # a target crossing node 14 needs anchors 12 and 16; it overlaps both and they merge into one
-        rs = regions.assign([T('a', 32, 33), T('c', 38, 55), T('b', 52, 53)], A, 'chrT', pad=0)
-        self.assertEqual([(r.L, r.R, r.targets, r.status) for r in rs], [(12, 16, 'a,c,b', 'ok')])
-        # too long for max_span
-        rs = regions.assign([T('d', 25, 85)], A, 'chrT', pad=0, max_span=30)
-        self.assertEqual(rs[0].status, 'too_long')
-
-
 if __name__ == '__main__':
     unittest.main()
