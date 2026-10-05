@@ -42,12 +42,12 @@ class AnchorError(RuntimeError):
 
 def snarl_pairs(snarls_pb, vg=None):
     """(start node, end node) of every snarl in a vg snarls file, via `vg view -Rj`."""
-    p = subprocess.Popen([find_vg(vg), 'view', '-Rj', snarls_pb], stdout=subprocess.PIPE, text=True,
-                         bufsize=1 << 20)
-    for line in p.stdout:
-        s = json.loads(line)
-        yield int(s['start']['node_id']), int(s['end']['node_id'])
-    if p.wait():
+    with subprocess.Popen([find_vg(vg), 'view', '-Rj', snarls_pb], stdout=subprocess.PIPE, text=True,
+                          bufsize=1 << 20) as p:
+        for line in p.stdout:
+            s = json.loads(line)
+            yield int(s['start']['node_id']), int(s['end']['node_id'])
+    if p.returncode:
         raise RuntimeError('vg view -Rj %s failed' % snarls_pb)
 
 
@@ -207,3 +207,20 @@ def read_regions(path):
 
 def targets_of(catalog_path, contig):
     return [t for t in catalog.read_catalog(catalog_path) if t.chrom == contig]
+
+
+def build(targets, contig, snarls, ref, out, vg=None, pad=200, max_span=100000):
+    """The regions stage: anchor `targets` (a catalogue or BED) on `contig`'s snarls and write `out`.
+    `snarls` and `ref` are prepare's <contig>.snarls.pb and <contig>.ref.tsv.gz. Returns a summary."""
+    import collections
+    from .prepare import read_ref_index
+    index = read_ref_index(ref)
+    chains = chains_from_pairs(snarl_pairs(snarls, vg), index)
+    ts = targets_of(targets, contig)
+    rs = assign(ts, Anchors(chains), contig, pad=pad, max_span=max_span,
+                contig_length=index[-1][3] if index else None)
+    write_regions(rs, out)
+    return {'targets': len(ts), 'chains': len(chains), 'regions': len(rs),
+            'status': dict(collections.Counter(r.status for r in rs)),
+            'merged_targets': sum(len(r.targets.split(',')) for r in rs if r.status == 'ok'),
+            'span_bp_ok': sum(r.span for r in rs if r.status == 'ok')}

@@ -33,19 +33,9 @@ def cmd_prepare(a):
 
 
 def cmd_regions(a):
-    import collections
-    from . import prepare, provenance, regions
-    ref = prepare.read_ref_index(a.ref)
-    chains = regions.chains_from_pairs(regions.snarl_pairs(a.snarls, a.vg), ref)
-    A = regions.Anchors(chains)
-    targets = regions.targets_of(a.targets, a.contig)
-    rs = regions.assign(targets, A, a.contig, pad=a.pad, max_span=a.max_span,
-                        contig_length=ref[-1][3] if ref else None)
-    regions.write_regions(rs, a.out)
-    summary = {'targets': len(targets), 'chains': len(chains), 'regions': len(rs),
-               'status': dict(collections.Counter(r.status for r in rs)),
-               'merged_targets': sum(len(r.targets.split(',')) for r in rs if r.status == 'ok'),
-               'span_bp_ok': sum(r.span for r in rs if r.status == 'ok')}
+    from . import provenance, regions
+    summary = regions.build(a.targets, a.contig, a.snarls, a.ref, a.out, vg=a.vg, pad=a.pad,
+                            max_span=a.max_span)
     provenance.write_manifest(a.out, 'regions', {'targets': a.targets, 'snarls': a.snarls, 'ref': a.ref},
                               {'contig': a.contig, 'pad': a.pad, 'max_span': a.max_span}, tools=['vg'],
                               extra={'summary': summary})
@@ -56,41 +46,70 @@ def cmd_regions(a):
 def cmd_extract(a):
     from . import extract, provenance, regions
     rs = list(regions.read_regions(a.regions))
-    summary = extract.extract(a.graph, rs, a.out, vg=a.vg, threads=a.threads)
+    summary = extract.extract(a.graph, rs, a.out, vg=a.vg, threads=a.threads, ref_sample=a.ref_sample)
     provenance.write_manifest(os.path.join(a.out, 'extract'), 'extract',
-                              {'graph': a.graph, 'regions': a.regions}, {}, tools=['vg'],
+                              {'graph': a.graph, 'regions': a.regions}, {'ref_sample': a.ref_sample}, tools=['vg'],
                               extra={'summary': summary})
     json.dump(summary, sys.stdout, indent=1)
     print()
 
 
 def cmd_realign(a):
-    from . import provenance, realign
+    from . import provenance, realign, star
     i, n = (int(x) for x in a.shard.split('/'))
-    scores = tuple(a.scores.split()) if a.scores is not None else realign.SCORES
+    scores = star.Scores.parse(a.scores) if a.scores is not None else star.SCORES
     summary = realign.run(a.packages, a.out, select=a.select, shard=(i, n), jobs=a.jobs, abpoa=a.abpoa,
                           timeout=a.timeout, max_cells=a.max_cells, scores=scores)
     provenance.write_manifest(a.out, 'realign', {'packages': a.packages},
                               {'select': a.select, 'shard': a.shard, 'timeout': a.timeout,
-                               'max_cells': a.max_cells, 'method': 'medoid_star', 'scores': ' '.join(scores)},
+                               'max_cells': a.max_cells, 'method': 'medoid_star', 'scores': ' '.join(scores.flags())},
+                              tools=[a.abpoa], extra={'summary': summary})
+    json.dump(summary, sys.stdout, indent=1)
+    print()
+
+
+def cmd_qc(a):
+    from . import provenance, qc, star
+    scores = star.Scores.parse(a.scores) if a.scores is not None else star.SCORES
+    summary = qc.run(a.extract, a.msas, a.out, pairs=a.pairs, refs=a.refs, sample=a.sample, jobs=a.jobs,
+                     abpoa=a.abpoa, scores=scores, ref_sample=a.ref_sample)
+    provenance.write_manifest(a.out, 'qc', {'msas': a.msas}, {'extract': a.extract, 'pairs': a.pairs,
+                              'refs': a.refs, 'sample': a.sample, 'scores': ' '.join(scores.flags())},
                               tools=[a.abpoa], extra={'summary': summary})
     json.dump(summary, sys.stdout, indent=1)
     print()
 
 
 def cmd_replace(a):
-    import subprocess
     from . import provenance, replace
-    from .graph import find_vg
     summary = replace.replace(a.graph, a.extract, a.msas, a.out, a.id_start, vg=a.vg, threads=a.threads,
                               id_mode=a.id_mode)
     if a.gbz:
-        subprocess.run([find_vg(a.vg), 'gbwt', '-G', a.out, '--gbz-format', '-g', a.gbz], check=True)
-        if not a.keep_gfa:
-            os.remove(a.out)
+        replace.to_gbz(a.out, a.gbz, vg=a.vg, keep_gfa=a.keep_gfa)
         summary['gbz'] = a.gbz
     provenance.write_manifest(a.gbz or a.out, 'replace', {'graph': a.graph, 'msas': a.msas},
                               {'id_start': a.id_start}, tools=['vg'], extra={'summary': summary})
+    json.dump(summary, sys.stdout, indent=1)
+    print()
+
+
+def cmd_run(a):
+    from . import pipeline, star
+    scores = star.Scores.parse(a.scores) if a.scores is not None else star.SCORES
+    drop = a.drop_sample if a.drop_sample is not None else ['gref_CHM13']
+    summary = pipeline.run_contig(a.gbz, a.contig, a.targets, a.out, jobs=a.jobs, threads=a.threads, vg=a.vg,
+                                  abpoa=a.abpoa, ref_sample=a.ref_sample, drop_samples=drop, scores=scores,
+                                  timeout=a.timeout, max_cells=a.max_cells, id_start=a.id_start, do_qc=not a.no_qc,
+                                  log=lambda m: print(m, file=sys.stderr))
+    json.dump(summary, sys.stdout, indent=1)
+    print()
+
+
+def cmd_merge(a):
+    from . import merge, provenance
+    summary = merge.merge(a.gbz, a.out, vg=a.vg)
+    provenance.write_manifest(a.out, 'merge', {'gbz_%d' % i: g for i, g in enumerate(a.gbz)}, {}, tools=['vg'],
+                              extra={'summary': summary})
     json.dump(summary, sys.stdout, indent=1)
     print()
 
@@ -125,6 +144,7 @@ def cmd_verify(a):
 
 
 def main(argv=None):
+    from .star import SCORES as star_scores
     p = argparse.ArgumentParser(prog='pgrealign', description=__doc__)
     p.add_argument('--version', action='version', version='pgrealign ' + __version__)
     sub = p.add_subparsers(dest='stage', required=True)
@@ -169,6 +189,7 @@ def main(argv=None):
     c.add_argument('--graph', required=True, help='<contig>.gbz from prepare, or a GFA')
     c.add_argument('--regions', required=True)
     c.add_argument('-o', '--out', required=True, help='output directory')
+    c.add_argument('--ref-sample', default='CHM13', help='the reference sample, whose allele each package names [CHM13]')
     c.add_argument('--vg', help='vg binary [vg on PATH]')
     c.add_argument('-t', '--threads', type=int, default=4)
     c.set_defaults(func=cmd_extract)
@@ -184,9 +205,24 @@ def main(argv=None):
     c.add_argument('--timeout', type=float, default=900, help='seconds per region [900]')
     c.add_argument('--max-cells', type=int, default=450_000_000,
                    help='keep a region whose centre x longest allele exceeds this [450,000,000]')
-    c.add_argument('--scores', help="abPOA scoring flags for every alignment, e.g. '-X 6'; '' for abPOA's "
-                   "defaults [realign.SCORES]")
+    c.add_argument('--scores', metavar='FLAGS',
+                   help="abPOA's scores for every alignment, as its flags -M, -X, -O and -E; a flag left out "
+                        "takes abPOA's default, so '' gives abPOA's defaults [%s]" % ' '.join(star_scores.flags()))
     c.set_defaults(func=cmd_realign)
+
+    c = sub.add_parser('qc', help="how well each region's alignment agrees with the pairwise alignments it implies")
+    c.add_argument('--extract', required=True, help='the extract output directory')
+    c.add_argument('--msas', required=True, help='msas.jsonl.gz from realign')
+    c.add_argument('-o', '--out', required=True, help='per-region TSV; the summary goes to OUT.json')
+    c.add_argument('--pairs', type=int, default=20, help='random allele pairs per region [20]')
+    c.add_argument('--refs', type=int, default=20, help='heaviest alleles compared with the reference allele [20]')
+    c.add_argument('--sample', type=int, help='measure this many random regions rather than all')
+    c.add_argument('--ref-sample', default='CHM13', help='the reference sample, for packages that do not name it [CHM13]')
+    c.add_argument('--scores', metavar='FLAGS', help="abPOA's scores for the optimal pairwise alignments, as for realign; "
+                   "use the scores the alignment was built with [the realign default]")
+    c.add_argument('-j', '--jobs', type=int, default=1)
+    c.add_argument('--abpoa', default='abpoa')
+    c.set_defaults(func=cmd_qc)
 
     c = sub.add_parser('replace', help="splice the realigned regions into the contig's graph (stage 5)")
     c.add_argument('--graph', required=True, help='<contig>.gbz from prepare, or a GFA')
@@ -196,12 +232,38 @@ def main(argv=None):
     c.add_argument('--id-mode', choices=['dense', 'reuse'], default='dense',
                    help="'dense' renumbers every node, new ones next to their regions; 'reuse' keeps old ids "
                         "and puts overflow at --id-start [dense]")
-    c.add_argument('--id-start', type=int, help="with --id-mode reuse: first id for overflow nodes")
+    c.add_argument('--id-start', type=int, help="dense: the first id [the contig's smallest id]; reuse: the first "
+                   "id for new nodes that the region's freed ids do not cover (required)")
     c.add_argument('--gbz', help='also build this GBZ from the output GFA (vg gbwt -G)')
     c.add_argument('--keep-gfa', action='store_true', help='keep the GFA after --gbz')
     c.add_argument('--vg', help='vg binary [vg on PATH]')
     c.add_argument('-t', '--threads', type=int, default=4)
     c.set_defaults(func=cmd_replace)
+
+    c = sub.add_parser('run', help='every stage for one contig, resuming where an earlier run stopped')
+    c.add_argument('--gbz', required=True, help='whole-genome GBZ')
+    c.add_argument('--contig', required=True)
+    c.add_argument('--targets', required=True, help='catalogue or BED of target intervals')
+    c.add_argument('-o', '--out', required=True, help='output directory; the contig goes in OUT/CONTIG')
+    c.add_argument('-j', '--jobs', type=int, default=1, help='parallel regions in realign and qc [1]')
+    c.add_argument('-t', '--threads', type=int, default=4, help='threads for vg [4]')
+    c.add_argument('--ref-sample', default='CHM13')
+    c.add_argument('--drop-sample', action='append', default=None,
+                   help='sample to remove before realigning (repeatable) [gref_CHM13]')
+    c.add_argument('--scores', metavar='FLAGS', help="abPOA's scores, as for realign")
+    c.add_argument('--timeout', type=float, default=900, help='seconds per region [900]')
+    c.add_argument('--max-cells', type=int, default=450_000_000, help='as for realign [450,000,000]')
+    c.add_argument('--id-start', type=int, help="replace's first node id [the contig's smallest id]")
+    c.add_argument('--no-qc', action='store_true', help='skip the qc stage')
+    c.add_argument('--abpoa', default='abpoa')
+    c.add_argument('--vg', help='vg binary [vg on PATH]')
+    c.set_defaults(func=cmd_run)
+
+    c = sub.add_parser('merge', help='one whole-genome GBZ from per-contig GBZs whose node ids do not overlap')
+    c.add_argument('gbz', nargs='+', help='the per-contig GBZs: realigned contigs and the parts left as they are')
+    c.add_argument('-o', '--out', required=True, help='the merged GBZ')
+    c.add_argument('--vg', help='vg binary [vg on PATH]')
+    c.set_defaults(func=cmd_merge)
 
     c = sub.add_parser('union', help="merge a panel's packages with a target graph's, region by region")
     c.add_argument('--base', required=True, help="the panel graph's packages.jsonl.gz")

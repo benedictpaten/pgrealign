@@ -18,19 +18,19 @@ def path_digests(graph, vg=None):
     """{path name: (length, md5)} from `vg paths -F`."""
     vg = find_vg(vg)
     out, name, h, n = {}, None, None, 0
-    p = subprocess.Popen([vg, 'paths', '-F', '-x', graph], stdout=subprocess.PIPE, bufsize=1 << 20)
-    for line in p.stdout:
-        if line.startswith(b'>'):
-            if name is not None:
-                out[name] = (n, h.hexdigest())
-            name, h, n = line[1:].split()[0].decode(), hashlib.md5(), 0
-        else:
-            s = line.strip().upper()
-            h.update(s)
-            n += len(s)
-    if name is not None:
-        out[name] = (n, h.hexdigest())
-    if p.wait():
+    with subprocess.Popen([vg, 'paths', '-F', '-x', graph], stdout=subprocess.PIPE, bufsize=1 << 20) as p:
+        for line in p.stdout:
+            if line.startswith(b'>'):
+                if name is not None:
+                    out[name] = (n, h.hexdigest())
+                name, h, n = line[1:].split()[0].decode(), hashlib.md5(), 0
+            else:
+                s = line.strip().upper()
+                h.update(s)
+                n += len(s)
+        if name is not None:
+            out[name] = (n, h.hexdigest())
+    if p.returncode:
         raise RuntimeError('vg paths -F %s failed' % graph)
     return out
 

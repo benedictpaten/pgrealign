@@ -19,7 +19,7 @@ import json
 import os
 
 from .extract import read_packages
-from .realign import drop_gap_columns
+from .star import drop_gap_columns
 
 
 def union_packages(base_path, add_path, out_path):

@@ -54,9 +54,10 @@ def spell(steps, seq):
 
 class RegionRuns:
     """Everything one region collects during the pass."""
-    __slots__ = ('alleles', 'fragments', 'interior', 'complex', 'n_runs')
+    __slots__ = ('alleles', 'fragments', 'interior', 'complex', 'n_runs', 'ref')
 
     def __init__(self):
+        self.ref = None         # the allele the reference sample's walk spells
         self.alleles = {}       # sequence -> [id, weight]
         self.fragments = {}     # (type, sequence) -> [id, weight]
         self.interior = set()
@@ -114,8 +115,9 @@ def runs_of_walk(toks, occ):
         yield ('suffix', '+' if state == 'fwd' else '-', s + 1, len(toks))
 
 
-def extract(graph, regions, out_dir, vg=None, threads=4, max_internal_bp=200000):
-    """Run the pass over `graph` (a GBZ or GFA) for `regions` (regions.Region with status 'ok')."""
+def extract(graph, regions, out_dir, vg=None, threads=4, max_internal_bp=200000, ref_sample='CHM13'):
+    """Run the pass over `graph` (a GBZ or GFA) for `regions` (regions.Region with status 'ok'). A package's
+    `ref` is the allele that a walk of `ref_sample` spells, or null."""
     os.makedirs(out_dir, exist_ok=True)
     regs = {r.id: r for r in regions if r.status == 'ok'}
     anchor_of = collections.defaultdict(list)     # node -> [(region id, 'L'|'R')]
@@ -162,6 +164,8 @@ def extract(graph, regions, out_dir, vg=None, threads=4, max_internal_bp=200000)
                     s = spell(steps if orient == '+' else flip(steps), seq)
                     if typ == 'spanning':
                         mid = _member(rr.alleles, s, 'a')
+                        if w.sample == ref_sample:
+                            rr.ref = mid
                     else:
                         mid = _member(rr.fragments, (side_of(typ, orient), s), 'f')
                     rr.n_runs[typ] += 1
@@ -204,7 +208,7 @@ def extract(graph, regions, out_dir, vg=None, threads=4, max_internal_bp=200000)
             status[st] += 1
             pkg = {'id': rid, 'contig': r.contig, 'L': r.L, 'R': r.R, 'ref_start': r.ref_start,
                    'ref_end': r.ref_end, 'targets': r.targets, 'classes': r.classes, 'status': st,
-                   'n_runs': dict(rr.n_runs), 'complex': rr.complex[:20],
+                   'n_runs': dict(rr.n_runs), 'complex': rr.complex[:20], 'ref': rr.ref,
                    'alleles': [{'id': v[0], 'weight': v[1], 'seq': s} for s, v in rr.alleles.items()],
                    'fragments': [{'id': v[0], 'weight': v[1], 'side': k[0], 'seq': k[1]}
                                  for k, v in rr.fragments.items()]}

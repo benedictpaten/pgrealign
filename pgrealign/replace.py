@@ -11,11 +11,12 @@ subgraph.
 **What changes, per replaced region R (anchors L and R stay):**
 - **Nodes.** The interior nodes are removed, and the MSA's induced graph (induce.py) is added.
   - By default ('dense') every node is renumbered: old nodes keep their order, each region's new nodes
-    follow its left anchor, and ids run densely from the contig's smallest id. The ids then no
-    longer match the input, and contigs need a global renumbering before they are merged.
+    follow its left anchor, and ids run densely from `id_start`, or from the contig's smallest id. The
+    ids then no longer match the input. merge needs every contig's ids to stay clear of every other
+    contig's; the summary's `id_range` says where this contig's ids ended up.
   - With 'reuse', old nodes keep their ids, and new nodes take the region's freed ids, then ids from
-    `id_start`. That range must be free in the whole genome. On chr20 it put 182,106 nodes far from
-    their regions, and vg call's id-windowed read fetches slowed about 8x.
+    `id_start`. That range must be free in the whole genome. New nodes can then land far from their
+    regions, which slows tools that read the graph in windows of node ids, such as vg call.
 - **Edges.** Edges touching a removed node are dropped. The induced graph's edges are added, plus
   the edges to the anchors: L->first for an allele or a left fragment, last->R for an allele or a
   right fragment, and L->R for an empty allele.
@@ -101,8 +102,9 @@ def old_node_ids(graph, vg=None, threads=4):
 def replace(graph, extract_dir, msas_path, out_gfa, id_start=None, vg=None, threads=4, id_mode='dense'):
     """Write the contig with every planned region's interior replaced. `id_mode`:
     - 'dense' (default): every node is renumbered, in the order of the old ids, with each region's new
-      nodes placed right after its left anchor, from the contig's smallest id. A region's nodes stay
-      next to its neighbours, which keeps id-windowed readers (vg call's read windows) local.
+      nodes placed right after its left anchor, from `id_start` or else the contig's smallest id. A
+      region's nodes stay next to its neighbours, which keeps id-windowed readers (vg call's read
+      windows) local.
     - 'reuse': old nodes keep their ids; new ones take the region's freed ids, then ids from `id_start`.
       Ids stay stable, but on chr20 182,106 new nodes landed far from their regions, which made vg call's
       read fetches straddle windows (a 54-minute short-read call instead of 6)."""
@@ -160,7 +162,8 @@ def replace(graph, extract_dir, msas_path, out_gfa, id_start=None, vg=None, thre
     M = {}
     if id_mode == 'dense':
         old = sorted(old_node_ids(graph, vg, threads))
-        k = old[0] if old else 1
+        k = id_start if id_start is not None else (old[0] if old else 1)
+        first = k
         kept = 0
         for n in old:
             if n in removed:
@@ -173,7 +176,7 @@ def replace(graph, extract_dir, msas_path, out_gfa, id_start=None, vg=None, thre
                 k += 1
         if after_anchor:
             raise ValueError('%d left anchors are not nodes of the graph' % len(after_anchor))
-        stats['id_range'] = [old[0] if old else 1, k - 1]
+        stats['id_range'] = [first, k - 1]
         mp = M.__getitem__
     else:
         next_id = id_start
@@ -283,3 +286,13 @@ def replace(graph, extract_dir, msas_path, out_gfa, id_start=None, vg=None, thre
     os.replace(out_gfa + '.tmp', out_gfa)
     stats['id_mode'] = id_mode
     return dict(stats)
+
+
+def to_gbz(gfa, gbz, vg=None, keep_gfa=False):
+    """Build `gbz` from replace's GFA with `vg gbwt -G`, then remove the GFA unless `keep_gfa`."""
+    import subprocess
+    from .graph import find_vg
+    subprocess.run([find_vg(vg), 'gbwt', '-G', gfa, '--gbz-format', '-g', gbz + '.tmp'], check=True)
+    os.replace(gbz + '.tmp', gbz)
+    if not keep_gfa:
+        os.remove(gfa)

@@ -60,24 +60,24 @@ def write_ref_index(vg, gbz, ref_sample, contig, out, tmp, threads):
     """The reference walk with node positions, from `vg convert -f -H` (no haplotype paths, so it does
     not stream every haplotype)."""
     lens, walk, start = {}, None, 0
-    p = subprocess.Popen([vg, 'convert', '-f', '-H', '-t', str(threads), gbz], stdout=subprocess.PIPE,
-                         text=True, bufsize=1 << 20)
-    for line in p.stdout:
-        t = line[0]
-        if t == 'S':
-            x = line.split('\t', 3)
-            lens[int(x[1])] = len(x[2].rstrip('\n'))
-        elif t == 'W':
-            x = line.rstrip('\n').split('\t')
-            if x[1] == ref_sample and x[3] == contig:
-                if walk is not None:
-                    raise RuntimeError('more than one %s W line for %s' % (ref_sample, contig))
-                walk, start = x[6], int(x[4])
-        elif t == 'P':
-            x = line.rstrip('\n').split('\t')
-            if x[1] in ('%s#0#%s' % (ref_sample, contig), '%s#%s' % (ref_sample, contig)):
-                walk = ''.join(('>' if s[-1] == '+' else '<') + s[:-1] for s in x[2].split(','))
-    if p.wait():
+    with subprocess.Popen([vg, 'convert', '-f', '-H', '-t', str(threads), gbz], stdout=subprocess.PIPE,
+                          text=True, bufsize=1 << 20) as p:
+        for line in p.stdout:
+            t = line[0]
+            if t == 'S':
+                x = line.split('\t', 3)
+                lens[int(x[1])] = len(x[2].rstrip('\n'))
+            elif t == 'W':
+                x = line.rstrip('\n').split('\t')
+                if x[1] == ref_sample and x[3] == contig:
+                    if walk is not None:
+                        raise RuntimeError('more than one %s W line for %s' % (ref_sample, contig))
+                    walk, start = x[6], int(x[4])
+            elif t == 'P':
+                x = line.rstrip('\n').split('\t')
+                if x[1] in ('%s#0#%s' % (ref_sample, contig), '%s#%s' % (ref_sample, contig)):
+                    walk = ''.join(('>' if s[-1] == '+' else '<') + s[:-1] for s in x[2].split(','))
+    if p.returncode:
         raise RuntimeError('vg convert -f -H %s failed' % gbz)
     if walk is None:
         raise RuntimeError('no %s path for %s in %s' % (ref_sample, contig, gbz))

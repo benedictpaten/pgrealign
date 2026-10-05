@@ -82,11 +82,11 @@ class TestPipeline(unittest.TestCase):
                          [('internal', 1), ('left', 1), ('right', 2)])
         res = realign.realign_package(pk)
         self.assertEqual(res['status'], 'ok', res)
-        realign.write_jsonl(os.path.join(d, 'msas.jsonl.gz'), [res])
+        realign.write_msas(os.path.join(d, 'msas.jsonl.gz'), [res])
         seq0, _, walks0 = read_gfa(g)
-        for mode in ('reuse', 'dense'):
+        for mode, start in (('reuse', 1000), ('dense', None), ('dense', 500)):
             out = os.path.join(d, 'out.%s.gfa' % mode)
-            st = replace.replace(g, os.path.join(d, 'x'), os.path.join(d, 'msas.jsonl.gz'), out, id_start=1000,
+            st = replace.replace(g, os.path.join(d, 'x'), os.path.join(d, 'msas.jsonl.gz'), out, id_start=start,
                                  id_mode=mode)
             self.assertEqual(st['regions'], 1)
             seq1, edges1, walks1 = read_gfa(out)
@@ -102,11 +102,14 @@ class TestPipeline(unittest.TestCase):
                 for n in (0, 1, 9, 10):
                     self.assertEqual(seq1[n], S[n])
             else:
-                # ids run densely from the smallest old id, and every edge goes forward except at the
-                # reverse-walk flanks, which keep their order
-                self.assertEqual(sorted(seq1), list(range(min(S), min(S) + len(seq1))))
+                # ids run densely from id_start, or else the smallest old id, and every edge goes forward
+                # except at the reverse-walk flanks, which keep their order
+                first = min(S) if start is None else start
+                self.assertEqual(sorted(seq1), list(range(first, first + len(seq1))))
+                self.assertEqual(st['id_range'], [first, first + len(seq1) - 1])
                 ref = walks1['CHM13#0']
                 self.assertEqual([n for _, n in ref], sorted(n for _, n in ref))
+
 
 if __name__ == '__main__':
     unittest.main()
