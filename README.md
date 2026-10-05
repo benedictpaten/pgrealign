@@ -215,4 +215,4 @@ tests/            unit and end-to-end tests
 
 ## Licence
 
-The licence is not yet chosen.
+MIT; see [LICENSE](LICENSE).

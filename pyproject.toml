@@ -7,6 +7,7 @@ name = "pgrealign"
 version = "0.2.0"
 description = "Realign regions of a pangenome graph: extract each region's haplotypes, realign them, and splice the new alignment back in"
 readme = "README.md"
+license = {text = "MIT"}
 requires-python = ">=3.9"
 dependencies = []
 

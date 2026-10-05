@@ -1,34 +1,34 @@
 {
  "command": [
-  "/Users/benedictpaten/PycharmProjects/pgrealign/pgrealign/cli.py",
+  "pgrealign/cli.py",
   "catalog",
   "--repeatmasker",
-  "/Users/benedictpaten/PycharmProjects/vg-call-eval/data/chm13v2.0_RepeatMasker_4.1.2p1.2022Apr14.bed",
+  "chm13v2.0_RepeatMasker_4.1.2p1.2022Apr14.bed",
   "--reference",
-  "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr1/chr1.fa",
-  "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr2/chr2.fa",
-  "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr3/chr3.fa",
-  "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr4/chr4.fa",
-  "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr5/chr5.fa",
-  "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr6/chr6.fa",
-  "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr7/chr7.fa",
-  "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr8/chr8.fa",
-  "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr9/chr9.fa",
-  "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr10/chr10.fa",
-  "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr11/chr11.fa",
-  "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr12/chr12.fa",
-  "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr13/chr13.fa",
-  "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr14/chr14.fa",
-  "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr15/chr15.fa",
-  "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr16/chr16.fa",
-  "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr17/chr17.fa",
-  "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr18/chr18.fa",
-  "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr19/chr19.fa",
-  "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr20/chr20.fa",
-  "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr21/chr21.fa",
-  "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr22/chr22.fa",
-  "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chrX/chrX.fa",
-  "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chrY/chrY.fa",
+  "chr1.fa",
+  "chr2.fa",
+  "chr3.fa",
+  "chr4.fa",
+  "chr5.fa",
+  "chr6.fa",
+  "chr7.fa",
+  "chr8.fa",
+  "chr9.fa",
+  "chr10.fa",
+  "chr11.fa",
+  "chr12.fa",
+  "chr13.fa",
+  "chr14.fa",
+  "chr15.fa",
+  "chr16.fa",
+  "chr17.fa",
+  "chr18.fa",
+  "chr19.fa",
+  "chr20.fa",
+  "chr21.fa",
+  "chr22.fa",
+  "chrX.fa",
+  "chrY.fa",
   "--contigs",
   "chr1,chr2,chr3,chr4,chr5,chr6,chr7,chr8,chr9,chr10,chr11,chr12,chr13,chr14,chr15,chr16,chr17,chr18,chr19,chr20,chr21,chr22,chrX,chrY",
   "-j",
@@ -42,151 +42,151 @@
    "bytes": 251492176,
    "md5": "e0c91c1ccc9a8251efc4bd6d3e50c50a",
    "mtime": "2026-08-14T13:36:20-07:00",
-   "path": "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr1/chr1.fa"
+   "path": "chr1.fa"
   },
   "reference_1": {
    "bytes": 245730468,
    "md5": "c9238b2c2583d393a54ff4495f31cbda",
    "mtime": "2026-08-14T13:37:45-07:00",
-   "path": "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr2/chr2.fa"
+   "path": "chr2.fa"
   },
   "reference_10": {
    "bytes": 136816874,
    "md5": "ec244ed86392295d3669565f155dc6b3",
    "mtime": "2026-08-14T13:49:18-07:00",
-   "path": "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr11/chr11.fa"
+   "path": "chr11.fa"
   },
   "reference_11": {
    "bytes": 134991112,
    "md5": "315936289377ec8ed5392911802dbb94",
    "mtime": "2026-08-14T13:50:34-07:00",
-   "path": "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr12/chr12.fa"
+   "path": "chr12.fa"
   },
   "reference_12": {
    "bytes": 114986277,
    "md5": "696d0ebee227cbe06f71ed2ba8efaf57",
    "mtime": "2026-08-14T13:51:52-07:00",
-   "path": "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr13/chr13.fa"
+   "path": "chr13.fa"
   },
   "reference_13": {
    "bytes": 102426018,
    "md5": "d7ae4a6cd4d75c4d5477f7fb0386a9ea",
    "mtime": "2026-08-14T13:53:09-07:00",
-   "path": "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr14/chr14.fa"
+   "path": "chr14.fa"
   },
   "reference_14": {
    "bytes": 101000117,
    "md5": "191a2f4f313d26da9306296babf4a291",
    "mtime": "2026-08-14T13:54:25-07:00",
-   "path": "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr15/chr15.fa"
+   "path": "chr15.fa"
   },
   "reference_15": {
    "bytes": 97534511,
    "md5": "8cde04b2a5704a9c9b743f61800fcd1d",
    "mtime": "2026-08-14T13:55:40-07:00",
-   "path": "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr16/chr16.fa"
+   "path": "chr16.fa"
   },
   "reference_16": {
    "bytes": 85330366,
    "md5": "797cff4ed9be054ea5edd24eddd7cbd6",
    "mtime": "2026-08-14T13:56:54-07:00",
-   "path": "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr17/chr17.fa"
+   "path": "chr17.fa"
   },
   "reference_17": {
    "bytes": 81549327,
    "md5": "a1ef265f153a0273ec63a4fd3922df7c",
    "mtime": "2026-08-14T13:58:06-07:00",
-   "path": "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr18/chr18.fa"
+   "path": "chr18.fa"
   },
   "reference_18": {
    "bytes": 62478714,
    "md5": "6c888639a0a7d49d1d720a78bc4b4e45",
    "mtime": "2026-08-14T13:59:17-07:00",
-   "path": "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr19/chr19.fa"
+   "path": "chr19.fa"
   },
   "reference_19": {
    "bytes": 67037891,
    "md5": "ac76aa812eba8f86cb8f0f80649dea4b",
    "mtime": "2026-08-14T14:00:29-07:00",
-   "path": "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr20/chr20.fa"
+   "path": "chr20.fa"
   },
   "reference_2": {
    "bytes": 203619779,
    "md5": "d34a69c335b6e52c02ce020fd9a6378b",
    "mtime": "2026-08-14T13:39:02-07:00",
-   "path": "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr3/chr3.fa"
+   "path": "chr3.fa"
   },
   "reference_20": {
    "bytes": 45654323,
    "md5": "0a2bf4d88e74074a1b3ebb02163bd7ef",
    "mtime": "2026-08-14T13:29:44-07:00",
-   "path": "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr21/chr21.fa"
+   "path": "chr21.fa"
   },
   "reference_21": {
    "bytes": 51966495,
    "md5": "52d05bd09dc9a1244a904af0c36b1160",
    "mtime": "2026-08-14T14:01:43-07:00",
-   "path": "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr22/chr22.fa"
+   "path": "chr22.fa"
   },
   "reference_22": {
    "bytes": 156187817,
    "md5": "6580236bb871b926e9166d96dd754c34",
    "mtime": "2026-08-14T14:03:00-07:00",
-   "path": "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chrX/chrX.fa"
+   "path": "chrX.fa"
   },
   "reference_23": {
    "bytes": 58407841,
    "md5": "d0c90af88f3f3ca1adb174e562cf9210",
    "mtime": "2026-08-14T14:04:12-07:00",
-   "path": "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chrY/chrY.fa"
+   "path": "chrY.fa"
   },
   "reference_3": {
    "bytes": 195994638,
    "md5": "6433e46a97601fcd50c2ce7e15645495",
    "mtime": "2026-08-14T13:40:21-07:00",
-   "path": "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr4/chr4.fa"
+   "path": "chr4.fa"
   },
   "reference_4": {
    "bytes": 184321013,
    "md5": "99ecd6dc2ed90861c630f0a6db9aee27",
    "mtime": "2026-08-14T13:41:38-07:00",
-   "path": "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr5/chr5.fa"
+   "path": "chr5.fa"
   },
   "reference_5": {
    "bytes": 174278217,
    "md5": "0c3d3f0392ee84b55a83233f306e9938",
    "mtime": "2026-08-14T13:42:54-07:00",
-   "path": "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr6/chr6.fa"
+   "path": "chr6.fa"
   },
   "reference_6": {
    "bytes": 162574527,
    "md5": "418ce86029498b0c267d52ffea10040b",
    "mtime": "2026-08-14T13:44:12-07:00",
-   "path": "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr7/chr7.fa"
+   "path": "chr7.fa"
   },
   "reference_7": {
    "bytes": 148087579,
    "md5": "c3f6b25b8991bdfffea1059eec65e714",
    "mtime": "2026-08-14T13:45:27-07:00",
-   "path": "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr8/chr8.fa"
+   "path": "chr8.fa"
   },
   "reference_8": {
    "bytes": 152499969,
    "md5": "f722ae352da25338ca71727406b4f141",
    "mtime": "2026-08-14T13:46:45-07:00",
-   "path": "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr9/chr9.fa"
+   "path": "chr9.fa"
   },
   "reference_9": {
    "bytes": 136442618,
    "md5": "d4884ceacd9f5dc17bef3bb4b7c63f86",
    "mtime": "2026-08-14T13:48:02-07:00",
-   "path": "/Users/benedictpaten/PycharmProjects/vg-call-eval/work/wgs/chr10/chr10.fa"
+   "path": "chr10.fa"
   },
   "repeatmasker": {
    "bytes": 342862439,
    "md5": "a08290b83c8b2b20ff1b5e820bfa90e5",
    "mtime": "2026-08-19T08:22:09-07:00",
-   "path": "/Users/benedictpaten/PycharmProjects/vg-call-eval/data/chm13v2.0_RepeatMasker_4.1.2p1.2022Apr14.bed"
+   "path": "chm13v2.0_RepeatMasker_4.1.2p1.2022Apr14.bed"
   }
  },
  "params": {
