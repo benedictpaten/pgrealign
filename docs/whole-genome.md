@@ -102,6 +102,10 @@ Each stage also writes a manifest, a JSON record of its inputs, options and tool
 [run](reference.md#run) lists every file. At the end `run` prints a JSON summary to stdout, with
 `id_range`, the smallest and largest node id of `chr1.realigned.gbz`.
 
+`-j` can be the machine's number of cores. realign and qc start a region only while the memory
+estimates of the regions running fit within `--max-memory`, half the machine's physical memory by
+default ([Memory](#memory)).
+
 ### Options that run does not pass
 
 `run` lacks some stage options, such as regions' `--max-span` and realign's `--select`, and those
@@ -159,17 +163,20 @@ comm -13 ref-contigs.txt target-contigs.txt
 Contigs are independent until merge, so each contig's `run` can be a process of its own, on one
 machine or on several. Each writes only its own directory and, for abPOA's files, the system
 temporary directory; two runs of the same contig must not run at once. Within a contig, `-j` sets
-how many regions realign and qc work on at once, each in its own worker process, which runs abPOA
-once per alignment, and `-t` sets the threads given to `vg snarls` and to `vg convert`, which
-streams the graph in prepare, extract and replace. `vg chunk`, `vg gbwt`, `vg paths`, `vg stats` and
-`vg view` use vg's own default thread counts. Each contig's prepare loads the whole-genome GBZ, so
-memory as well as cores limits how many contigs one machine runs at once. This runs every contig in
-`contigs.txt`, four at a time:
+the most regions realign and qc work on at once, each in its own worker process, which runs abPOA
+once per alignment, and `--max-memory` the memory their estimates may add up to; `-t` sets the
+threads given to `vg snarls` and to `vg convert`, which streams the graph in prepare, extract and
+replace. `vg chunk`, `vg gbwt`, `vg paths`, `vg stats` and `vg view` use vg's own default thread
+counts. Each contig's prepare loads the whole-genome GBZ, so memory as well as cores limits how many
+contigs one machine runs at once. Each run keeps to its own `--max-memory`, so runs at once on one
+machine each need their share of it. This runs every contig in `contigs.txt`, four at a time, each
+with an eighth of a 128 GB machine for its regions, which leaves half for the other stages:
 
 ```
 mkdir -p out
 xargs -P 4 -I{} sh -c 'pgrealign run --gbz hprc-v2.1.gbz --contig {} \
-    --targets catalogs/chm13v2.0_tr.bed.gz -o out -j 8 -t 4 >out/{}.json 2>out/{}.log' <contigs.txt
+    --targets catalogs/chm13v2.0_tr.bed.gz -o out -j 8 -t 4 --max-memory 16 \
+    >out/{}.json 2>out/{}.log' <contigs.txt
 ```
 
 `out/<contig>.json` is empty unless the contig's run finished. This lists each contig whose run did
@@ -218,7 +225,8 @@ not bound.
 A region whose longest allele or fragment would need more than `--max-cells` cells even banded is
 left as it is, with status `too_big`. So is a region whose alleles hold more than 40 million bases
 in all, which bounds the k-mer counts that choose the centre (`MAX_TOTAL_BP` in `realign.py`; no
-option changes it).
+option changes it), and a region whose memory estimate alone exceeds `--max-memory`
+([Memory](#memory)).
 
 ## Resources per contig
 
@@ -230,21 +238,45 @@ a table per node, per region or per path, and some start a vg process that loads
 | prepare | `vg chunk`: the whole-genome GBZ; `vg snarls`: the contig's graph; then the length of every node of the contig | the contig's GBZ, snarls and reference index; a temporary directory in `out/<contig>/` for the cut component and, when samples are dropped, two GBWT files, removed at the end |
 | regions | the snarls' boundary nodes and the reference index | `regions.tsv.gz` |
 | extract | the sequence of every node; each region's alleles and fragments; the paths that visit no anchor, until it knows which region each lies in | `extract/`, mostly `occurrences.tsv.gz`, about one row per path per region it crosses |
-| realign | per worker, abPOA's alignment with the centre (about 18 bytes per cell unbanded, so up to about 8 GB under the default `--max-cells`; banded, about 80 KB per base of the centre with macOS's 16 KB pages, and twice that when the two lengths differ by tens of kb: [limits](reference.md#limits)) or the k-mer counts that choose the centre (about 80 bytes per base of the region's alleles, each allele counted once, plus about 50 per base of the longest allele when comparing every pair of alleles exactly would take too long); in the parent, the package of every region to align and every finished result | `msas.jsonl.gz.partial`, then `msas.jsonl.gz` |
+| realign | per worker, abPOA's alignments (20 bytes per cell unbanded, so up to about 8 GB under the default `--max-cells`; banded, about 80 KB per base of the centre with macOS's 16 KB pages, and several times that when the two lengths differ by tens of kb) and the k-mer counts that choose the centre (about 80 bytes per base of the region's alleles, plus 50 per base of the longest), estimated per region before it starts ([Memory](#memory)); in the parent, the package of every region to align and every finished result | `msas.jsonl.gz.partial`, then `msas.jsonl.gz` |
 | replace | every replaced region's alleles, fragments, alignment rows and new nodes; a record of every path's passage through those regions; every node id and its new id; then `vg gbwt -G`, building the realigned GBZ | `<contig>.realigned.gfa`, uncompressed, with every path as text; the GBZ built from it, after which the GFA is deleted |
 | verify | `vg paths -F` on each graph; a length and an MD5 digest per path | `verify.json` |
-| qc | the alignment rows of every realigned region, and the prepared graph's walk through each of its alleles; per worker, pairwise alignments by abPOA, banded over `--max-cells` | `qc.tsv`, `qc.tsv.json` |
+| qc | the alignment rows of every realigned region, and the prepared graph's walk through each of its alleles; per worker, pairwise alignments by abPOA, banded over `--max-cells`, estimated per pair before the region starts | `qc.tsv`, `qc.tsv.json` |
 
 prepare's `vg chunk` needs the same memory for every contig, and replace holds the tables that grow
-most with the contig and with the number of regions it replaces. realign runs up to `-j` workers,
-each using the larger of its two figures in the table, plus the parent.
+most with the contig and with the number of regions it replaces. realign and qc run up to `-j`
+workers, within `--max-memory`, plus the parent, which the budget does not count.
+
+### Memory
+
+realign and qc estimate the memory of each region before starting it, from the lengths of its
+alleles and fragments, and start regions in order only while the estimates of those running add up
+to no more than `--max-memory`, half the machine's physical memory by default; the estimate is
+defined in [reference.md](reference.md#memory). Most regions are estimated at about 0.1 GB, so the
+budget holds back only the few long ones, and `-j` can be the number of cores. A region whose
+estimate alone exceeds `--max-memory` is left `too_big` by realign, and qc skips each pair whose
+estimate alone exceeds it. Of the regions extract made `ok` on chr20 and chr6 of an HPRC v2.1
+Minigraph-Cactus graph, 14,511 and 39,039, these numbers have realign estimates above each size,
+with 16 KB pages:
+
+| estimate above | 1 GB | 2 GB | 4 GB | 8 GB | 16 GB |
+|---|---|---|---|---|---|
+| chr20 | 76 | 52 | 31 | 21 | 12 |
+| chr6 | 125 | 77 | 38 | 21 | 10 |
+
+So on a 32 GB machine, with its default budget of 16 GB, realign leaves 12 regions of chr20 and 10
+of chr6 `too_big` (11 and 10 with 4 KB pages), and qc skips pairs in 6 and 6 regions. The largest
+estimates, 102 GB on chr20 and 190 GB on chr6, are for regions whose alleles reach 103 kb and 139
+kb. Raise `--max-memory` on a machine with more memory to align them. realign's and qc's summaries
+give `peak_estimate_gb`, the largest sum of the estimates of the regions that ran at once.
 
 ### qc's limits
 
 qc bands a pair whose unbanded alignment would exceed `--max-cells` cells, which `run` passes to qc
-as well as to realign, so the same limit bounds a qc worker's memory. But qc has no time limit, so a
-region can take longer in qc than realign's `--timeout` allows it; `--no-qc` skips qc, and
-`pgrealign qc --sample` measures a random subset of the regions.
+as well as to realign, and compares a pair only when its memory estimate alone fits in
+`--max-memory`. But qc has no time limit, so a region can take longer in qc than realign's
+`--timeout` allows it; `--no-qc` skips qc, and `pgrealign qc --sample` measures a random subset of
+the regions.
 
 ### Disk
 
@@ -417,7 +449,7 @@ These statuses can be changed by an option, or point to a fault:
 |---|---|---|
 | `too_long` | no pair of anchors within `--max-span` encloses the target | raise regions' `--max-span`, at the cost of larger regions |
 | `complex` | a path passes through the region in a way replace cannot rewrite | if it visits no anchor and spells more than `--max-internal-bp` bases, raise that |
-| `too_big` | the longest allele or fragment would need more than `--max-cells` cells even banded, or the alleles hold more than 40 million bases | for the first, raise `--max-cells`, if memory allows; no option changes the second |
+| `too_big` | the longest allele or fragment would need more than `--max-cells` cells even banded, or the alleles hold more than 40 million bases, or the region's memory estimate alone exceeds `--max-memory` | for the first, raise `--max-cells`, and for the last `--max-memory`, if memory allows; no option changes the second |
 | `timeout` | the region took longer than `--timeout` seconds | raise `--timeout` |
 | `aligner_failed`, `error` | abPOA failed, or realign hit a bug | read the region's `message` in `msas.jsonl.gz`, and report an `error` with it and the region's package |
 
@@ -432,9 +464,10 @@ alignments' aligned base pairs, for random pairs of alleles other than the refer
 carried by the most paths (`ref_*`); [the method](method.md#qc) defines every measure. A pair whose
 optimal alignment would exceed `--max-cells` cells, the same test by which realign bands an
 alignment with the centre, is compared with a banded alignment instead; the column `banded` counts
-them. `run` also gives qc the prepared contig, whose own alignment of the same pairs it measures
-against the same optimal alignments, in the `graph_*` columns: the region before replace, beside the
-region after it.
+them. A pair whose memory estimate alone exceeds `--max-memory` is not compared; the column
+`skipped` counts them. `run` also gives qc the prepared contig, whose own alignment of the same
+pairs it measures against the same optimal alignments, in the `graph_*` columns: the region before
+replace, beside the region after it.
 
 `qc.tsv.json` holds the totals over the contig, with precision, recall and F1, and `growth`, the
 bases of the realigned regions' graphs over the bases of their longest alleles, each for the

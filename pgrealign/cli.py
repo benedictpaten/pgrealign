@@ -76,6 +76,16 @@ def cmd_extract(a):
     _print(summary)
 
 
+def gigabytes(text):
+    """A --max-memory value: a number of GB more than 0."""
+    from . import memory
+    try:
+        memory.budget(float(text))
+    except ValueError:
+        raise argparse.ArgumentTypeError('needs a number of GB more than 0, not %r' % text)
+    return float(text)
+
+
 def scores_of(a):
     from . import star
     return star.Scores.parse(a.scores) if a.scores is not None else star.SCORES
@@ -86,11 +96,12 @@ def cmd_realign(a):
     started = time.time()
     i, n = (int(x) for x in a.shard.split('/'))
     scores = scores_of(a)
-    summary = realign.run(a.packages, a.out, select=a.select, shard=(i, n), jobs=a.jobs, abpoa=a.abpoa,
-                          timeout=a.timeout, max_cells=a.max_cells, scores=scores)
+    summary = realign.run(a.packages, a.out, select=a.select, shard=(i, n), jobs=a.jobs, max_memory=a.max_memory,
+                          abpoa=a.abpoa, timeout=a.timeout, max_cells=a.max_cells, scores=scores)
     provenance.write_manifest(a.out, 'realign', {'packages': a.packages},
                               {'method': 'medoid_star', 'select': a.select, 'shard': a.shard, 'timeout': a.timeout,
-                               'max_cells': a.max_cells, 'scores': ' '.join(scores.flags())},
+                               'max_cells': a.max_cells, 'max_memory': a.max_memory,
+                               'scores': ' '.join(scores.flags())},
                               tools=_tools(a, 'abpoa'), extra={'summary': summary}, started=started)
     _print(summary)
 
@@ -133,11 +144,12 @@ def cmd_qc(a):
     scores = scores_of(a)
     summary = qc.run(a.extract, a.msas, a.out, pairs=a.pairs, refs=a.refs, sample=a.sample, jobs=a.jobs,
                      abpoa=a.abpoa, scores=scores, ref_sample=a.ref_sample, max_cells=a.max_cells,
-                     graph=a.graph, vg=a.vg, threads=a.threads)
+                     graph=a.graph, vg=a.vg, threads=a.threads, max_memory=a.max_memory)
     inputs = {'msas': a.msas, **({'graph': a.graph} if a.graph else {})}
     provenance.write_manifest(a.out, 'qc', inputs,
                               {'extract': a.extract, 'pairs': a.pairs, 'refs': a.refs, 'sample': a.sample,
-                               'scores': ' '.join(scores.flags()), 'max_cells': a.max_cells},
+                               'scores': ' '.join(scores.flags()), 'max_cells': a.max_cells,
+                               'max_memory': a.max_memory},
                               tools=_tools(a, 'abpoa', 'vg') if a.graph else _tools(a, 'abpoa'),
                               extra={'summary': summary}, started=started)
     _print(summary)
@@ -149,7 +161,7 @@ def cmd_run(a):
                                   abpoa=a.abpoa, ref_sample=a.ref_sample, drop_samples=drop_samples_of(a),
                                   scores=scores_of(a), timeout=a.timeout, max_cells=a.max_cells,
                                   max_internal_bp=a.max_internal_bp, id_start=a.id_start, do_qc=not a.no_qc,
-                                  log=lambda m: print(m, file=sys.stderr))
+                                  max_memory=a.max_memory, log=lambda m: print(m, file=sys.stderr))
     _print(summary)
 
 
@@ -181,10 +193,12 @@ def cmd_project(a):
 
 
 def main(argv=None):
+    from .memory import default_gb
     from .prepare import DROP_SAMPLES
     from .realign import MAX_CELLS
     from .star import SCORES
     default_drop = ','.join(DROP_SAMPLES) or 'none'
+    default_memory = default_gb()
     scores_help = ("abPOA's scores for every alignment, as its flags -M, -X, -O and -E; a flag left out takes "
                    "abPOA's default, so '' gives abPOA's defaults [%s]" % ' '.join(SCORES.flags()))
     p = argparse.ArgumentParser(prog='pgrealign', description=__doc__)
@@ -252,7 +266,10 @@ def main(argv=None):
     c.add_argument('--select', choices=['any', 'length'], default='any',
                    help="realign a region when its alleles differ at all ('any') or in length [any]")
     c.add_argument('--shard', default='0/1', help='do shard i of n, by package order [0/1]')
-    c.add_argument('-j', '--jobs', type=int, default=1, help='regions aligned in parallel [1]')
+    c.add_argument('-j', '--jobs', type=int, default=1, help='the most regions aligned in parallel [1]')
+    c.add_argument('--max-memory', type=gigabytes, default=default_memory, metavar='GB',
+                   help='the memory the regions aligned at once may need in all, by their estimates; a region that '
+                        "alone needs more is left as it is (too_big) [half the machine's: %.1f]" % default_memory)
     c.add_argument('--abpoa', default='abpoa', help='abPOA binary [abpoa on PATH]')
     c.add_argument('--timeout', type=float, default=900, help='seconds per region [900]')
     c.add_argument('--max-cells', type=int, default=MAX_CELLS,
@@ -297,7 +314,10 @@ def main(argv=None):
     c.add_argument('--max-cells', type=int, default=MAX_CELLS,
                    help='band a pair whose unbanded optimal alignment would exceed this many cells [%d]' % MAX_CELLS)
     c.add_argument('--graph', help="the graph extract read (GBZ or GFA): measure its own alignment of each region too")
-    c.add_argument('-j', '--jobs', type=int, default=1, help='regions measured in parallel [1]')
+    c.add_argument('-j', '--jobs', type=int, default=1, help='the most regions measured in parallel [1]')
+    c.add_argument('--max-memory', type=gigabytes, default=default_memory, metavar='GB',
+                   help='the memory the regions measured at once may need in all, by their estimates; a pair that '
+                        "alone needs more is not compared (skipped) [half the machine's: %.1f]" % default_memory)
     c.add_argument('-t', '--threads', type=int, default=4, help='threads for vg convert, with --graph [4]')
     c.add_argument('--abpoa', default='abpoa', help='abPOA binary [abpoa on PATH]')
     vg_arg(c)
@@ -308,7 +328,10 @@ def main(argv=None):
     c.add_argument('--contig', required=True)
     c.add_argument('--targets', required=True, help='catalogue or BED of target intervals')
     c.add_argument('-o', '--out', required=True, help='output directory; the contig goes in OUT/CONTIG')
-    c.add_argument('-j', '--jobs', type=int, default=1, help='regions aligned in parallel, in realign and qc [1]')
+    c.add_argument('-j', '--jobs', type=int, default=1,
+                   help='the most regions aligned in parallel, in realign and qc [1]')
+    c.add_argument('--max-memory', type=gigabytes, default=default_memory, metavar='GB',
+                   help="as for realign and qc [half the machine's: %.1f]" % default_memory)
     c.add_argument('-t', '--threads', type=int, default=4, help='threads for vg [4]')
     c.add_argument('--ref-sample', default='CHM13', help='the reference sample [CHM13]')
     drop_args(c)

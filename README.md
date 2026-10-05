@@ -53,8 +53,10 @@ pgrealign run --gbz graph.gbz --contig chr20 \
 The reference sample (`--ref-sample`) gives the graph its coordinates, and the GBZ must hold its
 walk on the contig, `<sample>#0#chr20`. `--targets` is a BED of intervals on that walk:
 `catalogs/chm13v2.0_tr.bed.gz` lists the tandem repeats of CHM13 v2.0 on chr1-22, chrX and chrY,
-and `pgrealign catalog` builds such a catalogue for another reference. `-j` sets how many regions
-realign and qc work on at once, and `-t` how many threads vg uses. The outputs go to `out/chr20/`:
+and `pgrealign catalog` builds such a catalogue for another reference. `-j` sets the most regions
+realign and qc work on at once, and can be the number of cores: they start a region only while the
+memory estimates of those running fit in `--max-memory`, half the machine's memory by default. `-t`
+sets how many threads vg uses. The outputs go to `out/chr20/`:
 
 | output | stage | contents |
 |---|---|---|
@@ -202,6 +204,7 @@ pgrealign/        the package: one module per stage, except run (pipeline.py) an
   star.py         the medoid-star alignment, which reads no graph and no file
   induce.py       the graph of an alignment, used by replace
   graph.py        reading a graph as a stream of GFA lines
+  memory.py       abPOA's memory, and running regions in parallel within a memory budget
   provenance.py   the manifest written beside each stage's output
   cli.py          the pgrealign command line
   c/trfind.c      the tandem-repeat finder that catalog compiles

@@ -340,7 +340,7 @@ extract's packages.
 Every alignment is computed by abPOA, a partial-order aligner, under the scores below, run as
 `abpoa -m 0 -r 1`: globally, from end to end of every sequence, writing the alignment's rows. To
 align two sequences abPOA fills a dynamic-programming matrix of one cell per pair of positions, one
-from each sequence, at about 18 bytes per cell. A band limits it to the cells near the alignment's
+from each sequence, at 20 bytes per cell. A band limits it to the cells near the alignment's
 path. abPOA's own band is adaptive, reaching about 10 cells plus 1% of the sequence's length either
 side of the path, and `-b -1` turns it off. A band saves time, but less memory than its cells
 suggest: abPOA reserves the whole matrix either way, and a banded alignment still touches at least
@@ -480,7 +480,7 @@ as it is:
 
 | status | when |
 |---|---|
-| `too_big` | even a banded alignment of the region's longest allele or fragment would exceed `--max-cells` cells, or its alleles hold more than 40,000,000 bases in all |
+| `too_big` | even a banded alignment of the region's longest allele or fragment would exceed `--max-cells` cells, or its alleles hold more than 40,000,000 bases in all, or its memory estimate alone exceeds `--max-memory` |
 | `timeout` | the region ran longer than `--timeout` seconds |
 | `aligner_failed` | abPOA exited with an error, left out a row, or returned pairwise rows that do not spell their inputs |
 | `no_alleles` | the region has fragments but no allele: no walk spans it |
@@ -491,9 +491,14 @@ of the same length is taken to fill the smaller of n² and 2n (10 + ⌊n / 100�
 adaptive band, n being the length of the region's longest allele or fragment. For long sequences
 this is about n² / 50, so the limit admits sequences about seven times as long as an unbanded
 alignment of two equal lengths would. The slot alignments are not counted. The limit on total bases
-exists because choosing the centre holds every allele's k-mer counts at once. The time limit is
-checked while choosing the centre and before each call to abPOA, and abPOA itself is stopped at the
-deadline. Each region's failure is recorded in its own result, so one region cannot stop a contig.
+exists because choosing the centre holds every allele's k-mer counts at once. The memory limit is
+checked before the region starts: `realign` estimates from the lengths of the region's alleles and
+fragments the most memory its alignments and its choice of centre can take, assuming the worst
+centre, since the centre is not yet chosen ([reference.md](reference.md#memory)). A region over
+`--max-memory` on its own is not started, and `realign` starts the others in order while the
+estimates of those running fit within it. The time limit is checked while choosing the centre and
+before each call to abPOA, and abPOA itself is stopped at the deadline. Each region's failure is
+recorded in its own result, so one region cannot stop a contig.
 
 ### Which regions are realigned
 
@@ -619,8 +624,10 @@ unbanded, left-normalised abPOA alignment under the scores given with `--scores`
 optimal alignment would need more than `--max-cells` cells, the product of the two lengths, is
 compared with abPOA's banded alignment instead, which can fall short of the optimum, and is counted
 in `banded`; `run` gives `qc` the same `--max-cells` as `realign`, so a pair through the centre that
-`realign` banded is compared with the very alignment `realign` used. An aligned pair is a base of
-one sequence and a base of the other in one column, whether they match or not.
+`realign` banded is compared with the very alignment `realign` used. A pair whose alignment's
+memory estimate alone exceeds `--max-memory` is not compared at all, and is counted in `skipped`
+([reference.md](reference.md#qc)). An aligned pair is a base of one sequence and a base of the other
+in one column, whether they match or not.
 
 ### The graph's own alignment
 
@@ -647,6 +654,7 @@ induced graph. Its other fields are counts summed over the region's compared pai
 | `ref_sv`, `ref_sv_opt` | in the reference pairs' projected and optimal alignments, runs of 50 or more consecutive columns in which one row has a gap opposite a base of the other, whichever row holds the gap |
 | `forced`, `forced_opt` | columns of the projected and optimal alignments, of random and reference pairs alike, that lie in a forced-homology window |
 | `banded` | random and reference pairs compared with a banded alignment because of `--max-cells` |
+| `skipped` | random and reference pairs not compared because of `--max-memory`; every other field leaves them out |
 | `graph_pair_msa`, `graph_pair_tp` | with `--graph`: aligned pairs in the graph's alignment of the random pairs, and in both it and the optimal alignment |
 | `graph_ref_msa`, `graph_ref_tp` | the same, for the reference pairs |
 | `graph_sequence` | with `--graph`: the bases of the nodes the region's runs visit, which `replace` removes |

@@ -5,7 +5,7 @@ import shutil
 import tempfile
 import unittest
 
-from pgrealign import realign, star
+from pgrealign import memory, realign, star
 
 
 def pkg(pid, alleles, fragments=()):
@@ -72,6 +72,45 @@ class TestRun(unittest.TestCase):
             again = [json.loads(l) for l in gzip.open(out, 'rt')]
             self.assertEqual([r['rows'] for r in again], [r['rows'] for r in first])
             self.assertFalse(os.path.exists(out + '.partial'))
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_over_the_memory_budget(self):
+        d = tempfile.mkdtemp()
+        try:
+            pk = os.path.join(d, 'packages.jsonl.gz')
+            unit = 'ACGTTGCAAGTCAT'
+            big = pkg('BIG', [('a1', unit * 215, 1), ('a2', unit * 100 + 'G' + unit * 115, 1)])   # 3 kb alleles
+            pkgs = [pkg('R0', [('a1', unit * 3, 1), ('a2', unit * 4, 1)]),
+                    pkg('R1', [('a1', unit * 2, 1), ('a2', unit, 1)]), big,
+                    pkg('R2', [('a1', unit * 5, 1), ('a2', unit * 3, 1)])]
+            with gzip.open(pk, 'wt') as f:
+                for p in pkgs:
+                    f.write(json.dumps(p) + '\n')
+            limit = 0.2       # GB: two small regions fit at once, and BIG, about 0.27 by its unbanded pair, does not
+            self.assertGreater(realign.peak_bytes(big), limit * memory.GB)
+            self.assertLess(2 * max(realign.peak_bytes(p) for p in pkgs if p is not big), limit * memory.GB)
+            out = os.path.join(d, 'msas.jsonl.gz')
+            s = realign.run(pk, out, jobs=2, max_memory=limit)
+            self.assertEqual(s['realigned'], {'ok': 3, 'too_big': 1})
+            self.assertLessEqual(s['peak_estimate_gb'], limit)
+            first = [json.loads(l) for l in gzip.open(out, 'rt')]
+            self.assertEqual([r['id'] for r in first], ['R0', 'R1', 'BIG', 'R2'])
+            r = first[2]
+            self.assertEqual((r['status'], r['seconds']), ('too_big', 0.0))
+            self.assertIn('memory budget of 0.20 GB', r['message'])
+            # resumed under a budget BIG fits: its record in the partial file is kept, like any other
+            with open(out + '.partial', 'wb') as f:
+                for r in first[1:3]:
+                    f.write(gzip.compress((json.dumps(r) + '\n').encode()))
+            os.remove(out)
+            s = realign.run(pk, out, jobs=2, max_memory=4)
+            self.assertEqual((s['resumed'], s['realigned']), (2, {'ok': 3, 'too_big': 1}))
+            again = [json.loads(l) for l in gzip.open(out, 'rt')]
+            self.assertEqual([r['id'] for r in again], ['R0', 'R1', 'BIG', 'R2'])
+            self.assertEqual(again[2], first[2])
+            self.assertEqual([r['rows'] for r in again if r['status'] == 'ok'],
+                             [r['rows'] for r in first if r['status'] == 'ok'])
         finally:
             shutil.rmtree(d, ignore_errors=True)
 

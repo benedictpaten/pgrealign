@@ -21,7 +21,7 @@ import json
 import os
 import time
 
-from . import extract, merge, prepare, provenance, qc, realign, regions, replace, verify
+from . import extract, memory, merge, prepare, provenance, qc, realign, regions, replace, verify
 from .graph import find_vg
 from .star import SCORES
 
@@ -39,9 +39,12 @@ def _write_json(path, obj):
 
 def run_contig(gbz, contig, targets, out_dir, jobs=1, threads=4, vg=None, abpoa='abpoa', ref_sample='CHM13',
                drop_samples=None, scores=SCORES, timeout=900, max_cells=realign.MAX_CELLS, max_internal_bp=200000,
-               id_start=None, do_qc=True, log=print):
+               id_start=None, do_qc=True, max_memory=None, log=print):
     """Run every stage for `contig` (see the module docstring). `drop_samples` None means prepare's
-    default. Returns {stage: summary} for the stages it ran, and the contig's node-id range."""
+    default, and `max_memory` None means memory.default_gb(). Returns {stage: summary} for the stages
+    it ran, and the contig's node-id range."""
+    max_memory = memory.default_gb() if max_memory is None else max_memory
+    memory.budget(max_memory)                 # refused here, before any stage, unless more than 0
     d = os.path.join(out_dir, contig)
     os.makedirs(d, exist_ok=True)
     drop = prepare.DROP_SAMPLES if drop_samples is None else tuple(drop_samples)
@@ -82,12 +85,12 @@ def run_contig(gbz, contig, targets, out_dir, jobs=1, threads=4, vg=None, abpoa=
     if not _done(msas):
         log('[%s] realign' % contig)
         t = time.time()
-        s = realign.run(os.path.join(ex, 'packages.jsonl.gz'), msas, jobs=jobs, abpoa=abpoa, timeout=timeout,
-                        max_cells=max_cells, scores=scores)
+        s = realign.run(os.path.join(ex, 'packages.jsonl.gz'), msas, jobs=jobs, max_memory=max_memory, abpoa=abpoa,
+                        timeout=timeout, max_cells=max_cells, scores=scores)
         provenance.write_manifest(msas, 'realign', {'packages': os.path.join(ex, 'packages.jsonl.gz')},
                                   {'method': 'medoid_star', 'scores': ' '.join(scores.flags()),
-                                   'timeout': timeout, 'max_cells': max_cells}, tools=abpoa_tool,
-                                  extra={'summary': s}, started=t)
+                                   'timeout': timeout, 'max_cells': max_cells, 'max_memory': max_memory},
+                                  tools=abpoa_tool, extra={'summary': s}, started=t)
         out['realign'] = s
 
     rgbz = os.path.join(d, contig + '.realigned.gbz')
@@ -120,9 +123,10 @@ def run_contig(gbz, contig, targets, out_dir, jobs=1, threads=4, vg=None, abpoa=
         log('[%s] qc' % contig)
         t = time.time()
         s = qc.run(ex, msas, q, jobs=jobs, abpoa=abpoa, scores=scores, ref_sample=ref_sample, max_cells=max_cells,
-                   graph=cgbz, vg=vg, threads=threads)
+                   graph=cgbz, vg=vg, threads=threads, max_memory=max_memory)
         provenance.write_manifest(q, 'qc', {'msas': msas, 'graph': cgbz},
-                                  {'extract': ex, 'scores': ' '.join(scores.flags()), 'max_cells': max_cells},
+                                  {'extract': ex, 'scores': ' '.join(scores.flags()), 'max_cells': max_cells,
+                                   'max_memory': max_memory},
                                   tools={**abpoa_tool, **vg_tool}, extra={'summary': s}, started=t)
         out['qc'] = s
 
