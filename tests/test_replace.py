@@ -6,7 +6,7 @@ import shutil
 import tempfile
 import unittest
 
-from pgrealign import extract, regions, replace
+from pgrealign import extract, regions, replace, verify
 from pgrealign.graph import revcomp
 
 UNIT = 'ACGTTGCAAGT'
@@ -28,6 +28,14 @@ WALKS = [
     ('f', '1', '>32>33>30>40>41>51>52>49>10'),   # starts inside R2
 ]
 REGIONS = [('R1', 1, 9), ('R2', 9, 30), ('R3', 41, 49)]
+PATHS = [('gen1', '5+,1+'), ('gen2', '10-,49-,41-,40-')]      # generic paths that avoid the interiors
+FLIP = {'+': '-', '-': '+'}
+
+
+def canonical(edge):
+    """An edge in the spelling of the two that sorts first."""
+    a, ao, b, bo = edge
+    return min(edge, (b, FLIP[bo], a, FLIP[ao]))
 
 
 def parse_steps(w):
@@ -39,7 +47,7 @@ def write_gfa(path, walks=WALKS, paths=()):
     for _, _, w in walks:
         st = parse_steps(w)
         for (oa, a), (ob, b) in zip(st, st[1:]):
-            edges.add((a, '+' if oa == '>' else '-', b, '+' if ob == '>' else '-'))
+            edges.add(canonical((a, '+' if oa == '>' else '-', b, '+' if ob == '>' else '-')))
     with open(path, 'w') as f:
         f.write('H\tVN:Z:1.1\tRS:Z:CHM13\n')
         for n, s in S.items():
@@ -76,8 +84,7 @@ def spell(steps, seq):
 def has_edge(edges, a, b):
     (oa, na), (ob, nb) = a, b
     fa, fb = ('+' if oa == '>' else '-'), ('+' if ob == '>' else '-')
-    flip = {'+': '-', '-': '+'}
-    return (na, fa, nb, fb) in edges or (nb, flip[fb], na, flip[fa]) in edges
+    return (na, fa, nb, fb) in edges or (nb, FLIP[fb], na, FLIP[fa]) in edges
 
 
 def naive_msa(pkg):
@@ -157,6 +164,12 @@ class TestPieces(unittest.TestCase):
         new_ids, next_id = replace.number_reuse([('R1', 3), ('R2', 1)], {'R1': [3, 2], 'R2': [8, 7]}, 100)
         self.assertEqual(new_ids, {'R1': [2, 3, 100], 'R2': [7]})
         self.assertEqual(next_id, 101)
+        # the ids from id_start run into the region's own freed ids
+        with self.assertRaisesRegex(ValueError, 'id 6 would go'):
+            replace.number_reuse([('R1', 3)], {'R1': [5, 6]}, 6)
+        # two regions' interiors overlap
+        with self.assertRaisesRegex(ValueError, 'id 6 would go'):
+            replace.number_reuse([('R1', 2), ('R2', 2)], {'R1': [5, 6], 'R2': [6, 7]}, 100)
 
 
 class TestReplace(unittest.TestCase):
@@ -165,6 +178,23 @@ class TestReplace(unittest.TestCase):
 
     def tearDown(self):
         shutil.rmtree(self.d)
+
+    def edited(self, path, edit):
+        """A copy of the GFA `path` with its lines passed through `edit`."""
+        with open(path) as f:
+            lines = f.readlines()
+        out = path + '.edited.gfa'
+        with open(out, 'w') as f:
+            f.writelines(edit(lines))
+        return out
+
+    def assert_fails(self, regex, graph, fx, **kw):
+        """replace fails with a ValueError matching `regex`, and leaves no output."""
+        out = os.path.join(self.d, 'fails.gfa')
+        with self.assertRaisesRegex(ValueError, regex):
+            replace.replace(graph, fx.extract, fx.single_msas, out, **kw)
+        self.assertFalse(os.path.exists(out))
+        self.assertFalse(os.path.exists(out + '.tmp'))
 
     def check_roundtrip(self, before, after):
         """Every walk and path of `after` spells what it did in `before`, and uses only edges `after`
@@ -186,13 +216,19 @@ class TestReplace(unittest.TestCase):
             self.assertIn(b, seq1)
         return seq1, walks1
 
+    def assert_edges_once(self, gfa):
+        edges = read_gfa(gfa)[1]
+        self.assertEqual(len({canonical(e) for e in edges}), len(edges))
+
     def test_modes(self):
-        fx = Fixture(self.d)
+        fx = Fixture(self.d, paths=PATHS)
         for mode, start in (('reuse', 1000), ('dense', None), ('dense', 500)):
             out = os.path.join(self.d, 'out.%s.%s.gfa' % (mode, start))
             st = replace.replace(fx.graph, fx.extract, fx.single_msas, out, id_start=start, id_mode=mode)
             self.assertEqual(st['regions'], 3)
             seq1, walks1 = self.check_roundtrip(fx.graph, out)
+            # a2 deletes R3's whole interior: its L->R edge, 41->49, is the input's and is written once
+            self.assert_edges_once(out)
             if mode == 'reuse':
                 for n in (5, 1, 9, 30, 40, 41, 49, 10):
                     self.assertEqual(seq1[n], S[n])
@@ -211,6 +247,74 @@ class TestReplace(unittest.TestCase):
                     self.assertTrue(run)
                     self.assertEqual(run, sorted(run))
                     self.assertTrue(all(a < n < b for n in run), (L, a, b, run))
+
+    def test_several_msas_files(self):
+        fx = Fixture(self.d)
+        one, several = os.path.join(self.d, 'one.gfa'), os.path.join(self.d, 'several.gfa')
+        st1 = replace.replace(fx.graph, fx.extract, fx.single_msas, one)
+        st2 = replace.replace(fx.graph, fx.extract, fx.msas, several)
+        self.assertEqual(st1, st2)
+        with open(one) as a, open(several) as b:
+            self.assertEqual(a.read(), b.read())
+        with self.assertRaisesRegex(ValueError, 'appears twice'):
+            replace.replace(fx.graph, fx.extract, [fx.single_msas, fx.msas[1]], several)
+
+    def test_path_through_a_region(self):
+        fx = Fixture(self.d, paths=PATHS + [('gen3', '40+,41+,51+')])
+        for mode, start in (('reuse', 1000), ('dense', None)):
+            self.assert_fails('path gen3 visits node 51 of region R3', fx.graph, fx, id_start=start,
+                              id_mode=mode)
+
+    def test_header_drops_graph_name(self):
+        fx = Fixture(self.d)
+        g = self.edited(fx.graph, lambda lines: lines[:1] + ['H\tNM:Z:abc\n', 'H\tSG:Z:abc,def\n'] + lines[1:])
+        out = os.path.join(self.d, 'out.gfa')
+        replace.replace(g, fx.extract, fx.single_msas, out)
+        with open(out) as f:
+            self.assertEqual([line for line in f if line[0] == 'H'], ['H\tVN:Z:1.1\tRS:Z:CHM13\n'])
+
+    def test_segment_after_walk(self):
+        fx = Fixture(self.d)
+
+        def last(t):
+            return lambda lines: [x for x in lines if x[0] != t] + [x for x in lines if x[0] == t]
+        # a removed node's S line after the walks is missed by the first run through it; another node's,
+        # and any L line, when it is read
+        self.assert_fails('walk CHM13#0#chrT#0 comes before the S line of node 11',
+                          self.edited(fx.graph, last('S')), fx)
+        g = self.edited(fx.graph, lambda lines: [x for x in lines if not x.startswith('S\t10\t')] +
+                        ['S\t10\tAAAA\n'])
+        self.assert_fails('an S line after a W line', g, fx)
+        self.assert_fails('an L line after a W line', self.edited(fx.graph, last('L')), fx)
+
+    def test_reuse_id_start_in_use(self):
+        fx = Fixture(self.d)
+        out = os.path.join(self.d, 'out.gfa')
+        st = replace.replace(fx.graph, fx.extract, fx.single_msas, out, id_start=1000, id_mode='reuse')
+        self.assertGreater(st['ids_above_start'], 0)        # so ids from id_start are handed out
+        # 40 and up: nodes 40, 41 and 49 stay; 10 and up: 11 is freed by R1
+        self.assert_fails('id 40, which a node of the graph has', fx.graph, fx, id_start=40, id_mode='reuse')
+        self.assert_fails('id 11 would go to new nodes of region R1 and of region R2', fx.graph, fx, id_start=10,
+                          id_mode='reuse')
+
+    def test_anchor_in_another_interior(self):
+        fx = Fixture(self.d)
+        path = os.path.join(fx.extract, 'interiors.tsv.gz')
+        with gzip.open(path, 'rt') as f:
+            lines = f.readlines()
+        with gzip.open(path, 'wt') as f:
+            f.writelines(x.rstrip('\n') + ',41\n' if x.startswith('R1\t') else x for x in lines)
+        self.assert_fails('anchor 41 of region R3 is in the interior of region R1', fx.graph, fx)
+
+    @unittest.skipUnless(shutil.which('vg'), 'vg not on PATH')
+    def test_dense_output_loads(self):
+        fx = Fixture(self.d, paths=PATHS)
+        out, gbz = os.path.join(self.d, 'out.gfa'), os.path.join(self.d, 'out.gbz')
+        replace.replace(fx.graph, fx.extract, fx.single_msas, out)
+        replace.to_gbz(out, gbz)
+        res = verify.verify(fx.graph, gbz)
+        self.assertTrue(res['ok'], res)
+        self.assertEqual(res['paths'], len(WALKS) + len(PATHS))
 
 
 if __name__ == '__main__':

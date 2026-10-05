@@ -1,40 +1,50 @@
 """Stage 5, `replace`: write a contig's graph with each realigned region's interior replaced, in one pass.
 
 **Inputs.**
-- The contig's graph: the GBZ from `prepare`, or a GFA.
+- The contig's graph: the GBZ from `prepare`, or a GFA. A GFA must have every S and L line before its
+  first W line, as `vg convert -f` writes them.
 - The `extract` outputs: `packages.jsonl.gz`, `occurrences.tsv.gz` and `interiors.tsv.gz`.
-- The `realign` outputs: `msas.jsonl.gz`.
+- The `realign` outputs: one `msas.jsonl.gz`, or several, such as one per shard. A region may appear in
+  only one of them.
 
 Only regions whose package is `ok` and whose MSA is `ok` are replaced. Every other region keeps its
 subgraph.
 
-**What changes, per replaced region R (anchors L and R stay):**
+**What changes, per replaced region (anchors L and R stay):**
 - **Nodes.** The interior nodes are removed, and the MSA's induced graph (induce.py) is added.
   - By default ('dense') every node is renumbered: old nodes keep their order, each region's new nodes
-    follow its left anchor, and ids run densely from `id_start`, or from the contig's smallest id. The
-    ids then no longer match the input. merge needs every contig's ids to stay clear of every other
-    contig's; the summary's `id_range` says where this contig's ids ended up.
+    follow its left anchor, and ids run densely from `id_start`, or from the contig's smallest id. Every
+    S, L, P and W line is renumbered, inside the regions or not, so the ids no longer match the input.
+    merge needs every contig's ids to stay clear of every other contig's; the summary's `id_range` says
+    where this contig's ids ended up.
   - With 'reuse', old nodes keep their ids, and new nodes take the region's freed ids, then ids from
-    `id_start`. That range must be free in the whole genome. New nodes can then land far from their
-    regions, which slows tools that read the graph in windows of node ids, such as vg call.
+    `id_start`. That range must be free in the whole genome: a new id that is a node of the contig, or
+    that two new nodes would share, is an error. New nodes can land far from their regions, which slows
+    tools that read the graph in windows of node ids, such as vg call.
 - **Edges.** Edges touching a removed node are dropped. The induced graph's edges are added, plus
   the edges to the anchors: L->first for an allele or a left fragment, last->R for an allele or a
-  right fragment, and L->R for an empty allele.
-- **Walks.** Every run recorded in `occurrences.tsv.gz` is rewritten to its row's walk: forward for
-  orient '+', reversed and flipped for '-'.
+  right fragment, and L->R for an empty allele (one that deletes the whole interior) unless the input
+  has it already.
+- **Walks (W lines).** Every run recorded in `occurrences.tsv.gz` is rewritten to its row's walk:
+  forward for orient '+', reversed and flipped for '-'.
   - A spanning run replaces the steps between the anchors.
   - A suffix run replaces the steps after the anchor to the walk's end.
   - A prefix run replaces the steps from the walk's start to the anchor.
   - An internal run replaces the whole walk.
+- **Paths (P lines).** extract records runs of walks only, so a generic path cannot be rewritten
+  through a region: a P line that visits a removed node is an error. Every other P line is kept.
+
+**Other lines.** H lines are copied without vg's graph-name tags (NM, SG and TL), so the reference
+samples (RS tag) are kept. The output is a different graph, and `vg gbwt -G` would otherwise record it
+as a subgraph of the input. Lines of any other type are copied unchanged.
 
 **Checks.**
 - Each rewritten run spells the same sequence as before. The old steps are spelled from the input's
   node sequences, the new ones from the induced graph's.
 - No walk visits a removed node outside a recorded run.
-- A failure stops the stage: it means extract or realign is wrong, not the region.
+- A failure stops the stage and leaves no output: it means extract or realign is wrong, not the region.
 
-The output is a GFA. `vg gbwt -G out.gfa --gbz-format -g out.gbz` turns it into a GBZ. The H line,
-and with it the reference samples (RS tag), is copied.
+The output is a GFA. `vg gbwt -G out.gfa --gbz-format -g out.gbz` turns it into a GBZ.
 """
 import collections
 import gzip
@@ -45,23 +55,34 @@ from . import induce as induce_mod
 from .graph import GfaStream, parse_w, revcomp, walk_key, STEP
 from .extract import read_packages
 
+GRAPH_NAME_TAGS = ('NM:', 'SG:', 'TL:')     # H-line tags that name the graph and relate it to others
+FLIP = {'+': '-', '-': '+'}
 
-def load_plan(extract_dir, msas_path):
-    """{region: (package, msa result)} for every region to replace."""
-    msas = {}
-    with gzip.open(msas_path, 'rt') as f:
-        for line in f:
-            m = json.loads(line)
-            if m.get('status') == 'ok':
-                msas[m['id']] = m
+
+def load_plan(extract_dir, msas):
+    """{region: (package, msa result)} for every region to replace, in package order. `msas` is the path
+    of one msas.jsonl.gz, or a list of them; a region found twice is an error."""
+    paths = [msas] if isinstance(msas, (str, os.PathLike)) else msas
+    found, ok = {}, {}
+    for path in paths:
+        with gzip.open(path, 'rt') as f:
+            for line in f:
+                m = json.loads(line)
+                if m['id'] in found:
+                    raise ValueError('region %s appears twice in the msas files (%s, %s)' % (
+                        m['id'], found[m['id']], path))
+                found[m['id']] = path
+                if m.get('status') == 'ok':
+                    ok[m['id']] = m
     plan = {}
     for p in read_packages(os.path.join(extract_dir, 'packages.jsonl.gz'), status={'ok'}):
-        if p['id'] in msas:
-            plan[p['id']] = (p, msas[p['id']])
+        if p['id'] in ok:
+            plan[p['id']] = (p, ok[p['id']])
     return plan
 
 
 def read_interiors(path, keep):
+    """{region: its interior's node ids} for the regions in `keep`."""
     out = {}
     with gzip.open(path, 'rt') as f:
         for line in f:
@@ -165,13 +186,22 @@ def number_reuse(regions, interiors, id_start):
     """The 'reuse' numbering of the new nodes; the nodes that stay keep their ids. `regions` is
     [(region, number of new nodes)], in plan order, and `interiors` {region: its interior's node ids}.
     Each region's new nodes take its freed ids in increasing order, then the next ids from `id_start`.
-    Returns ({region: [id of its node -1, -2, ...]}, the next unused id from `id_start`)."""
-    new_ids, next_id = {}, id_start
+    Returns ({region: [id of its node -1, -2, ...]}, the next unused id from `id_start`).
+
+    Two new nodes given one id is an error: it happens when interiors overlap or when the ids from
+    `id_start` run into freed ones. A new id that a node outside the regions holds is found by rewrite."""
+    new_ids, next_id, owner = {}, id_start, {}
     for rid, size in regions:
         ids = sorted(interiors[rid])[:size]
         extra = size - len(ids)
         ids.extend(range(next_id, next_id + extra))
         next_id += extra
+        for n in ids:
+            if n in owner:
+                raise ValueError('id %d would go to new nodes of region %s and of region %s: interiors must '
+                                 'not overlap, and the ids from id_start (%d) on must be free' % (
+                                     n, owner[n], rid, id_start))
+            owner[n] = rid
         new_ids[rid] = ids
     return new_ids, next_id
 
@@ -181,7 +211,7 @@ class Splice:
     - `seq` {node: sequence} and `edges` {(from, from_orient, to, to_orient)}: the new nodes and edges;
     - `walks` {(region, member): [node, ...]} and `spelling` {(region, member): sequence}: each member's
       new walk, and the sequence it and every run recorded for it must spell, region-forward;
-    - `removed`: the replaced interiors' nodes, in the input's ids;
+    - `removed`: {node: region} for the replaced interiors' nodes, in the input's ids;
     - `runs`: {walk key: [(first, end, region, type, orient, member)]}, from read_occurrences;
     - `renumber`: {input id: output id} for the nodes that stay, or None when they keep their ids."""
     __slots__ = ('seq', 'edges', 'walks', 'spelling', 'removed', 'runs', 'renumber')
@@ -208,7 +238,9 @@ class Splice:
     def check_outside(self, key, toks):
         """Steps `toks` of walk `key` lie outside every run, so they must not visit a removed node."""
         if self.removed and any(int(n) in self.removed for _, n in toks):
-            raise ValueError('walk %s visits a replaced region outside a recorded run' % key)
+            n = next(int(n) for _, n in toks if int(n) in self.removed)
+            raise ValueError('walk %s visits node %d of region %s outside a recorded run' % (
+                key, n, self.removed[n]))
 
     def copied(self, key, toks):
         """The steps `toks` of walk `key`, outside every run, in the output's ids."""
@@ -216,6 +248,21 @@ class Splice:
         if self.renumber is None:
             return ''.join(o + n for o, n in toks)
         return ''.join(o + str(self.renumber[int(n)]) for o, n in toks)
+
+    def path_line(self, line):
+        """P line `line`, renumbered. It must not visit a removed node: extract records no runs of P
+        lines, so their steps through a region cannot be rewritten."""
+        x = line.rstrip('\n').split('\t')
+        steps = x[2].split(',')
+        for s in steps:
+            rid = self.removed.get(int(s[:-1]))
+            if rid is not None:
+                raise ValueError('path %s visits node %s of region %s: replace rewrites walks (W lines), '
+                                 'not paths (P lines)' % (x[1], s[:-1], rid))
+        if self.renumber is None:
+            return line
+        x[2] = ','.join('%d%s' % (self.renumber[int(s[:-1])], s[-1]) for s in steps)
+        return '\t'.join(x) + '\n'
 
 
 def rewrite_walk(line, sp, old_seq, counts):
@@ -237,7 +284,16 @@ def rewrite_walk(line, sp, old_seq, counts):
         if a < pos:
             raise ValueError('overlapping runs in walk %s' % key)
         parts.append(sp.copied(key, toks[pos:a]))
-        old_spelling = ''.join(old_seq[int(n)] if o == '>' else revcomp(old_seq[int(n)]) for o, n in toks[a:b])
+        try:
+            old_spelling = ''.join(old_seq[int(n)] if o == '>' else revcomp(old_seq[int(n)])
+                                   for o, n in toks[a:b])
+        except KeyError as e:
+            n = e.args[0]
+            if n in sp.removed:
+                raise ValueError('walk %s comes before the S line of node %d: replace needs every S and L '
+                                 'line before the first W line' % (key, n)) from None
+            raise ValueError('run %s %d-%d of walk %s visits node %d, which no replaced interior holds: the '
+                             'extract outputs are not from this graph' % (rid, a, b, key, n)) from None
         new_walk = sp.walks[(rid, mid)]
         new_spelling = ''.join(sp.seq[n] for n in new_walk)
         want = sp.spelling[(rid, mid)]
@@ -257,80 +313,114 @@ def rewrite_walk(line, sp, old_seq, counts):
 
 
 def rewrite(graph, out_gfa, sp, vg=None, threads=4):
-    """Stream `graph` (a GBZ or GFA) to `out_gfa` with the Splice `sp` applied: removed nodes and their
-    edges dropped, the new nodes and edges written before the first W line, every W line rewritten by
-    rewrite_walk, and the other lines renumbered when `sp.renumber` is set. Returns the counts of edges
-    removed, runs rewritten and walks rewritten."""
+    """Stream `graph` (a GBZ or GFA) to `out_gfa` with the Splice `sp` applied, as the module docstring
+    describes: removed nodes and their edges dropped, the new nodes and edges written before the first W
+    line, every W line rewritten by rewrite_walk, and every other line that names a node renumbered when
+    `sp.renumber` is set. Returns the counts of edges removed, runs rewritten and walks rewritten. On a
+    failure, nothing is left at `out_gfa`."""
     renumber, removed = sp.renumber, sp.removed
+    # an empty allele's L->R edge is usually in the input already, from the walks that spelled the
+    # allele; then the input's line is the one written
+    new_edges = set(sp.edges)
+    direct_ends = {n for a, _, b, _ in sp.edges if a not in sp.seq and b not in sp.seq for n in (a, b)}
     counts = collections.Counter()
     old_seq = {}            # sequences of removed nodes, to spell the old runs
     new_written = False
-    with GfaStream(graph, vg, threads) as f, open(out_gfa + '.tmp', 'w') as out:
-        def write_new():
-            for n in sorted(sp.seq):
-                out.write('S\t%d\t%s\n' % (n, sp.seq[n]))
-            for a, ao, b, bo in sorted(sp.edges):
-                out.write('L\t%d\t%s\t%d\t%s\t0M\n' % (a, ao, b, bo))
-        for line in f:
-            t = line[0]
-            if t == 'S':
-                x = line.split('\t', 3)
-                n = int(x[1])
-                if n in removed:
-                    old_seq[n] = x[2].rstrip('\n').upper()
-                    continue
-                if renumber is not None:
-                    out.write('S\t%d\t%s' % (renumber[n], x[2] if len(x) == 3 else x[2] + '\t' + x[3]))
-                else:
-                    if n in sp.seq:
-                        raise ValueError('new node id %d is already in the graph' % n)
+    tmp = out_gfa + '.tmp'
+    try:
+        with GfaStream(graph, vg, threads) as f, open(tmp, 'w') as out:
+            for line in f:
+                t = line[0]
+                if new_written and t in ('S', 'L'):
+                    raise ValueError('%s has an %s line after a W line: replace needs every S and L line '
+                                     'before the first W line, as vg convert -f writes them' % (graph, t))
+                if t == 'S':
+                    x = line.split('\t', 3)
+                    n = int(x[1])
+                    if n in removed:
+                        old_seq[n] = x[2].rstrip('\n').upper()
+                        continue
+                    if renumber is not None:
+                        out.write('S\t%d\t%s' % (renumber[n], x[2] if len(x) == 3 else x[2] + '\t' + x[3]))
+                    else:
+                        if n in sp.seq:
+                            raise ValueError('a new node was given id %d, which a node of the graph has: '
+                                             'the ids from id_start on must be free' % n)
+                        out.write(line)
+                elif t == 'L':
+                    x = line.split('\t', 5)
+                    a, b = int(x[1]), int(x[3])
+                    if a in removed or b in removed:
+                        counts['edges_removed'] += 1
+                        continue
+                    if renumber is not None:
+                        a, b = renumber[a], renumber[b]
+                        x[1], x[3] = str(a), str(b)
+                        line = '\t'.join(x)
+                    if a in direct_ends:
+                        new_edges.discard((a, x[2], b, x[4]))
+                        new_edges.discard((b, FLIP[x[4]], a, FLIP[x[2]]))
                     out.write(line)
-            elif t == 'L':
-                x = line.split('\t', 5)
-                a, b = int(x[1]), int(x[3])
-                if a in removed or b in removed:
-                    counts['edges_removed'] += 1
-                    continue
-                if renumber is not None:
-                    x[1], x[3] = str(renumber[a]), str(renumber[b])
-                    out.write('\t'.join(x))
+                elif t == 'W':
+                    if not new_written:
+                        write_new(out, sp.seq, new_edges)
+                        new_written = True
+                    out.write(rewrite_walk(line, sp, old_seq, counts))
+                elif t == 'P':
+                    out.write(sp.path_line(line))
+                elif t == 'H':
+                    tags = [x for x in line.rstrip('\n').split('\t')[1:] if not x.startswith(GRAPH_NAME_TAGS)]
+                    if tags:
+                        out.write('\t'.join(['H'] + tags) + '\n')
                 else:
                     out.write(line)
-            elif t == 'W':
-                if not new_written:
-                    write_new()       # all S and L lines have been read
-                    new_written = True
-                out.write(rewrite_walk(line, sp, old_seq, counts))
-            else:
-                out.write(line)
-        if not new_written:
-            write_new()
-    os.replace(out_gfa + '.tmp', out_gfa)
+            if not new_written:
+                write_new(out, sp.seq, new_edges)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        raise
+    os.replace(tmp, out_gfa)
     return counts
 
 
-def replace(graph, extract_dir, msas_path, out_gfa, id_start=None, vg=None, threads=4, id_mode='dense'):
-    """Write the contig with every planned region's interior replaced, and return the summary. `id_mode`:
+def write_new(out, seq, edges):
+    """The new nodes' S lines and the new edges' L lines, each sorted."""
+    for n in sorted(seq):
+        out.write('S\t%d\t%s\n' % (n, seq[n]))
+    for a, ao, b, bo in sorted(edges):
+        out.write('L\t%d\t%s\t%d\t%s\t0M\n' % (a, ao, b, bo))
+
+
+def replace(graph, extract_dir, msas, out_gfa, id_start=None, vg=None, threads=4, id_mode='dense'):
+    """Write the contig `graph` to `out_gfa` with every planned region's interior replaced, and return the
+    summary. `msas` is one msas.jsonl.gz or a list of them. `id_mode`:
     - 'dense' (default): every node is renumbered, in the order of the old ids, with each region's new
-      nodes placed right after its left anchor, from `id_start` or else the contig's smallest id. A
-      region's nodes stay next to its neighbours, which keeps id-windowed readers (vg call's read
-      windows) local.
-    - 'reuse': old nodes keep their ids; new ones take the region's freed ids, then ids from `id_start`.
-      Ids stay stable, but on chr20 182,106 new nodes landed far from their regions, which made vg call's
-      read fetches straddle windows (a 54-minute short-read call instead of 6)."""
+      nodes placed right after its left anchor, from `id_start` or else the contig's smallest id. Every
+      walk and path is renumbered, not only those through the regions. A region's nodes stay next to its
+      neighbours, which keeps id-windowed readers (vg call's read windows) local.
+    - 'reuse': old nodes keep their ids; new ones take the region's freed ids, then ids from `id_start`,
+      which must be free. Ids stay stable, but new nodes can land far from their regions, so readers that
+      fetch by windows of node ids straddle windows and slow down."""
     if id_mode not in ('dense', 'reuse'):
         raise ValueError('id_mode must be dense or reuse')
     if id_mode == 'reuse' and id_start is None:
         raise ValueError("id_mode 'reuse' needs id_start")
-    plan = load_plan(extract_dir, msas_path)
+    plan = load_plan(extract_dir, msas)
     interiors = read_interiors(os.path.join(extract_dir, 'interiors.tsv.gz'), plan)
     occ = read_occurrences(os.path.join(extract_dir, 'occurrences.tsv.gz'), plan)
 
+    removed = {n: rid for rid in plan for n in interiors[rid]}
+    for rid, (pkg, _) in plan.items():
+        for anchor in (pkg['L'], pkg['R']):
+            if anchor in removed:
+                raise ValueError('anchor %d of region %s is in the interior of region %s' % (
+                    anchor, rid, removed[anchor]))
+
     stats = collections.Counter()
-    graphs, removed = {}, set()
+    graphs = {}
     for rid, (pkg, msa) in plan.items():
         graphs[rid] = region_graph(pkg, msa['rows'])
-        removed.update(interiors[rid])
         stats['regions'] += 1
         stats['nodes_removed'] += len(interiors[rid])
         stats['nodes_added'] += len(graphs[rid].seq)
