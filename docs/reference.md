@@ -486,11 +486,16 @@ It reads `--extract`, `extract`'s directory, and one `--msas` file, and writes a
 summary to `<out>.json` ([format](#qctsv-and-qctsvjson)). It measures each region whose MSA is `ok`
 with more than one row and whose package has at least two alleles.
 
+- `--graph` names the graph `extract` read, a GBZ or a GFA. `qc` then also measures that graph's own
+  alignment of the same pairs, against the same optimal alignments
+  ([method.md](method.md#the-graphs-own-alignment)), which takes one more pass over the graph, by
+  `vg convert` for a GBZ (`--vg`, `-t`). `run` gives it the contig's graph.
+
 - `--pairs` sets how many random pairs of alleles, the reference allele excluded, it measures per
   region, and `--refs` how many of the heaviest other alleles it compares with the reference allele.
   More pairs measure a region more closely, at the cost of more abPOA runs.
-- `--max-cells` skips a pair whose optimal alignment would exceed that many cells, the product of
-  the two alleles' lengths; the `skipped` column counts such pairs.
+- A pair whose optimal alignment would exceed `--max-cells` cells, the product of the two alleles'
+  lengths, is compared with abPOA's banded alignment instead; the `banded` column counts such pairs.
 - With `--sample N`, `qc` draws N of the `ok` MSAs with more than one row, and measures those whose
   package has at least two alleles, so it can measure fewer than N.
 - `--ref-sample`: for a package without a `ref` field, `qc` reads the reference allele from this
@@ -517,12 +522,12 @@ whose output exists. It reads `--gbz`, `--contig` and `--targets`, and writes un
 | realign | `msas.jsonl.gz` | `msas.jsonl.gz.manifest.json` | it exists |
 | replace | `C.realigned.gbz`, `replace.json` | `C.realigned.gbz.manifest.json` | the GBZ exists |
 | verify | `verify.json` | `verify.json.manifest.json` | it exists |
-| qc | `qc.tsv`, `qc.tsv.json` | `qc.tsv.manifest.json` | it exists, or `--no-qc` is given |
+| qc | `qc.tsv`, `qc.tsv.json` | `qc.tsv.manifest.json` | `qc.tsv` exists, or `--no-qc` is given |
 
 C stands for the contig's name. An interrupted `realign` resumes from `msas.jsonl.gz.partial`, and
 `replace` deletes its GFA, `C.realigned.gfa`, once the GBZ is built. `replace.json` holds
 `replace`'s summary. `run` decides what to skip only by whether files exist
-([Known gaps](#known-gaps)). Each file in the last column is written after the stage's other
+([Known gaps](#known-gaps)). Each file the last column names is written after the stage's other
 files, under a temporary name renamed into place once complete, so a `run` killed partway through
 a stage redoes that stage; the manifest comes last. A `verify.json` that records a failure stops
 `run` again on every later run, until it and the realigned GBZ are deleted.
@@ -531,8 +536,8 @@ a stage redoes that stage; the manifest comes last. A `verify.json` that records
 `--abpoa`, `--ref-sample`, `--drop-sample`, `--keep-all-samples`, `--timeout`, `--max-internal-bp`
 and `--id-start` to the stages that take them. It uses the defaults of the stage options it lacks:
 `regions`' `--pad` and `--max-span`, `realign`'s `--select` with one shard, `replace`'s `dense`
-numbering, and `qc`'s `--pairs` and `--refs`, without `--sample`, so `qc` measures every region. To
-change those, run the stages one by one.
+numbering, and `qc`'s `--pairs` and `--refs`, without `--sample`, so `qc` measures every region. It
+gives `qc` the prepared `C.gbz` as `--graph`. To change those, run the stages one by one.
 
 `run` stops with an error when `verify` fails, after writing `verify.json`. It prints progress lines
 on standard error, and at the end a JSON object with `id_range`, the smallest and largest node id of
@@ -823,7 +828,7 @@ A count that is zero is left out.
 `qc.tsv` has a plain header line, without `#`, and one row per measured region, in package order. An
 aligned base pair is a pair of bases, one from each sequence, in one column of an alignment,
 matching or not. The `pair_*`, `ref_*` and `forced*` columns are summed over the region's measured
-pairs; a skipped pair counts in `skipped` alone.
+pairs, a banded pair included. The `graph_*` columns are present only with `--graph`.
 
 | column | meaning |
 |---|---|
@@ -835,7 +840,10 @@ pairs; a skipped pair counts in `skipped` alone.
 | `ref_tp`, `ref_opt`, `ref_msa` | the same, for the reference allele against the heaviest other alleles |
 | `ref_sv`, `ref_sv_opt` | runs of 50 or more gap columns opposite bases, in the implied and optimal reference alignments |
 | `forced`, `forced_opt` | columns of the implied and optimal alignments (random and reference pairs) in a forced-homology window |
-| `skipped` | the number of random and reference pairs not measured because their optimal alignment would exceed `--max-cells` |
+| `banded` | the number of random and reference pairs compared with a banded alignment because their optimal alignment would exceed `--max-cells` |
+| `graph_pair_tp`, `graph_pair_msa` | over the random pairs: the aligned base pairs that both the graph and the optimal alignment have, and that the graph has |
+| `graph_ref_tp`, `graph_ref_msa` | the same, for the reference pairs |
+| `graph_sequence` | the bases of the nodes the region's runs visit in the graph |
 
 A forced-homology window is 40 consecutive columns, all-gap columns aside, of which at least 20 have
 a base in both rows, and in which more than 30% of those columns are mismatches.
@@ -849,6 +857,7 @@ rounded to four places and null when their denominator is 0:
 | `pair_recall`, `ref_recall` | tp / opt |
 | `pair_f1`, `ref_f1` | 2 tp / (opt + msa) |
 | `growth` | sum of `sequence` / sum of `longest` |
+| `graph_pair_precision`, ..., `graph_ref_f1`, `graph_growth` | with `--graph`, the same for the graph: its tp and msa columns over the shared `pair_opt` and `ref_opt`, and `graph_sequence` over `longest` |
 
 #### Reading the results
 
@@ -860,6 +869,11 @@ rounded to four places and null when their denominator is 0:
   optimal alignments do; `ref_sv` above `ref_sv_opt` means indels the reference comparison does not
   need. `growth` is at least 1, and rises with the sequence the graphs hold beside the longest
   alleles.
+- The `graph_` ratios are the region's alignment before `replace`, and the others after it, both
+  against one set of optimal alignments. A graph that folds a repeat's copies into a cycle aligns
+  more pairs than an alignment can, so its precision falls; its `graph_growth` can be below 1. Read
+  the per-region rows for the regions where the graph does better: the totals are dominated by the
+  many regions where both agree.
 
 ### `<output>.manifest.json`
 
@@ -892,7 +906,7 @@ records no tools; its summary names trfind's build instead.
 | `realign` | `<out>.manifest.json` | `packages` | `method`, `select`, `shard`, `timeout`, `max_cells`, `scores` | abpoa |
 | `replace` | `<gbz>.manifest.json` with `--gbz`, else `<out>.manifest.json` | `graph`, and `msas` or `msas_0`, ... | `extract`, `id_mode`, `id_start` | vg |
 | `verify` | `<out>.manifest.json`, only with `-o` | `before`, `after` | none | vg |
-| `qc` | `<out>.manifest.json` | `msas` | `extract`, `pairs`, `refs`, `sample`, `scores` | abpoa |
+| `qc` | `<out>.manifest.json` | `msas`, and `graph` with `--graph` | `extract`, `pairs`, `refs`, `sample`, `scores`, `max_cells` | abpoa, and vg with `--graph` |
 | `merge` | `<out>.manifest.json` | `gbz_0`, ... | none | vg |
 | `union` | `<out>.manifest.json` | `base`, `add` | none | none |
 | `project` | `<out>.manifest.json` | `union`, `msas` | none | none |
@@ -966,9 +980,9 @@ returns a global alignment of `seqs`.
   calling the aligner.
 - `banded=True` marks a slot's insertions, and an alignment to the centre whose matrix would exceed
   `max_cells`; `banded=False` marks every other alignment to the centre.
-- From `qc.region_qc`, a call is the two alleles of a measured pair, with `banded=False`: the
-  reference allele first when the pair holds it, and otherwise the allele that comes first in the
-  package.
+- From `qc.region_qc`, a call is the two alleles of a measured pair, with `banded=True` when their
+  lengths multiply to more than `max_cells` and `banded=False` otherwise: the reference allele first
+  when the pair holds it, and otherwise the allele that comes first in the package.
 - The aligner returns a list of strings, one row per sequence in order, all the same length, with
   `-` for a gap; each row without its gaps is its sequence. Columns that are gaps in every row are
   allowed.
@@ -1175,18 +1189,23 @@ two nodes.
 ### `qc.region_qc`
 
 ```python
-region_qc(pkg, rows, align, pairs=..., refs=..., max_cells=None)
+region_qc(pkg, rows, align, pairs=..., refs=..., max_cells=None, graph=None)
 ```
 
 `region_qc` measures one region's MSA, `rows`, as [`qc`](#qc) does, and returns a dict keyed by
 `qc.FIELDS`, the columns of [`qc.tsv`](#qctsv-and-qctsvjson). It reads the package's `id`, `alleles`
 and `ref`, if present, and needs at least one allele. `align` computes the optimal pairwise
 alignments under the [aligner contract](#the-aligner-contract); pass an `Abpoa` with the scores the
-MSA was built with. A pair whose two lengths multiply to more than `max_cells` is counted in
-`skipped` and not aligned; None, the default, skips none. `qc.summarise(list_of_dicts)` returns the
-sums and ratios of `qc.tsv.json`, and `qc.run(extract_dir, msas_path, out_path, ...)` is the `qc`
-stage, with keyword arguments named after its options, `max_cells` included, and `workdir` for its
-temporary files.
+MSA was built with. A pair whose two lengths multiply to more than `max_cells` is aligned with a
+band and counted in `banded`; None, the default, bands none. `graph`, if given, is the graph's own
+alignment of the region, as `(walks, lengths, interior_bp)`: `walks` maps each allele id to its walk
+as a list of `('>' or '<', node id)` in the region's forward orientation, `lengths` maps each node id
+to its length, and `interior_bp` is `graph_sequence`; the dict then has `qc.GRAPH_FIELDS` too.
+`qc.graph_walks(extract_dir, graph, region_ids, vg=None, threads=4)` reads these for a set of
+regions from `extract`'s output and its graph. `qc.summarise(list_of_dicts)` returns the sums and
+ratios of `qc.tsv.json`, and `qc.run(extract_dir, msas_path, out_path, ...)` is the `qc` stage, with
+keyword arguments named after its options, `max_cells`, `graph`, `vg` and `threads` included, and
+`workdir` for its temporary files.
 
 ### `pipeline.run_contig` and `merge.merge`
 
@@ -1238,8 +1257,9 @@ its check, after renaming it to `<out_gbz>.failed`.
 - On the command line, `realign` and `qc` align with abPOA only. Another aligner needs the Python
   API and an `msas.jsonl.gz` written with `realign.write_msas`.
 - `qc`'s pairwise alignments have no time limit: `realign`'s `--timeout` does not apply to them.
-  `qc` skips a pair over `--max-cells` rather than banding it, so in a region of long alleles it can
-  measure few pairs, or none; the `skipped` column shows how many it left out.
+  `qc` measures a pair over `--max-cells` against a banded alignment, which may not be optimal, so in
+  a region of long alleles its yardstick is weaker; the `banded` column shows how many pairs that
+  applies to.
 - `union` keeps the panel's status, so a region invariant in the panel is not realigned even when
   the recipient has alleles the panel lacks. The recipient's `replace` changes only regions that are
   `ok` in the recipient's own `extract`.

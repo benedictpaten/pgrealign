@@ -594,7 +594,9 @@ output, it also covers the conversion to GBZ.
 
 `qc` measures, region by region, how far the projected alignments of pairs of alleles (see Merging
 into one alignment) fall from the pairs' own optimal alignments, how much sequence the alignment
-puts in the graph, and how much unrelated sequence it forces into shared columns.
+puts in the graph, and how much unrelated sequence it forces into shared columns. Given the graph
+`extract` read, with `--graph`, it measures that graph's own alignment of the same pairs against the
+same optimal alignments, so each region has a before and an after; `run` always gives it.
 
 ### What is compared
 
@@ -611,10 +613,22 @@ those whose package has more than one allele. Within a region it compares two se
 
 Each pair's projected alignment is compared with its optimal alignment: the pair's global,
 unbanded, left-normalised abPOA alignment under the scores given with `--scores`. A pair whose
-optimal alignment would need more than `--max-cells` cells, the product of the two lengths, is not
-compared, and is counted in `skipped`; `run` gives `qc` the same `--max-cells` as `realign`. An
-aligned pair is a base of one sequence and a base of the other in one column, whether they match or
-not.
+optimal alignment would need more than `--max-cells` cells, the product of the two lengths, is
+compared with abPOA's banded alignment instead, which can fall short of the optimum, and is counted
+in `banded`; `run` gives `qc` the same `--max-cells` as `realign`, so a pair through the centre that
+`realign` banded is compared with the very alignment `realign` used. An aligned pair is a base of
+one sequence and a base of the other in one column, whether they match or not.
+
+### The graph's own alignment
+
+A graph aligns two bases when both alleles' walks read them from one node, at one offset, in one
+direction. Each allele takes the walk of its first spanning run in `occurrences.tsv.gz`, turned to
+the region's forward orientation; another run can spell the same allele along other nodes. A walk
+that visits a node more than once, as when the graph has folded copies of a repeat into a cycle,
+aligns each of its bases there with each base the other walk reads there. Such a graph can align
+more pairs than any alignment can, and those pairs cost it precision. Two walks that read one node
+in opposite directions align nothing there, since no column of a global alignment can hold an
+inversion.
 
 ### Metrics
 
@@ -629,7 +643,10 @@ induced graph. Its other fields are counts summed over the region's compared pai
 | `ref_opt`, `ref_msa`, `ref_tp` | the same, for the reference pairs |
 | `ref_sv`, `ref_sv_opt` | in the reference pairs' projected and optimal alignments, runs of 50 or more consecutive columns in which one row has a gap opposite a base of the other, whichever row holds the gap |
 | `forced`, `forced_opt` | columns of the projected and optimal alignments, of random and reference pairs alike, that lie in a forced-homology window |
-| `skipped` | random and reference pairs not compared because of `--max-cells` |
+| `banded` | random and reference pairs compared with a banded alignment because of `--max-cells` |
+| `graph_pair_msa`, `graph_pair_tp` | with `--graph`: aligned pairs in the graph's alignment of the random pairs, and in both it and the optimal alignment |
+| `graph_ref_msa`, `graph_ref_tp` | the same, for the reference pairs |
+| `graph_sequence` | with `--graph`: the bases of the nodes the region's runs visit, which `replace` removes |
 
 A forced-homology window is any 40 consecutive columns of a two-row alignment in which at least 20
 columns hold two bases and more than 30% of those are mismatches. Homologous tandem-repeat alleles
@@ -640,7 +657,10 @@ The summary sums every field over the regions, and adds, for the random and for 
 precision, tp / msa, recall, tp / opt, and F1, 2 tp / (opt + msa). `growth` is the sum of `sequence`
 over the sum of `longest`. It is at least 1, because each base of a region's longest allele needs a
 column of its own, and its excess over 1 is the bases the graphs hold beyond their longest alleles,
-as a fraction of those alleles' total length.
+as a fraction of those alleles' total length. With `--graph`, the summary has the same ratios for
+the graph, prefixed `graph_`, over the same optimal alignments, and `graph_growth`, the sum of
+`graph_sequence` over the sum of `longest`. A graph that folds a repeat into a cycle can have a
+`graph_growth` below 1.
 
 ## Realigning on a panel: union and project
 
@@ -695,8 +715,9 @@ theirs; an output that is not is renamed to `<output>.failed`.
   it, with whatever edges it has to nodes that stay.
 - Two alleles that both lack k-mers are at distance 0 when the centre is chosen exactly, and 1 when
   it is chosen from sketches.
-- Under the same `--max-cells`, `qc` skips every pair of the centre and an allele that `realign`
-  aligned with a band, so it never compares a banded alignment with its optimum. Its optimal
+- Under the same `--max-cells`, `qc` compares a pair of the centre and an allele that `realign`
+  aligned with a band with that same banded alignment, so it agrees by construction, and the region's
+  pairs over `--max-cells` are measured against an alignment that may not be optimal. `qc`'s
   alignments have no time limit, so a region can take longer in `qc` than it did in `realign`.
 - `run` judges a stage done by its output alone, whatever options made it, and `merge` refuses a
   contig whose reuse numbering reached past other contigs' ids

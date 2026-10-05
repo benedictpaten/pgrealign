@@ -4,7 +4,8 @@ A multiple alignment implies an alignment of every pair of its rows: the columns
 base. For a star alignment, the pair through the centre is optimal, and every other pair is only
 induced. `qc` measures, region by region, how far the induced pairs fall from the pairs' own optimal
 alignments, under the same scores. It also measures how much sequence the alignment adds to the graph,
-and how much of it forces unrelated sequence into shared columns.
+and how much of it forces unrelated sequence into shared columns. Given the graph extract read, it
+measures that graph's own alignment of the same pairs too, so each region has a before and an after.
 
 **Metrics, per region.** All counts are summed over the sampled pairs.
 - `sequence`: the bases of the induced graph, i.e. the sum over columns of the distinct bases in the
@@ -22,11 +23,20 @@ and how much of it forces unrelated sequence into shared columns.
   forced-homology window: 40 columns, of which at least 20 have both bases, with more than 30% of
   those mismatched. Homologous tandem-repeat alleles differ mostly by gaps, so such a window shows
   unrelated sequence aligned base against base.
+- `banded`: the pairs compared with a banded alignment rather than an optimal one (below).
+- With the graph: `graph_pair_tp` and `graph_pair_msa`, `graph_ref_tp` and `graph_ref_msa`, the same
+  counts for the alignment the graph implies, against the same optimal alignments; and
+  `graph_sequence`, the bases of the nodes the region's runs visit, which `replace` removes. The graph
+  aligns two bases when both alleles' walks read them from one node, at one offset, in one
+  direction. Each allele takes the walk of its first spanning run. A walk that visits a node twice
+  aligns each of its bases there with each base the other walk reads there, so a graph that collapses
+  copies of a repeat into a cycle aligns more pairs than any alignment can, and loses precision.
 
 The optimal alignment of a pair is global, unbanded and left-normalised, under the scores given, which
 should be those the alignment was built with. A pair whose unbanded alignment would exceed `max_cells`
-cells has no optimum to compare with; it is left out and counted in `skipped`. Pairs are drawn with a
-seed fixed per region, so a rerun measures the same pairs.
+cells is compared with abPOA's banded alignment instead, which may fall short of the optimum. For a
+pair through the centre that `realign` also banded, that is the alignment `realign` used. Pairs are
+drawn with a seed fixed per region, so a rerun measures the same pairs.
 
 **Output.** A TSV with one row per region that realign made `ok` and that has at least two alleles,
 and a summary (written next to it as .json) with the sums and the F1 values over all regions.
@@ -39,11 +49,13 @@ import os
 import random
 import zlib
 
-from .extract import read_packages
+from .extract import flip, read_packages
+from .graph import STEP, GfaStream, parse_w, walk_key
 from .star import Abpoa, SCORES, align_pair
 
 FIELDS = ['id', 'alleles', 'longest', 'sequence', 'pair_tp', 'pair_opt', 'pair_msa', 'ref_tp', 'ref_opt',
-          'ref_msa', 'ref_sv', 'ref_sv_opt', 'forced', 'forced_opt', 'skipped']
+          'ref_msa', 'ref_sv', 'ref_sv_opt', 'forced', 'forced_opt', 'banded']
+GRAPH_FIELDS = ['graph_pair_tp', 'graph_pair_msa', 'graph_ref_tp', 'graph_ref_msa', 'graph_sequence']
 SV_RUN = 50
 WINDOW, MIN_SHARED, MAX_MISMATCH = 40, 20, 0.30
 
@@ -108,70 +120,142 @@ def sequence_bp(rows):
     return sum(len({rows[m][c] for m in names} - {'-'}) for c in range(len(rows[names[0]])))
 
 
-def region_qc(pkg, rows, align, pairs=20, refs=20, max_cells=None):
-    """The metrics of one region (see the module docstring), as a dict keyed by FIELDS."""
+def graph_positions(path, length):
+    """(node, offset, reverse) of each base a walk's steps read, `path` being [(orient, node)]."""
+    out = []
+    for o, n in path:
+        k = length[n]
+        if o == '>':
+            out.extend((n, i, False) for i in range(k))
+        else:
+            out.extend((n, i, True) for i in range(k - 1, -1, -1))
+    return out
+
+
+def graph_pairs(pa, pb):
+    """The set of (i, j): base i of one walk and base j of another read at one graph position (see
+    graph_positions)."""
+    at = collections.defaultdict(list)
+    for j, key in enumerate(pb):
+        at[key].append(j)
+    return {(i, j) for i, key in enumerate(pa) for j in at.get(key, ())}
+
+
+def region_qc(pkg, rows, align, pairs=20, refs=20, max_cells=None, graph=None):
+    """The metrics of one region (see the module docstring), as a dict keyed by FIELDS, and by
+    GRAPH_FIELDS too when `graph` is given: ({allele: [(orient, node)]}, {node: length}, interior bp)."""
     alleles = [(a['id'], a['seq'].upper(), a['weight']) for a in pkg['alleles']]
     seqs = {a: s for a, s, _ in alleles}
     ref = pkg.get('ref')
-    out = dict.fromkeys(FIELDS, 0)
+    out = dict.fromkeys(FIELDS + (GRAPH_FIELDS if graph else []), 0)
     out.update(id=pkg['id'], alleles=len(alleles), longest=max(len(s) for s in seqs.values()),
                sequence=sequence_bp(rows))
+    if graph:
+        paths, length, out['graph_sequence'] = graph
+        position = {a: graph_positions(paths[a], length) for a in seqs}
+        for a in seqs:
+            if len(position[a]) != len(seqs[a]):
+                raise ValueError('%s: allele %s spells %d bp, its walk %d' % (pkg['id'], a, len(seqs[a]),
+                                                                            len(position[a])))
+
+    def compare(kind, a, b):
+        banded = max_cells is not None and len(seqs[a]) * len(seqs[b]) > max_cells
+        out['banded'] += banded
+        opt = align_pair(seqs[a], seqs[b], align, banded=banded)
+        ind = induced(rows[a], rows[b])
+        o, m = aligned_pairs(*opt), aligned_pairs(*ind)
+        out[kind + '_tp'] += len(o & m)
+        out[kind + '_opt'] += len(o)
+        out[kind + '_msa'] += len(m)
+        out['forced'] += forced_columns(*ind)
+        out['forced_opt'] += forced_columns(*opt)
+        if kind == 'ref':
+            out['ref_sv'] += long_gap_runs(*ind)
+            out['ref_sv_opt'] += long_gap_runs(*opt)
+        if graph:
+            g = graph_pairs(position[a], position[b])
+            out['graph_%s_tp' % kind] += len(o & g)
+            out['graph_%s_msa' % kind] += len(g)
+
     others = [a for a, _, _ in alleles if a != ref]
     rng = random.Random(zlib.crc32(pkg['id'].encode()))
     cand = [(i, j) for i in range(len(others)) for j in range(i + 1, len(others))]
-    too_big = lambda a, b: max_cells is not None and len(seqs[a]) * len(seqs[b]) > max_cells
     for i, j in sorted(rng.sample(cand, min(pairs, len(cand)))):
-        a, b = others[i], others[j]
-        if too_big(a, b):
-            out['skipped'] += 1
-            continue
-        opt = align_pair(seqs[a], seqs[b], align)
-        ind = induced(rows[a], rows[b])
-        o, m = aligned_pairs(*opt), aligned_pairs(*ind)
-        out['pair_tp'] += len(o & m)
-        out['pair_opt'] += len(o)
-        out['pair_msa'] += len(m)
-        out['forced'] += forced_columns(*ind)
-        out['forced_opt'] += forced_columns(*opt)
+        compare('pair', others[i], others[j])
     if ref is not None and ref in rows:
         heaviest = sorted((a for a in alleles if a[0] != ref), key=lambda a: (-a[2], a[0]))[:refs]
         for b, _, _ in heaviest:
-            if too_big(ref, b):
-                out['skipped'] += 1
-                continue
-            opt = align_pair(seqs[ref], seqs[b], align)
-            ind = induced(rows[ref], rows[b])
-            o, m = aligned_pairs(*opt), aligned_pairs(*ind)
-            out['ref_tp'] += len(o & m)
-            out['ref_opt'] += len(o)
-            out['ref_msa'] += len(m)
-            out['ref_sv'] += long_gap_runs(*ind)
-            out['ref_sv_opt'] += long_gap_runs(*opt)
-            out['forced'] += forced_columns(*ind)
-            out['forced_opt'] += forced_columns(*opt)
+            compare('ref', ref, b)
     return out
 
 
 def summarise(rows):
-    """Sums over regions, with precision, recall and F1 of the pair and reference agreement."""
+    """Sums over regions, with precision, recall and F1 of the pair and reference agreement, for the
+    alignment and, when the rows have them, for the graph."""
+    fields = FIELDS + (GRAPH_FIELDS if rows and 'graph_sequence' in rows[0] else [])
     s = collections.Counter()
     for r in rows:
-        for k in FIELDS[1:]:
+        for k in fields[1:]:
             s[k] += r[k]
-    out = {'regions': len(rows), **{k: s[k] for k in FIELDS[1:]}}
-    for p in ('pair', 'ref'):
-        tp, opt, msa = s[p + '_tp'], s[p + '_opt'], s[p + '_msa']
-        out[p + '_precision'] = round(tp / msa, 4) if msa else None
-        out[p + '_recall'] = round(tp / opt, 4) if opt else None
-        out[p + '_f1'] = round(2 * tp / (opt + msa), 4) if opt + msa else None
-    out['growth'] = round(s['sequence'] / s['longest'], 4) if s['longest'] else None
+    out = {'regions': len(rows), **{k: s[k] for k in fields[1:]}}
+    for g in ('', 'graph_')[:1 + ('graph_sequence' in s)]:
+        for p in ('pair', 'ref'):
+            tp, opt, msa = s[g + p + '_tp'], s[p + '_opt'], s[g + p + '_msa']
+            out[g + p + '_precision'] = round(tp / msa, 4) if msa else None
+            out[g + p + '_recall'] = round(tp / opt, 4) if opt else None
+            out[g + p + '_f1'] = round(2 * tp / (opt + msa), 4) if opt + msa else None
+        seq = s[g + 'sequence']
+        out[g + 'growth'] = round(seq / s['longest'], 4) if s['longest'] else None
     return out
 
 
 def _one(args):
-    pkg, rows, kw = args
+    pkg, rows, graph, kw = args
     with Abpoa(kw['abpoa'], kw['scores'], workdir=kw['workdir']) as align:
-        return region_qc(pkg, rows, align, kw['pairs'], kw['refs'], kw['max_cells'])
+        return region_qc(pkg, rows, align, kw['pairs'], kw['refs'], kw['max_cells'], graph)
+
+
+def graph_walks(extract_dir, graph, regions, vg=None, threads=4):
+    """{region: ({allele: [(orient, node)]}, {node: length}, interior bp)} for `regions`, from the graph
+    extract read: each allele's walk is that of its first spanning run in occurrences.tsv.gz, in the
+    region's forward orientation."""
+    want = collections.defaultdict(list)          # walk -> [(first, end, orient, region, allele)]
+    seen = set()
+    with gzip.open(os.path.join(extract_dir, 'occurrences.tsv.gz'), 'rt') as f:
+        for line in f:
+            if line[0] == '#':
+                continue
+            walk, region, typ, orient, first, end, member = line.rstrip('\n').split('\t')
+            if typ == 'spanning' and region in regions and (region, member) not in seen:
+                seen.add((region, member))
+                want[walk].append((int(first), int(end), orient, region, member))
+    interior = {r: [] for r in regions}
+    with gzip.open(os.path.join(extract_dir, 'interiors.tsv.gz'), 'rt') as f:
+        for line in f:
+            if line[0] == '#':
+                continue
+            region, nodes = line.rstrip('\n').split('\t')
+            if region in regions:
+                interior[region] = [int(n) for n in nodes.split(',') if n]
+    needed = {n for ns in interior.values() for n in ns}
+    length, paths = {}, collections.defaultdict(dict)
+    with GfaStream(graph, vg, threads) as f:
+        for line in f:
+            if line[0] == 'S':
+                x = line.split('\t', 3)
+                n = int(x[1])
+                if n in needed:
+                    length[n] = len(x[2].rstrip('\n'))
+            elif line[0] == 'W':
+                w = parse_w(line)
+                runs = want.get(walk_key(w))
+                if runs:
+                    toks = STEP.findall(w.steps)
+                    for a, b, orient, region, member in runs:
+                        p = [(o, int(n)) for o, n in toks[a:b]]
+                        paths[region][member] = p if orient == '+' else flip(p)
+    return {r: (paths[r], {n: length[n] for n in interior[r]}, sum(length[n] for n in interior[r]))
+            for r in regions}
 
 
 def reference_alleles(occurrences_path, ref_sample):
@@ -189,9 +273,10 @@ def reference_alleles(occurrences_path, ref_sample):
 
 
 def run(extract_dir, msas_path, out_path, pairs=20, refs=20, sample=None, jobs=1, abpoa='abpoa',
-        scores=SCORES, workdir=None, ref_sample='CHM13', max_cells=450_000_000):
+        scores=SCORES, workdir=None, ref_sample='CHM13', max_cells=450_000_000, graph=None, vg=None, threads=4):
     """Measure every region realign made `ok` (or a fixed random `sample` of them) and write the TSV and
-    its summary. `extract_dir` is extract's output directory. Returns the summary."""
+    its summary. `extract_dir` is extract's output directory, and `graph`, if given, the graph extract
+    read (GBZ or GFA), whose own alignment is then measured too. Returns the summary."""
     packages_path = os.path.join(extract_dir, 'packages.jsonl.gz')
     msas = {}
     with gzip.open(msas_path, 'rt') as f:
@@ -207,19 +292,21 @@ def run(extract_dir, msas_path, out_path, pairs=20, refs=20, sample=None, jobs=1
         ref = reference_alleles(os.path.join(extract_dir, 'occurrences.tsv.gz'), ref_sample)
         for p in todo:
             p.setdefault('ref', ref.get(p['id']))
+    walks = graph_walks(extract_dir, graph, {p['id'] for p in todo}, vg, threads) if graph else {}
     kw = {'pairs': pairs, 'refs': refs, 'abpoa': abpoa, 'scores': scores, 'workdir': workdir, 'max_cells': max_cells}
     out = []
     with concurrent.futures.ProcessPoolExecutor(max(1, jobs)) as ex:
-        for r in ex.map(_one, [(p, msas[p['id']], kw) for p in todo], chunksize=4):
+        for r in ex.map(_one, [(p, msas[p['id']], walks.get(p['id']), kw) for p in todo], chunksize=4):
             out.append(r)
+    fields = FIELDS + (GRAPH_FIELDS if graph else [])
     summary = summarise(out)
     with open(out_path + '.json.tmp', 'w') as f:
         json.dump(summary, f, indent=1)
         f.write('\n')
     with open(out_path + '.tmp', 'w') as f:
-        f.write('\t'.join(FIELDS) + '\n')
+        f.write('\t'.join(fields) + '\n')
         for r in out:
-            f.write('\t'.join(str(r[k]) for k in FIELDS) + '\n')
+            f.write('\t'.join(str(r[k]) for k in fields) + '\n')
     os.replace(out_path + '.json.tmp', out_path + '.json')
     os.replace(out_path + '.tmp', out_path)
     return summary

@@ -132,11 +132,14 @@ def cmd_qc(a):
     started = time.time()
     scores = scores_of(a)
     summary = qc.run(a.extract, a.msas, a.out, pairs=a.pairs, refs=a.refs, sample=a.sample, jobs=a.jobs,
-                     abpoa=a.abpoa, scores=scores, ref_sample=a.ref_sample, max_cells=a.max_cells)
-    provenance.write_manifest(a.out, 'qc', {'msas': a.msas},
+                     abpoa=a.abpoa, scores=scores, ref_sample=a.ref_sample, max_cells=a.max_cells,
+                     graph=a.graph, vg=a.vg, threads=a.threads)
+    inputs = {'msas': a.msas, **({'graph': a.graph} if a.graph else {})}
+    provenance.write_manifest(a.out, 'qc', inputs,
                               {'extract': a.extract, 'pairs': a.pairs, 'refs': a.refs, 'sample': a.sample,
-                               'scores': ' '.join(scores.flags())},
-                              tools=_tools(a, 'abpoa'), extra={'summary': summary}, started=started)
+                               'scores': ' '.join(scores.flags()), 'max_cells': a.max_cells},
+                              tools=_tools(a, 'abpoa', 'vg') if a.graph else _tools(a, 'abpoa'),
+                              extra={'summary': summary}, started=started)
     _print(summary)
 
 
@@ -292,9 +295,12 @@ def main(argv=None):
     c.add_argument('--scores', metavar='FLAGS', help="abPOA's scores for the optimal pairwise alignments; use the "
                    "scores the alignment was built with [%s]" % ' '.join(SCORES.flags()))
     c.add_argument('--max-cells', type=int, default=MAX_CELLS,
-                   help='skip a pair whose unbanded optimal alignment would exceed this many cells [%d]' % MAX_CELLS)
+                   help='band a pair whose unbanded optimal alignment would exceed this many cells [%d]' % MAX_CELLS)
+    c.add_argument('--graph', help="the graph extract read (GBZ or GFA): measure its own alignment of each region too")
     c.add_argument('-j', '--jobs', type=int, default=1, help='regions measured in parallel [1]')
+    c.add_argument('-t', '--threads', type=int, default=4, help='threads for vg convert, with --graph [4]')
     c.add_argument('--abpoa', default='abpoa', help='abPOA binary [abpoa on PATH]')
+    vg_arg(c)
     c.set_defaults(func=cmd_qc)
 
     c = sub.add_parser('run', help='every stage for one contig, resuming where an earlier run stopped')

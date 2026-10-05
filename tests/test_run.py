@@ -63,6 +63,7 @@ class TestRun(unittest.TestCase):
             self.assertEqual(s1['realign']['realigned'], {'ok': 1})
             self.assertTrue(s1['verify']['ok'])
             self.assertEqual(s1['qc']['regions'], 1)
+            self.assertIsNotNone(s1['qc']['graph_pair_f1'] if s1['qc']['pair_opt'] else s1['qc']['graph_ref_f1'])
             pkg = json.loads(gzip.open(os.path.join(out, 'chrT1', 'extract', 'packages.jsonl.gz'), 'rt').readline())
             self.assertIsNotNone(pkg['ref'])
             again = pipeline.run_contig(gbz, 'chrT1', targets, out, drop_samples=(), log=quiet)

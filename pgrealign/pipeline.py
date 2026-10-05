@@ -10,7 +10,7 @@ For a contig C of a whole-genome GBZ, `run_contig` writes, under OUT/C/:
 | realign | msas.jsonl.gz | it exists; an interrupted realign resumes from msas.jsonl.gz.partial |
 | replace | C.realigned.gbz, and replace.json | the GBZ exists |
 | verify | verify.json | it exists; run stops if it records a failure |
-| qc | qc.tsv and qc.tsv.json | it exists, or qc is off |
+| qc | qc.tsv and qc.tsv.json, measuring C.gbz's alignment too | it exists, or qc is off |
 
 The file by which run judges a stage done is written after the stage's other files, under a temporary
 name renamed into place once complete, so a run killed partway through a stage redoes that stage. Each
@@ -119,9 +119,11 @@ def run_contig(gbz, contig, targets, out_dir, jobs=1, threads=4, vg=None, abpoa=
     if do_qc and not _done(q):
         log('[%s] qc' % contig)
         t = time.time()
-        s = qc.run(ex, msas, q, jobs=jobs, abpoa=abpoa, scores=scores, ref_sample=ref_sample, max_cells=max_cells)
-        provenance.write_manifest(q, 'qc', {'msas': msas}, {'extract': ex, 'scores': ' '.join(scores.flags())},
-                                  tools=abpoa_tool, extra={'summary': s}, started=t)
+        s = qc.run(ex, msas, q, jobs=jobs, abpoa=abpoa, scores=scores, ref_sample=ref_sample, max_cells=max_cells,
+                   graph=cgbz, vg=vg, threads=threads)
+        provenance.write_manifest(q, 'qc', {'msas': msas, 'graph': cgbz},
+                                  {'extract': ex, 'scores': ' '.join(scores.flags()), 'max_cells': max_cells},
+                                  tools={**abpoa_tool, **vg_tool}, extra={'summary': s}, started=t)
         out['qc'] = s
 
     out['id_range'] = list(merge.node_range(rgbz, find_vg(vg)))

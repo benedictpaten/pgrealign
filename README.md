@@ -64,7 +64,7 @@ realign and qc work on at once, and `-t` how many threads vg uses. The outputs g
 | `msas.jsonl.gz` | realign | the alignment of each region that extract passed as `ok`, or why realign could not build one |
 | `chr20.realigned.gbz`, `replace.json` | replace | the realigned contig, and a summary that gives its node-id range |
 | `verify.json` | verify | the comparison of every path with its counterpart in `chr20.gbz` |
-| `qc.tsv`, `qc.tsv.json` | qc | per region and in total, how well the alignments agree with optimal pairwise alignments |
+| `qc.tsv`, `qc.tsv.json` | qc | per region and in total, how well the alignments agree with optimal pairwise alignments, before and after realignment |
 
 ### Resuming and options
 
@@ -103,7 +103,7 @@ picks. Only a region that is `ok` at all three is replaced; every other region k
 | `realign` | builds the medoid-star alignment of each `ok` package, several at once with `-j` |
 | `replace` | puts each alignment's graph in place of its region's nodes, and rewrites the walks through it |
 | `verify` | checks that every path of the realigned contig spells what it did before, up to letter case |
-| `qc` | measures how well each alignment agrees with optimal pairwise alignments |
+| `qc` | measures how well each alignment, and the original graph's, agrees with optimal pairwise alignments |
 | `run` | runs prepare to qc for one contig, resuming where an earlier run stopped |
 | `merge` | joins per-contig GBZs whose node ids do not overlap into one whole-genome GBZ |
 

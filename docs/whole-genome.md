@@ -125,7 +125,8 @@ pgrealign run --gbz hprc-v2.1.gbz --contig chr1 --targets catalogs/chm13v2.0_tr.
 ```
 
 qc's options are simpler to change: run `pgrealign run --no-qc`, then
-`pgrealign qc --extract $d/extract --msas $d/msas.jsonl.gz -o $d/qc.tsv` with the options wanted.
+`pgrealign qc --extract $d/extract --msas $d/msas.jsonl.gz --graph $d/<contig>.gbz -o $d/qc.tsv` with
+the options wanted.
 
 ### Resuming
 
@@ -232,7 +233,7 @@ a table per node, per region or per path, and some start a vg process that loads
 | realign | per worker, abPOA's alignment with the centre (about 15 bytes per cell it fills) or the k-mer counts that choose the centre (about 80 bytes per base of the region's alleles, each allele counted once, plus about 50 per base of the longest allele when comparing every pair of alleles exactly would take too long); in the parent, the package of every region to align and every finished result | `msas.jsonl.gz.partial`, then `msas.jsonl.gz` |
 | replace | every replaced region's alleles, fragments, alignment rows and new nodes; a record of every path's passage through those regions; every node id and its new id; then `vg gbwt -G`, building the realigned GBZ | `<contig>.realigned.gfa`, uncompressed, with every path as text; the GBZ built from it, after which the GFA is deleted |
 | verify | `vg paths -F` on each graph; a length and an MD5 digest per path | `verify.json` |
-| qc | the alignment rows of every realigned region; per worker, unbanded pairwise alignments by abPOA | `qc.tsv`, `qc.tsv.json` |
+| qc | the alignment rows of every realigned region, and the prepared graph's walk through each of its alleles; per worker, pairwise alignments by abPOA, banded over `--max-cells` | `qc.tsv`, `qc.tsv.json` |
 
 prepare's `vg chunk` needs the same memory for every contig, and replace holds the tables that grow
 most with the contig and with the number of regions it replaces. realign runs up to `-j` workers,
@@ -240,7 +241,7 @@ each using the larger of its two figures in the table, plus the parent.
 
 ### qc's limits
 
-qc skips a pair whose unbanded alignment would exceed `--max-cells` cells, which `run` passes to qc
+qc bands a pair whose unbanded alignment would exceed `--max-cells` cells, which `run` passes to qc
 as well as to realign, so the same limit bounds a qc worker's memory. But qc has no time limit, so a
 region can take longer in qc than realign's `--timeout` allows it; `--no-qc` skips qc, and
 `pgrealign qc --sample` measures a random subset of the regions.
@@ -428,15 +429,19 @@ abPOA computes without a band under the scores the multiple alignment was built 
 which `run` passes to both realign and qc). It reports precision, recall and F1 of the projected
 alignments' aligned base pairs, for random pairs of alleles other than the reference allele
 (`pair_*`) and for the reference allele, the one the reference path spells, against the alleles
-carried by the most paths (`ref_*`); [the method](method.md#qc) defines every measure. qc skips a
-pair whose optimal alignment would exceed `--max-cells` cells, the same test by which realign bands
-an alignment with the centre, so it does not measure pairs as long as those that realign bands; the
-column `skipped` counts them.
+carried by the most paths (`ref_*`); [the method](method.md#qc) defines every measure. A pair whose
+optimal alignment would exceed `--max-cells` cells, the same test by which realign bands an
+alignment with the centre, is compared with a banded alignment instead; the column `banded` counts
+them. `run` also gives qc the prepared contig, whose own alignment of the same pairs it measures
+against the same optimal alignments, in the `graph_*` columns: the region before replace, beside the
+region after it.
 
 `qc.tsv.json` holds the totals over the contig, with precision, recall and F1, and `growth`, the
-bases of the realigned regions' graphs over the bases of their longest alleles. `qc.tsv` has the
-same counts per region, but not F1, to find the regions that pull a total down. A region's reference
-F1 is 2 `ref_tp` / (`ref_opt` + `ref_msa`), and the regions where it is lowest are the first to look
+bases of the realigned regions' graphs over the bases of their longest alleles, each for the
+realigned and, prefixed `graph_`, the prepared graph. `qc.tsv` has the same counts per region, but
+not F1, to find the regions that pull a total down. A region's reference F1 is 2 `ref_tp` /
+(`ref_opt` + `ref_msa`), and the prepared graph's 2 `graph_ref_tp` / (`ref_opt` + `graph_ref_msa`);
+the regions where the realigned F1 is lowest, or below the prepared graph's, are the first to look
 at.
 
 ### Completeness
