@@ -2,15 +2,16 @@
 
 The default method is the **medoid star**, chosen on chr20 (vntr-eval results, section 4x):
 
-1. **Centre.** The allele with the least weighted sum of multiset 15-mer Jaccard distances to the
+1. **Centre.** The allele with the least weighted sum of multiset 15-mer Jaccard distances to all the
    others. The weight is the allele's number of paths. The multiset counts the j-th copy of a k-mer
    as its own token, so copy number counts. k-mers are encoded as integers, so the centre does not
    depend on Python's per-process string hashing.
 2. **Pairwise alignment.** Every other allele is aligned to the centre with
-   `abpoa -m 0 -r 1 -b -1`: global, unbanded, abPOA's default scores.
+   `abpoa -m 0 -r 1 -b -1 SCORES`: global and unbanded, with the scores in SCORES.
 3. **Normalisation.** Each pair's indels are shifted left wherever the cost stays the same.
 4. **Merge.** One column per centre base, with an insertion slot between each pair of centre bases and
-   at both ends. The distinct insertions of a slot are aligned to each other by abPOA, longest first.
+   at both ends. The distinct insertions of a slot are aligned to each other by abPOA, longest first,
+   with the same scores.
 
 **Fragments.** A fragment is a walk that starts or ends inside the region.
 - Its side (extract.py) says which part of an allele it is: `left` touches anchor L, `right` touches
@@ -43,8 +44,13 @@ import time
 
 K = 15
 MAX_CELLS = 450_000_000
-MAX_TOTAL_BP = 40_000_000     # the medoid holds every allele's k-mer tokens: about 50 bytes per base
-MEDOID_COMPARATORS = 64       # each candidate is compared with at most this many alleles, the heaviest
+MAX_TOTAL_BP = 40_000_000     # the medoid holds every allele's k-mer counts: up to about 50 bytes per base
+# abPOA's scores, for the pairwise and the slot alignments alike: its defaults (match 2, mismatch 4, gap
+# open 4 and 24, extension 2 and 1) times four, except the long-gap extension, which stays 1. A long
+# indel then costs a quarter as much per base, relative to a match. Under the defaults, unrelated
+# sequence is cheaper to align base against base, threading short gaps through chance matches, than to
+# delete and insert; one replacement then becomes many small bubbles.
+SCORES = ('-M', '8', '-X', '16', '-O', '16,96', '-E', '8,1')
 _CODE = {'A': 0, 'C': 1, 'G': 2, 'T': 3}
 
 
@@ -56,10 +62,9 @@ class Capped(Exception):
 
 # ----------------------------------------------------------------------------- centre
 
-def kmer_tokens(seq, k=K):
-    """The multiset of k-mers as a set of integers (k-mer code, occurrence number). k-mers holding a base
-    other than ACGT are skipped."""
-    seen, out = collections.Counter(), set()
+def kmer_counts(seq, k=K):
+    """The multiset of k-mers, {k-mer code: copies}. k-mers holding a base other than ACGT are skipped."""
+    out = collections.Counter()
     mask = (1 << (2 * k)) - 1
     code, valid = 0, 0
     for c in seq:
@@ -70,28 +75,32 @@ def kmer_tokens(seq, k=K):
         code = ((code << 2) | v) & mask
         valid += 1
         if valid >= k:
-            seen[code] += 1
-            out.add((code << 24) | seen[code])
+            out[code] += 1
     return out
 
 
 def medoid(seqs, weights, k=K):
-    """Index of the sequence minimising sum_j w_j (1 - Jaccard(i, j)) over the others; ties go to the lower
-    index. Only sequences of positive weight (carried by some path of the panel) are candidates, when
-    there are any; the sum runs over the MEDOID_COMPARATORS heaviest alleles (all of them on chr20's
-    median region of 45)."""
-    toks = [kmer_tokens(s, k) for s in seqs]
-    cands = [i for i in range(len(seqs)) if weights[i] > 0] or list(range(len(seqs)))
-    # the weighted sum is dominated by the heaviest alleles: compare with at most MEDOID_COMPARATORS of them
-    comp = sorted(range(len(seqs)), key=lambda j: (-weights[j], j))[:MEDOID_COMPARATORS]
+    """Index of the sequence minimising sum_j w_j (1 - Jaccard(i, j)) over all the others; ties go to the
+    lower index. Jaccard is over multisets: the shared copies of each k-mer over the copies in either.
+    Only sequences of positive weight (carried by some path of the panel) are candidates, when there
+    are any."""
+    n = len(seqs)
+    counts = [kmer_counts(s, k) for s in seqs]
+    sizes = [sum(c.values()) for c in counts]
+    dist = [[0.0] * n for _ in range(n)]
+    for i in range(n):
+        for j in range(i + 1, n):
+            a, b = counts[i], counts[j]
+            inter = sum(min(a[x], b[x]) for x in a.keys() & b.keys())
+            uni = sizes[i] + sizes[j] - inter
+            dist[i][j] = dist[j][i] = 1.0 - (inter / uni if uni else 1.0)
+    cands = [i for i in range(n) if weights[i] > 0] or list(range(n))
     best = None
     for i in cands:
         d = 0.0
-        for j in comp:
+        for j in range(n):
             if i != j:
-                inter = len(toks[i] & toks[j])
-                uni = len(toks[i]) + len(toks[j]) - inter
-                d += weights[j] * (1.0 - (inter / uni if uni else 1.0))
+                d += weights[j] * dist[i][j]
         if best is None or d < best[0]:
             best = (d, i)
     return best[1]
@@ -114,8 +123,8 @@ def read_fasta_rows(path):
     return out
 
 
-def abpoa_rows(recs, wd, flags, deadline, abpoa='abpoa'):
-    """`abpoa -m 0 -r 1 FLAGS` on [(name, seq)] in that order -> {name: upper-case row}."""
+def abpoa_rows(recs, wd, flags, deadline, abpoa='abpoa', scores=SCORES):
+    """`abpoa -m 0 -r 1 SCORES FLAGS` on [(name, seq)] in that order -> {name: upper-case row}."""
     left = deadline - time.time()
     if left <= 0:
         raise Capped('timeout', 'time limit reached')
@@ -125,8 +134,8 @@ def abpoa_rows(recs, wd, flags, deadline, abpoa='abpoa'):
             f.write('>%s\n%s\n' % (n, s))
     try:
         with open(out, 'w') as o:
-            subprocess.run([abpoa, '-m', '0', '-r', '1', *flags, fa], stdout=o, stderr=subprocess.DEVNULL,
-                           check=True, timeout=left)
+            subprocess.run([abpoa, '-m', '0', '-r', '1', *scores, *flags, fa], stdout=o,
+                           stderr=subprocess.DEVNULL, check=True, timeout=left)
     except subprocess.TimeoutExpired:
         raise Capped('timeout', 'time limit reached in abPOA')
     rows = read_fasta_rows(out)
@@ -160,7 +169,7 @@ def left_normalise_pair(a, b):
     return ''.join(a), ''.join(b)
 
 
-def star_merge(centre, pairs, wd, deadline, stats, abpoa='abpoa'):
+def star_merge(centre, pairs, wd, deadline, stats, abpoa='abpoa', scores=SCORES):
     """Merge pairwise alignments to the centre, {name: (centre row, row)}, into one MSA {name: row}."""
     n = len(centre)
     cols, ins = {}, {}
@@ -187,7 +196,7 @@ def star_merge(centre, pairs, wd, deadline, stats, abpoa='abpoa'):
             slot_rows[q] = (len(s), {s: s})
             continue
         recs = sorted(strs, key=lambda x: (-len(x), x))
-        got = abpoa_rows([('i%d' % i, s) for i, s in enumerate(recs)], wd, [], deadline, abpoa)
+        got = abpoa_rows([('i%d' % i, s) for i, s in enumerate(recs)], wd, [], deadline, abpoa, scores)
         al = {s: got['i%d' % i] for i, s in enumerate(recs)}
         slot_rows[q] = (len(al[recs[0]]), al)
         stats['slot_alignments'] += 1
@@ -242,7 +251,7 @@ def place_fragment(frag, side, alleles, rows):
 
 # ----------------------------------------------------------------------------- one region
 
-def realign_package(pkg, abpoa='abpoa', timeout=900, max_cells=MAX_CELLS, workdir=None):
+def realign_package(pkg, abpoa='abpoa', timeout=900, max_cells=MAX_CELLS, workdir=None, scores=SCORES):
     """The medoid-star MSA of one region package -> {'id', 'status', 'centre', 'rows', 'seconds', ...}."""
     t0 = time.time()
     deadline = t0 + timeout
@@ -274,7 +283,7 @@ def realign_package(pkg, abpoa='abpoa', timeout=900, max_cells=MAX_CELLS, workdi
                 # an empty allele (a deletion of the whole interior) or an empty centre: all gaps
                 pairs[aid] = (cseq + '-' * len(s), '-' * len(cseq) + s)
                 continue
-            got = abpoa_rows([('c', cseq), ('q', s)], wd, ['-b', '-1'], deadline, abpoa)
+            got = abpoa_rows([('c', cseq), ('q', s)], wd, ['-b', '-1'], deadline, abpoa, scores)
             ca, sa = got['c'], got['q']
             keep = [i for i in range(len(ca)) if ca[i] != '-' or sa[i] != '-']
             ca, sa = ''.join(ca[i] for i in keep), ''.join(sa[i] for i in keep)
@@ -290,7 +299,7 @@ def realign_package(pkg, abpoa='abpoa', timeout=900, max_cells=MAX_CELLS, workdi
             if not cseq or not fs:
                 pairs[f['id']] = (cseq + '-' * len(fs), '-' * len(cseq) + fs)
                 continue
-            got = abpoa_rows([('c', cseq), ('q', fs)], wd, ['-b', '-1'], deadline, abpoa)
+            got = abpoa_rows([('c', cseq), ('q', fs)], wd, ['-b', '-1'], deadline, abpoa, scores)
             ca, sa = got['c'], got['q']
             keep = [i for i in range(len(ca)) if ca[i] != '-' or sa[i] != '-']
             ca, sa = ''.join(ca[i] for i in keep), ''.join(sa[i] for i in keep)
@@ -298,7 +307,7 @@ def realign_package(pkg, abpoa='abpoa', timeout=900, max_cells=MAX_CELLS, workdi
                 raise ValueError('abPOA rows do not spell their inputs (%s)' % f['id'])
             pairs[f['id']] = left_normalise_pair(ca, sa)
             aligned += 1
-        rows = star_merge(cseq, pairs, wd, deadline, stats, abpoa)
+        rows = star_merge(cseq, pairs, wd, deadline, stats, abpoa, scores)
         for f in exact:
             rows[f['id']] = place_fragment(f['seq'].upper(), f['side'], alleles, rows)
         stats['fragments_exact'], stats['fragments_aligned'] = len(exact), aligned

@@ -5,11 +5,11 @@ from pgrealign import realign
 
 
 class TestPieces(unittest.TestCase):
-    def test_kmer_tokens_count_copies(self):
-        a = realign.kmer_tokens('ACGTACGTACGTACGTACGT', k=4)
-        b = realign.kmer_tokens('ACGTACGTACGT', k=4)
-        self.assertTrue(b < a)                 # the shorter array's tokens are a strict subset
-        self.assertEqual(realign.kmer_tokens('ACGNACGT', k=4), realign.kmer_tokens('ACGT', k=4))
+    def test_kmer_counts_count_copies(self):
+        a = realign.kmer_counts('ACGTACGTACGTACGTACGT', k=4)
+        b = realign.kmer_counts('ACGTACGTACGT', k=4)
+        self.assertTrue(all(a[x] >= n for x, n in b.items()) and a != b)   # a strict sub-multiset
+        self.assertEqual(realign.kmer_counts('ACGNACGT', k=4), realign.kmer_counts('ACGT', k=4))
 
     def test_medoid(self):
         seqs = ['ACGTACGTAC' * 3, 'ACGTACGTAC' * 4, 'ACGTACGTAC' * 5, 'TTTTGGGGCC' * 3]
@@ -53,6 +53,22 @@ class TestStar(unittest.TestCase):
         self.assertEqual(rows['a4'], '-' * len(rows['a4']))
         # the fragment lies inside a2, the only allele long enough to hold it
         self.assertTrue(all(f == '-' or f == a for f, a in zip(rows['f1'], rows['a2'])))
+
+    def test_unrelated_stretch_is_not_forced_into_columns(self):
+        # two alleles share their flanks and differ by 150 unrelated random bases: SCORES deletes one
+        # stretch and inserts the other, where abPOA's defaults thread chance matches through it
+        import random
+        rng = random.Random(1)
+        x, y = (''.join(rng.choice('ACGT') for _ in range(150)) for _ in range(2))
+        flank = 'ACGTTGCATCCGATTAGCCTAGGCTTACG'
+        pkg = {'id': 'R', 'alleles': [{'id': 'a1', 'weight': 2, 'seq': flank + x + flank[::-1]},
+                                      {'id': 'a2', 'weight': 1, 'seq': flank + y + flank[::-1]}],
+               'fragments': []}
+        def shared(scores):
+            rows = realign.realign_package(pkg, scores=scores)['rows']
+            return sum(1 for p, q in zip(rows['a1'], rows['a2']) if p != '-' and q != '-') - 2 * len(flank)
+        self.assertLess(shared(realign.SCORES), 40)
+        self.assertGreater(shared(()), 100)
 
     def test_aligned_fragment_and_too_big(self):
         pkg = {'id': 'R', 'alleles': [{'id': 'a1', 'weight': 1, 'seq': 'ACGTACGT'},

@@ -67,11 +67,12 @@ def cmd_extract(a):
 def cmd_realign(a):
     from . import provenance, realign
     i, n = (int(x) for x in a.shard.split('/'))
+    scores = tuple(a.scores.split()) if a.scores is not None else realign.SCORES
     summary = realign.run(a.packages, a.out, select=a.select, shard=(i, n), jobs=a.jobs, abpoa=a.abpoa,
-                          timeout=a.timeout, max_cells=a.max_cells)
+                          timeout=a.timeout, max_cells=a.max_cells, scores=scores)
     provenance.write_manifest(a.out, 'realign', {'packages': a.packages},
                               {'select': a.select, 'shard': a.shard, 'timeout': a.timeout,
-                               'max_cells': a.max_cells, 'method': 'medoid_star'},
+                               'max_cells': a.max_cells, 'method': 'medoid_star', 'scores': ' '.join(scores)},
                               tools=[a.abpoa], extra={'summary': summary})
     json.dump(summary, sys.stdout, indent=1)
     print()
@@ -183,6 +184,8 @@ def main(argv=None):
     c.add_argument('--timeout', type=float, default=900, help='seconds per region [900]')
     c.add_argument('--max-cells', type=int, default=450_000_000,
                    help='keep a region whose centre x longest allele exceeds this [450,000,000]')
+    c.add_argument('--scores', help="abPOA scoring flags for every alignment, e.g. '-X 6'; '' for abPOA's "
+                   "defaults [realign.SCORES]")
     c.set_defaults(func=cmd_realign)
 
     c = sub.add_parser('replace', help="splice the realigned regions into the contig's graph (stage 5)")
