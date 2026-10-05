@@ -29,7 +29,8 @@ def cmd_catalog(a):
     inputs.update({'reference_%d' % i: f for i, f in enumerate(a.reference or ())})
     provenance.write_manifest(a.out, 'catalog', inputs,
                               {'gap': a.gap, 'contigs': contigs, 'min_period': a.min_period,
-                               'max_period': a.max_period}, extra={'summary': summary}, started=started)
+                               'max_period': a.max_period}, extra={'summary': summary}, started=started,
+                              checksums=True)
     _print(summary)
 
 

@@ -1,6 +1,7 @@
 """A manifest written next to every stage's output: what ran, on what, with which tools, and when."""
 import collections.abc
 import datetime
+import hashlib
 import json
 import os
 import platform
@@ -66,19 +67,29 @@ def _timestamp(t):
     return t.astimezone().isoformat(timespec='seconds')
 
 
-def file_info(path):
+def file_info(path, checksum=False):
+    """An input's path, size and modification time, and with `checksum` its MD5."""
     st = os.stat(path)
-    return {'path': os.path.abspath(path), 'bytes': st.st_size, 'mtime': _timestamp(st.st_mtime)}
+    out = {'path': os.path.abspath(path), 'bytes': st.st_size, 'mtime': _timestamp(st.st_mtime)}
+    if checksum:
+        h = hashlib.md5()
+        with open(path, 'rb') as f:
+            for block in iter(lambda: f.read(1 << 20), b''):
+                h.update(block)
+        out['md5'] = h.hexdigest()
+    return out
 
 
-def write_manifest(out_path, stage, inputs, params, tools=(), extra=None, started=None):
+def write_manifest(out_path, stage, inputs, params, tools=(), extra=None, started=None, checksums=False):
     """Write <out_path>.manifest.json: the stage, the command line, the inputs, the parameters, when the
     stage started and finished, and the versions of pgrealign, Python and the external tools.
 
     `tools` maps each tool's name to the binary the stage ran (None for the name on PATH), or is a sequence
     of names or paths, each named by its basename; the manifest records each as tool_version does.
     `started` is when the stage began, as a datetime or a time.time() value taken before it ran, and is
-    null in the manifest if not given. 'finished' is when write_manifest is called. `extra` is merged in
+    null in the manifest if not given. 'finished' is when write_manifest is called. With `checksums`,
+    each input's MD5 is recorded too, so that someone else can confirm they have the same inputs.
+    `extra` is merged in
     last. Returns the manifest."""
     finished = datetime.datetime.now()
     m = {
@@ -88,7 +99,7 @@ def write_manifest(out_path, stage, inputs, params, tools=(), extra=None, starte
         'command': list(sys.argv),
         'started': None if started is None else _timestamp(started),
         'finished': _timestamp(finished),
-        'inputs': {k: file_info(v) for k, v in inputs.items()},
+        'inputs': {k: file_info(v, checksums) for k, v in inputs.items()},
         'params': params,
         'tools': {name: tool_version(name, binary=binary) for name, binary in _tools(tools or ()).items()},
     }
