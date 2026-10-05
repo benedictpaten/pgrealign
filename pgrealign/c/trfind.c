@@ -1,12 +1,21 @@
-// trfind: seed-based tandem-repeat finder (periods MINP..MAXP), truth-independent.
-// For every exact K-mer, the distance d to its previous occurrence is a candidate period.
-// Hits with the same (drifting, ~3%-binned) period are chained while they lie within a gap
-// of max(40, min(d/2, 300)) bp. A chain qualifies as a tandem repeat when its seed span
-// covers >= 0.75 of a period (so the region holds >= ~2 copies), seed density >= 0.15, and the
-// region [first_seed - period, last_seed + K) is >= 40 bp.
+// trfind: a seed-based tandem-repeat finder for periods MINP..MAXP, from the sequence alone.
+// Usage: trfind in.fa MINP MAXP. Each FASTA record is scanned on its own, upper-cased.
+// Seeds. For every exact K-mer of A, C, G and T, the distance d to its previous occurrence in the same
+// record is a candidate period when MINP <= d <= MAXP.
+// Chains. Distances are binned: one bin per bp up to 40, then bins ~3% wide. A seed joins the active
+// chain of its own bin, else of the bin below, else of the bin above, when it lies within
+// max(40, min(d/2, 300)) bp of that chain's last seed. Otherwise it starts a new chain in its own bin,
+// and the chain that bin held ends. Every chain ends at the end of the record.
+// Qualification. A chain of period p (its mean seed distance, rounded) is a tandem repeat when
+// - it has at least 3 seeds,
+// - its seed span, from the first seed to the end of the last, covers >= 0.75 of a period (so the
+//   region holds >= ~2 copies),
+// - its seed density, seeds per bp of seed span, is >= 0.15, and
+// - its region [first_seed - p, last_seed + K), clipped to the record, is >= 40 bp.
 // Output (0-based, half-open): chrom start end period refined_period nseeds seedspan id_p gc
-// refined_period = smallest divisor q of period whose Hamming self-identity at offset q is
-// within 0.03 of the identity at offset period.
+// refined_period is the smallest divisor q of period whose Hamming self-identity over the region at
+// offset q is within 0.03 of id_p, the identity at offset period (an N matches nothing). gc is the GC
+// fraction of the region's non-N bases.
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,7 +26,7 @@
 
 static char *seq; static long slen;
 static int minp, maxp;
-static const char *chrom;
+static const char *chrom; static int chromlen;  // the record name, up to its first blank
 
 typedef struct { long start, last; long n; double dsum; int active; } Run;
 static Run runs[NB];
@@ -51,19 +60,24 @@ static void finalize(Run *r) {
     for (long dv = 2; dv <= p; dv++) {
         if (p % dv) continue;
         long qq = p / dv;
-        if (qq < 1) break;
         double idq = ident(a, b, qq);
         if (idq >= idp - 0.03) q = qq;  // keep the smallest qualifying divisor
     }
     long gc = 0, acgt = 0;
     for (long i = a; i < b; i++) { char c = seq[i]; if (c == 'G' || c == 'C') gc++; if (c != 'N') acgt++; }
-    printf("%s\t%ld\t%ld\t%ld\t%ld\t%ld\t%ld\t%.3f\t%.3f\n", chrom, a, b, p, q, r->n, span, idp,
+    printf("%.*s\t%ld\t%ld\t%ld\t%ld\t%ld\t%ld\t%.3f\t%.3f\n", chromlen, chrom, a, b, p, q, r->n, span, idp,
            acgt ? (double)gc / acgt : 0.0);
 }
 
+static void *xmalloc(size_t n) {
+    void *p = malloc(n);
+    if (!p) { fprintf(stderr, "trfind: out of memory allocating %zu bytes\n", n); exit(1); }
+    return p;
+}
+
 static void scan(void) {
-    static int *last = NULL;
-    if (!last) last = malloc(sizeof(int) * (1 << (2 * K)));
+    static long *last = NULL;
+    if (!last) last = xmalloc(sizeof(long) * (1 << (2 * K)));
     for (long i = 0; i < (1 << (2 * K)); i++) last[i] = -1;
     memset(runs, 0, sizeof(runs));
     unsigned code = 0; int valid = 0; unsigned mask = (1u << (2 * K)) - 1;
@@ -74,7 +88,7 @@ static void scan(void) {
         code = ((code << 2) | v) & mask; valid++;
         if (valid < K) continue;
         long pos = i - K + 1;
-        int j = last[code]; last[code] = (int)pos;
+        long j = last[code]; last[code] = pos;
         if (j < 0) continue;
         long d = pos - j;
         if (d < minp || d > maxp) continue;
@@ -101,17 +115,24 @@ int main(int argc, char **argv) {
     if (argc < 4) { fprintf(stderr, "usage: trfind in.fa minp maxp\n"); return 1; }
     minp = atoi(argv[2]); maxp = atoi(argv[3]);
     FILE *f = fopen(argv[1], "r");
-    if (!f) { perror("open"); return 1; }
-    fseek(f, 0, SEEK_END); long fsz = ftell(f); fseek(f, 0, SEEK_SET);
-    char *buf = malloc(fsz + 1); fread(buf, 1, fsz, f); buf[fsz] = 0; fclose(f);
-    seq = malloc(fsz + 1);
-    char *p = buf; char namebuf[256];
+    if (!f) { perror(argv[1]); return 1; }
+    long fsz = -1;
+    if (fseek(f, 0, SEEK_END) == 0) fsz = ftell(f);
+    if (fsz < 0 || fseek(f, 0, SEEK_SET) != 0) { perror(argv[1]); return 1; }
+    char *buf = xmalloc(fsz + 1);
+    if (fread(buf, 1, fsz, f) != (size_t)fsz) {
+        fprintf(stderr, "trfind: short read of %s\n", argv[1]);
+        return 1;
+    }
+    buf[fsz] = 0; fclose(f);
+    seq = xmalloc(fsz + 1);
+    char *p = buf;
     while (*p) {
         if (*p != '>') { p++; continue; }
         char *nl = strchr(p, '\n'); if (!nl) break;
-        int nlen = 0; char *q = p + 1;
-        while (q < nl && *q != ' ' && *q != '\t' && nlen < 255) namebuf[nlen++] = *q++;
-        namebuf[nlen] = 0; chrom = namebuf;
+        char *q = p + 1;
+        while (q < nl && *q != ' ' && *q != '\t' && *q != '\r') q++;
+        chrom = p + 1; chromlen = (int)(q - chrom);
         p = nl + 1; slen = 0;
         while (*p && *p != '>') {
             char c = *p++;
@@ -122,5 +143,6 @@ int main(int argc, char **argv) {
         scan();
         fflush(stdout);
     }
+    if (fflush(stdout) != 0 || ferror(stdout)) { perror("trfind: write"); return 1; }
     return 0;
 }

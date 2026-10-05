@@ -1,21 +1,27 @@
 """Stage 0, `catalog`: a tandem-repeat catalogue of the reference.
 
 This is the only stage that knows the regions are tandem repeats. Any BED of target intervals can take
-the catalogue's place in the stages after it. The catalogue takes no sample or truth data as input.
+the catalogue's place in the stages after it (see Reading). The catalogue takes no sample or truth data
+as input.
 
 **Sources.**
 - **RepeatMasker** (a BED of ten columns: chrom start end name score strand class family divergence
   id). Simple_repeat records become STR when the motif in "(MOTIF)n" is 1-6 bp and VNTR when it is
-  longer. Satellite records become SAT and Low_complexity records LC. RepeatMasker reports no
-  Simple_repeat motif longer than 30 bp, so on its own it misses most VNTRs: 511 of the 671 VNTRs
-  that the earlier chr6 test found.
+  longer. Satellite records become SAT and Low_complexity records LC. A record whose name is not
+  "(MOTIF)n" has period 0 and its name as the motif, and is STR if it is a Simple_repeat.
+  RepeatMasker reports no Simple_repeat motif longer than 30 bp, so on its own it misses the VNTRs of
+  longer periods.
 - **trfind** (c/trfind.c, run on the reference FASTA), a seed-based tandem-repeat finder for periods
   7-2,000 bp.
   - Every exact 10-mer proposes the distance to its previous copy as a period.
   - Seeds of about the same period chain into a repeat.
-  - A repeat is reported when it has at least about two copies.
+  - A repeat is reported when it has at least 3 seeds spanning about two copies. The header of
+    c/trfind.c states the rules in full.
   - The reported period is the smallest divisor of the chained period that repeats as well.
   - A repeat becomes VNTR at a period of 7 or more, and STR below.
+  - trfind is compiled on first use into the cache directory ($PGREALIGN_CACHE, else
+    ~/.cache/pgrealign), under a key that hashes its source, the compiler flags and the platform
+    (trfind_build).
 
 **Merging.** Records on a contig that overlap or lie within `gap` bp of each other merge into one
 region.
@@ -31,12 +37,20 @@ region.
 - `period` is 0 when the motif is not a "(...)n" repeat, as for most satellites and low-complexity
   records.
 - `member_classes` and `sources` count the members, e.g. "STR:2,VNTR:1" and "rm:2,trfind:1".
+
+**Reading.** read_catalog reads a catalogue, which it recognises by that header line ("#chrom" and
+the columns above), or any other BED of target intervals (BED3, BED6, BED12, ...). Every region it
+reads has a unique id.
 """
 import collections
 import concurrent.futures
 import gzip
+import hashlib
+import itertools
 import os
+import platform
 import re
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -54,16 +68,15 @@ Region = collections.namedtuple('Region',
 # ----------------------------------------------------------------------------- RepeatMasker
 
 def classify(rm_class, name):
-    """(class, period, motif) of one RepeatMasker record, or None for a class we do not keep."""
+    """(class, period, motif) of one RepeatMasker record, or None for a class we do not keep. A name
+    "(MOTIF)n" gives the period and motif, and any other name period 0 and the name as the motif. A
+    Simple_repeat is VNTR at a period above 6 and STR otherwise, period 0 included."""
     if rm_class not in KEEP:
         return None
     m = MOTIF.match(name)
-    motif = m.group(1).upper() if m else name
-    period = len(motif) if m else 0
+    period, motif = (len(m.group(1)), m.group(1).upper()) if m else (0, name)
     if rm_class == 'Simple_repeat':
-        if not m:
-            return ('STR' if len(name) <= 6 else 'VNTR'), 0, name
-        return ('STR' if period <= 6 else 'VNTR'), period, motif
+        return ('VNTR' if period > 6 else 'STR'), period, motif
     return ('SAT' if rm_class == 'Satellite' else 'LC'), period, motif
 
 
@@ -91,18 +104,45 @@ def read_repeatmasker(path, contigs=None):
 
 # ----------------------------------------------------------------------------- trfind
 
+CC_FLAGS = ('-O2', '-lm')
+
+
+def _trfind_source():
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), 'c', 'trfind.c')
+
+
+def trfind_build():
+    """How trfind is built here: the sha256 of c/trfind.c, the compiler flags, the platform, and `key`,
+    a sha256 of all of them that names the cached binary."""
+    with open(_trfind_source(), 'rb') as f:
+        b = {'source_sha256': hashlib.sha256(f.read()).hexdigest(), 'cc_flags': ' '.join(CC_FLAGS),
+             'system': platform.system(), 'machine': platform.machine()}
+    b['key'] = hashlib.sha256('\t'.join(b[k] for k in sorted(b)).encode()).hexdigest()
+    return b
+
+
 def trfind_binary(cache=None):
-    """Compile c/trfind.c once into a cache directory and return the binary's path."""
-    src = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'c', 'trfind.c')
-    cache = cache or os.environ.get('PGREALIGN_CACHE', os.path.expanduser('~/.cache/pgrealign'))
-    os.makedirs(cache, exist_ok=True)
-    out = os.path.join(cache, 'trfind')
-    if os.path.exists(out) and os.path.getmtime(out) >= os.path.getmtime(src):
+    """Path of the trfind binary for trfind_build()'s key, compiled on first use into the cache directory
+    (`cache`, else $PGREALIGN_CACHE, else ~/.cache/pgrealign) with $CC, else cc, clang or gcc. It is
+    compiled under a temporary name and renamed into place, so no run ever sees a partial binary."""
+    cache = cache or os.environ.get('PGREALIGN_CACHE') or os.path.expanduser('~/.cache/pgrealign')
+    out = os.path.join(cache, 'trfind-' + trfind_build()['key'][:16])
+    if os.path.exists(out):
         return out
-    cc = os.environ.get('CC') or shutil.which('cc') or shutil.which('clang') or shutil.which('gcc')
-    if cc is None:
+    cc = shlex.split(os.environ.get('CC', '')) or [shutil.which('cc') or shutil.which('clang') or
+                                                   shutil.which('gcc')]
+    if cc[0] is None:
         raise RuntimeError('trfind needs a C compiler (set CC)')
-    subprocess.run([cc, '-O2', '-o', out, src, '-lm'], check=True)
+    os.makedirs(cache, exist_ok=True)
+    tmp = tempfile.mkdtemp(prefix='.trfind-', dir=cache)
+    try:
+        p = subprocess.run([*cc, '-o', os.path.join(tmp, 'trfind'), _trfind_source(), *CC_FLAGS],
+                           capture_output=True, text=True)
+        if p.returncode:
+            raise RuntimeError('compiling trfind failed: %s\n%s' % (' '.join(p.args), p.stderr))
+        os.replace(os.path.join(tmp, 'trfind'), out)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
     return out
 
 
@@ -218,22 +258,90 @@ def write_catalog(regions, path):
 
 
 def read_catalog(path):
-    """Regions of a catalogue written by write_catalog, or of a plain BED (chrom start end [id ...])."""
+    """Regions of a catalogue, or of any BED of target intervals, in file order.
+
+    A file is a catalogue when a header line before its first data line is HEADER. Its lines are read
+    as write_catalog wrote them, and its ids must be unique. Any other file is a BED: chrom, start, end
+    and an optional name, with further columns (strand, BED12 blocks) ignored. A BED region has class
+    '.', period 0, motif '.' and one member, and its id is
+    - its name, when no other line has that name;
+    - otherwise <name>_<chrom>_<start>, or R_<chrom>_<start> for a line without a name (none, empty or
+      '.'), with _2, _3, ... appended, in file order, where that would repeat an id already given."""
     with _open(path) as f:
-        for line in f:
-            if not line.strip() or line.startswith(('#', 'track', 'browser')):
-                continue
-            x = line.rstrip('\n').split('\t')
-            chrom, start, end = x[0], int(x[1]), int(x[2])
-            rid = x[3] if len(x) > 3 and x[3] else 'R_%s_%d' % (chrom, start)
-            if len(x) >= 10:
-                yield Region(chrom, start, end, rid, x[4], int(x[5]), x[6], int(x[7]), x[8], x[9])
-            else:
-                yield Region(chrom, start, end, rid, '.', 0, '.', 1, '.', '.')
+        lines = enumerate(f, 1)
+        catalogue = False
+        for n, line in lines:
+            if line.startswith('#'):
+                catalogue = catalogue or line.rstrip('\r\n') == HEADER.rstrip('\n')
+            elif line.strip() and not line.startswith(('track', 'browser')):
+                break
+        else:
+            return
+        lines = itertools.chain([(n, line)], lines)
+        if catalogue:
+            yield from _unique(path, _parse(path, lines, _catalogue_line))
+        else:
+            yield from _bed_ids(list(_parse(path, lines, _bed_line)))
+
+
+def _parse(path, lines, parse):
+    """parse(columns) of each data line of (line number, line) pairs. A line that does not parse, or
+    whose start and end are not 0 <= start <= end, raises a ValueError naming it."""
+    for n, line in lines:
+        if not line.strip() or line.startswith(('#', 'track', 'browser')):
+            continue
+        try:
+            r = parse(line.rstrip('\r\n').split('\t'))
+            if not 0 <= r.start <= r.end:
+                raise ValueError('start %d and end %d are not 0 <= start <= end' % (r.start, r.end))
+        except ValueError as e:
+            raise ValueError('%s line %d: %s' % (path, n, e)) from None
+        yield r
+
+
+def _catalogue_line(x):
+    if len(x) < 10:
+        raise ValueError('a catalogue line has 10 columns, not %d' % len(x))
+    return Region(x[0], int(x[1]), int(x[2]), x[3], x[4], int(x[5]), x[6], int(x[7]), x[8], x[9])
+
+
+def _bed_line(x):
+    """A BED line as a Region whose id is its name, or None when it has none."""
+    if len(x) < 3:
+        raise ValueError('a BED line has at least 3 columns, not %d' % len(x))
+    name = x[3] if len(x) > 3 and x[3] not in ('', '.') else None
+    return Region(x[0], int(x[1]), int(x[2]), name, '.', 0, '.', 1, '.', '.')
+
+
+def _unique(path, regions):
+    seen = set()
+    for r in regions:
+        if r.id in seen:
+            raise ValueError('%s: the catalogue id %s repeats' % (path, r.id))
+        seen.add(r.id)
+        yield r
+
+
+def _bed_ids(regions):
+    """The BED regions with the ids that read_catalog defines."""
+    names = collections.Counter(r.id for r in regions if r.id is not None)
+    given = {k for k, c in names.items() if c == 1}
+    for r in regions:
+        if r.id is not None and names[r.id] == 1:
+            yield r
+            continue
+        base = '%s_%s_%d' % (r.id or 'R', r.chrom, r.start)
+        rid, k = base, 1
+        while rid in given:
+            k += 1
+            rid = '%s_%d' % (base, k)
+        given.add(rid)
+        yield r._replace(id=rid)
 
 
 def build(out, repeatmasker=None, fastas=(), gap=50, contigs=None, minp=7, maxp=2000, jobs=1):
-    """Read the sources, merge and write; returns a summary dict."""
+    """Read the sources, merge and write; returns a summary dict, with trfind_build() as `trfind` when
+    trfind ran."""
     recs = []
     if repeatmasker:
         recs.extend(read_repeatmasker(repeatmasker, contigs))
@@ -243,8 +351,11 @@ def build(out, repeatmasker=None, fastas=(), gap=50, contigs=None, minp=7, maxp=
         raise ValueError('no records: give a RepeatMasker BED and/or reference FASTA files')
     regions = merge(recs, gap)
     write_catalog(regions, out)
-    return {'records': len(recs), 'regions': len(regions),
-            'records_by_source_class': {'%s/%s' % k: v for k, v in
-                                        sorted(collections.Counter((r.src, r.cls) for r in recs).items())},
-            'regions_by_class': dict(collections.Counter(r.cls for r in regions)),
-            'bp': sum(r.end - r.start for r in regions)}
+    summary = {'records': len(recs), 'regions': len(regions),
+               'records_by_source_class': {'%s/%s' % k: v for k, v in
+                                           sorted(collections.Counter((r.src, r.cls) for r in recs).items())},
+               'regions_by_class': dict(collections.Counter(r.cls for r in regions)),
+               'bp': sum(r.end - r.start for r in regions)}
+    if fastas:
+        summary['trfind'] = trfind_build()
+    return summary
