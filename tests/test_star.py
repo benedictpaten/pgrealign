@@ -33,6 +33,22 @@ class TestPieces(unittest.TestCase):
         self.assertIsNone(star.place_fragment('ACC', 'left', alleles, rows))  # not a prefix
 
 
+    def test_sketch_estimates_the_exact_distance(self):
+        rng = random.Random(2)
+        unit = 'ACGTTGCAAGTCATGGA'
+        seqs = [unit * rng.randint(20, 60) + ''.join(rng.choice('ACGT') for _ in range(80)) for _ in range(2)]
+        c = [star.kmer_counts(s) for s in seqs]
+        inter = sum(min(c[0][x], c[1][x]) for x in c[0].keys() & c[1].keys())
+        exact = 1 - inter / (sum(c[0].values()) + sum(c[1].values()) - inter)
+        est = star.sketch_distance(star.sketch(c[0]), star.sketch(c[1]))
+        self.assertAlmostEqual(est, exact, delta=0.05)
+        self.assertEqual(star.sketch(c[0]), star.sketch(c[0]))            # the hash is fixed
+        self.assertEqual(star.sketch_distance(star.sketch(c[0]), star.sketch(c[0])), 0.0)
+
+    def test_medoid_by_sketch(self):
+        seqs = ['ACGTACGTAC' * 3, 'ACGTACGTAC' * 4, 'ACGTACGTAC' * 5, 'TTTTGGGGCC' * 3]
+        self.assertEqual(star.medoid(seqs, [1, 1, 1, 1], k=5, max_work=0), 1)
+
     def test_scores(self):
         self.assertEqual(star.SCORES.flags(), ['-M', '8', '-X', '16', '-O', '16,96', '-E', '8,1'])
         self.assertEqual(star.Scores.parse(''), star.Scores())

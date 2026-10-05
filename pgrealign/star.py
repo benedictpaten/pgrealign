@@ -15,7 +15,8 @@ applies it to the region packages that extract.py writes.
 1. **Centre.** The centre is the allele of positive weight with the least weighted sum of k-mer
    distances to all the alleles. The distance between two alleles is one minus the Jaccard index of
    their k-mer multisets: the copies of each k-mer the two share, over the copies in either. Ties go
-   to the earlier allele.
+   to the earlier allele. In a region so large that comparing every pair exactly would take too long,
+   the Jaccard index is estimated from a fixed-size sketch of each multiset (`medoid`).
 2. **Pairwise alignment.** Every other allele is aligned to the centre with a global, unbanded
    alignment. An allele identical to the centre takes the centre's row; an empty allele, or an empty
    centre, is aligned as one deletion or insertion.
@@ -210,23 +211,64 @@ def kmer_counts(seq, k=K):
     return out
 
 
-def medoid(seqs, weights, k=K, deadline=None):
+# Choosing the centre compares every pair of alleles. Exactly, a pair costs about as many steps as the
+# smaller allele has distinct k-mers; above MEDOID_WORK steps in all, the distances are estimated from
+# sketches instead, which makes each pair cost about SKETCH steps whatever the alleles' length.
+MEDOID_WORK = 1_000_000_000
+SKETCH = 1000
+_MIX = 0x9E3779B97F4A7C15
+_MASK64 = (1 << 64) - 1
+
+
+def sketch(counts, size=SKETCH):
+    """The `size` smallest hashes of an allele's k-mer multiset, sorted. Each copy of a k-mer is its own
+    element, so copy number counts, as in the exact distance. The hash is fixed, so the sketch is the
+    same in every run."""
+    hashes = []
+    for code, n in counts.items():
+        for j in range(1, n + 1):
+            x = ((code << 20) ^ j) * _MIX & _MASK64
+            x ^= x >> 29
+            hashes.append(x * _MIX & _MASK64)
+    hashes.sort()
+    return hashes[:size]
+
+
+def sketch_distance(a, b, size=SKETCH):
+    """One minus the Jaccard index of two multisets, estimated from their sketches."""
+    union = sorted(set(a) | set(b))[:size]
+    if not union:
+        return 1.0
+    sa, sb = set(a), set(b)
+    return 1.0 - sum(1 for h in union if h in sa and h in sb) / len(union)
+
+
+def medoid(seqs, weights, k=K, deadline=None, max_work=MEDOID_WORK):
     """Index of the sequence minimising sum_j w_j (1 - Jaccard(i, j)) over all the others; ties go to the
     lower index. Jaccard is over k-mer multisets: the copies of each k-mer the two share, over the
-    copies in either. Only sequences of positive weight are candidates, when there are any. Past
-    `deadline`, raises TimedOut."""
+    copies in either. When comparing every pair exactly would take more than `max_work` steps, Jaccard
+    is estimated from each sequence's sketch. Only sequences of positive weight are candidates, when
+    there are any. Past `deadline`, raises TimedOut."""
     n = len(seqs)
     counts = [kmer_counts(s, k) for s in seqs]
     sizes = [sum(c.values()) for c in counts]
+    distinct = sorted(len(c) for c in counts)
+    # each pair costs about the smaller one's distinct k-mers; sorted, the i-th is the smaller n-1-i times
+    work = sum(d * (n - 1 - i) for i, d in enumerate(distinct))
+    sketches = [sketch(c) for c in counts] if work > max_work else None
     dist = [[0.0] * n for _ in range(n)]
     for i in range(n):
         if deadline is not None and time.time() > deadline:
             raise TimedOut('time limit reached choosing the centre')
         for j in range(i + 1, n):
-            a, b = counts[i], counts[j]
-            inter = sum(min(a[x], b[x]) for x in a.keys() & b.keys())
-            uni = sizes[i] + sizes[j] - inter
-            dist[i][j] = dist[j][i] = 1.0 - (inter / uni if uni else 1.0)
+            if sketches is not None:
+                d = sketch_distance(sketches[i], sketches[j])
+            else:
+                a, b = counts[i], counts[j]
+                inter = sum(min(a[x], b[x]) for x in a.keys() & b.keys())
+                uni = sizes[i] + sizes[j] - inter
+                d = 1.0 - (inter / uni if uni else 1.0)
+            dist[i][j] = dist[j][i] = d
     cands = [i for i in range(n) if weights[i] > 0] or list(range(n))
     best = None
     for i in cands:
