@@ -3,28 +3,41 @@
 **Anchors.** A target's anchors are two boundary nodes L and R of one chain of the snarl tree. The
 snarls come from `vg snarls -T -P <ref>`, trivial snarls included, so consecutive snarls of a chain
 share a boundary node.
+- Only boundary nodes the reference visits once, forward, are used.
+- The target is padded by `pad` on each side, within the contig, and then clamped to lie between the
+  reference's first and last boundary nodes, so a target reaching into either is anchored on it.
 - L is the chain's last boundary node ending at or before the padded target start.
 - R is its first boundary node starting at or after the padded target end.
 - Over every chain, top-level or nested, the pair with the smallest reference span wins.
-- Only boundary nodes the reference visits once, forward, are used.
 
 Two boundary nodes of one chain separate the graph. So every path that crosses the region crosses both
 anchors, and a path that does not cross both starts or ends inside the region (a fragment). The
 anchors stay in the graph. Only the nodes strictly between them, the region's interior, are replaced.
 
-**Merging.** Targets whose interiors overlap are merged, and the union is re-anchored, repeatedly. Two
-regions that only share a boundary node are separate, because each replaces its own interior.
+**Merging.** Regions are taken in order of their left anchor's start, and one merges into the region
+before it when its left anchor starts before that region's right anchor starts. That covers both
+overlapping interiors and an anchor inside another region's interior, where replacing one region would
+change the other. The merged targets are re-anchored as one, and the pass repeats until nothing
+merges. Two regions that only share a boundary node, one's right anchor being the next one's left,
+stay separate, because each replaces only its own interior.
 
-**Size policy.** A region whose anchor span exceeds `max_span` is kept as it is. It is listed with
-status `too_long`.
+**Size policy.** A region whose anchors cannot be within `max_span` of each other has status
+`too_long` and is not realigned:
+- A target with no chain enclosing it, or none within `max_span`, keeps its own interval. Its row has
+  '.' anchors, and the target's start, end and length as ref_start, ref_end and span. Another region
+  can still overlap it.
+- Merged targets that cannot be re-anchored as one keep the outermost anchors of the regions merged.
 
-**Output.** `regions.tsv`, one row per region:
+**Output.** `regions.tsv`, one row per region, in reference order:
 
     id contig L R ref_start ref_end span targets classes status note
 
+- `id` is the id of its first target.
 - L and R are node ids, both forward on the reference.
 - ref_start and ref_end are the 0-based interior on the reference: from L's end to R's start.
+- `span` is the reference length from L's start to R's end.
 - `targets` lists the merged target ids, and `classes` their classes.
+- `note` says how many targets were merged, or why a region is `too_long`.
 """
 import bisect
 import collections
@@ -136,7 +149,8 @@ HEADER = '\t'.join(Region._fields)
 
 
 def assign(targets, anchors, contig, pad=200, max_span=100000, contig_length=None):
-    """Regions for the targets of one contig: anchor, merge overlapping interiors, apply max_span."""
+    """Regions for the targets of one contig: anchor each, merge, and apply max_span (see the module
+    docstring)."""
     groups, out = [], []
     for t in targets:
         a0 = max(0, t.start - pad)
@@ -152,7 +166,7 @@ def assign(targets, anchors, contig, pad=200, max_span=100000, contig_length=Non
         groups.sort(key=lambda g: (g['L'][0], g['R'][1]))
         merged, changed = [], False
         for g in groups:
-            # interiors overlap: this region's left anchor starts before the previous one's right anchor
+            # this region's left anchor starts before the previous one's right anchor: they merge
             if merged and g['L'][0] < merged[-1]['R'][0]:
                 m = merged[-1]
                 m['targets'] += g['targets']
@@ -211,16 +225,19 @@ def targets_of(catalog_path, contig):
 
 def build(targets, contig, snarls, ref, out, vg=None, pad=200, max_span=100000):
     """The regions stage: anchor `targets` (a catalogue or BED) on `contig`'s snarls and write `out`.
-    `snarls` and `ref` are prepare's <contig>.snarls.pb and <contig>.ref.tsv.gz. Returns a summary."""
-    import collections
+    `snarls` and `ref` are prepare's <contig>.snarls.pb and <contig>.ref.tsv.gz. They are read only if
+    the contig has targets; with none, `out` has no rows and the summary's `chains` is null. Returns a
+    summary."""
     from .prepare import read_ref_index
-    index = read_ref_index(ref)
-    chains = chains_from_pairs(snarl_pairs(snarls, vg), index)
     ts = targets_of(targets, contig)
-    rs = assign(ts, Anchors(chains), contig, pad=pad, max_span=max_span,
-                contig_length=index[-1][3] if index else None)
+    chains, rs = None, []
+    if ts:
+        index = read_ref_index(ref)
+        chains = chains_from_pairs(snarl_pairs(snarls, vg), index)
+        rs = assign(ts, Anchors(chains), contig, pad=pad, max_span=max_span,
+                    contig_length=index[-1][3] if index else None)
     write_regions(rs, out)
-    return {'targets': len(ts), 'chains': len(chains), 'regions': len(rs),
+    return {'targets': len(ts), 'chains': None if chains is None else len(chains), 'regions': len(rs),
             'status': dict(collections.Counter(r.status for r in rs)),
             'merged_targets': sum(len(r.targets.split(',')) for r in rs if r.status == 'ok'),
             'span_bp_ok': sum(r.span for r in rs if r.status == 'ok')}

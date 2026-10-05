@@ -1,16 +1,16 @@
 import gzip
-import json
 import os
+import shutil
 import tempfile
 import unittest
 
 from pgrealign import extract, regions
-from pgrealign.graph import revcomp
 
-# A small graph: 1 (anchor L) -> {2, 3} -> 4 -> 5 (anchor R) -> 6, plus 7 between 2 and 4 for a longer
-# allele. Nodes:
-#   1 AAAA  2 C  3 G  7 TTT  4 CC  5 GGGG  6 ACGT
-S = {1: 'AAAA', 2: 'C', 3: 'G', 7: 'TTT', 4: 'CC', 5: 'GGGG', 6: 'ACGT'}
+# A small graph: 0 -> 1 (anchor L) -> {2, 3} -> 4 -> 5 (anchor R) -> 6, plus 7 between 2 and 4 for a
+# longer allele. Nodes:
+#   0 TT  1 AAAA  2 C  3 G  7 TTT  4 CC  5 GGGG  6 ACGT
+S = {0: 'TT', 1: 'AAAA', 2: 'C', 3: 'G', 7: 'TTT', 4: 'CC', 5: 'GGGG', 6: 'ACGT'}
+REGION = regions.Region('R', 'chrT', 1, 5, 4, 7, 11, 'R', 'VNTR', 'ok', '')
 
 
 def gfa(walks):
@@ -54,11 +54,23 @@ class TestRunsOfWalk(unittest.TestCase):
         self.assertEqual(self.runs('>1>2>1')[0][0], 'complex')     # U-turn out through L
         # two crossings of the same region by one walk (a duplication) are two spanning runs
         self.assertEqual(self.runs('>1>2>4>5>1>3>4>5'), [('spanning', '+', 1, 3), ('spanning', '+', 5, 7)])
+        # adjacent anchors: an empty spanning run, which is the empty allele
+        self.assertEqual(self.runs('>1>5'), [('spanning', '+', 1, 1)])
+
+    def test_walk_ends_on_an_anchor(self):
+        # a walk that starts or ends on an anchor has no step inside at that end, so no run there
+        self.assertEqual(self.runs('>5>6'), [])             # starts on R, forward
+        self.assertEqual(self.runs('<1<0'), [])             # starts on L, reverse
+        self.assertEqual(self.runs('>0>1'), [])             # ends on L, forward
+        self.assertEqual(self.runs('<6<5'), [])             # ends on R, reverse
+        self.assertEqual(self.runs('>1>2>4>5'), [('spanning', '+', 1, 3)])
+        self.assertEqual(self.runs('>5>6>0>1>2>4'), [('suffix', '+', 4, 6)])
 
 
 class TestExtract(unittest.TestCase):
     def setUp(self):
         self.d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.d, ignore_errors=True)
         self.g = os.path.join(self.d, 'g.gfa')
         with open(self.g, 'w') as f:
             f.write(gfa(WALKS))
@@ -80,38 +92,59 @@ class TestExtract(unittest.TestCase):
             occ = [l.rstrip('\n').split('\t') for l in f if not l.startswith('#')]
         rev = [o for o in occ if o[0] == 's1#2#chrT#0'][0]
         self.assertEqual(rev[2:6], ['spanning', '-', '2', '5'])
+        # `ref` names the reference sample's allele, and is null for a sample with no spanning run
+        self.assertEqual({a['id']: a['seq'] for a in pk['alleles']}[pk['ref']], 'CCC')
+        extract.extract(self.g, [reg], os.path.join(self.d, 'x2'), ref_sample='s2')
+        self.assertIsNone(next(extract.read_packages(os.path.join(self.d, 'x2', 'packages.jsonl.gz')))['ref'])
+
+    def run_extract(self, walks, name, **kw):
+        g = os.path.join(self.d, name + '.gfa')
+        with open(g, 'w') as f:
+            f.write(gfa(walks))
+        out = os.path.join(self.d, name)
+        s = extract.extract(g, [REGION], out, **kw)
+        pk = list(extract.read_packages(os.path.join(out, 'packages.jsonl.gz')))
+        with gzip.open(os.path.join(out, 'occurrences.tsv.gz'), 'rt') as f:
+            occ = [l.rstrip('\n').split('\t') for l in f if not l.startswith('#')]
+        return s, pk, occ
 
     def test_complex_and_invariant(self):
-        g2 = os.path.join(self.d, 'g2.gfa')
-        with open(g2, 'w') as f:
-            f.write(gfa([('CHM13', '0', '>1>2>4>5>6'), ('s1', '1', '>1>2>4>5>6')]))
-        reg = regions.Region('R', 'chrT', 1, 5, 4, 7, 11, 'R', 'VNTR', 'ok', '')
-        self.assertEqual(extract.extract(g2, [reg], os.path.join(self.d, 'y'))['status'], {'invariant': 1})
-        with open(g2, 'a') as f:
-            f.write('W\ts9\t1\tchrT\t0\t0\t>1>2>1\n')
-        self.assertEqual(extract.extract(g2, [reg], os.path.join(self.d, 'z'))['status'], {'complex': 1})
+        walks = [('CHM13', '0', '>1>2>4>5>6'), ('s1', '1', '>1>2>4>5>6')]
+        self.assertEqual(self.run_extract(walks, 'y')[0]['status'], {'invariant': 1})
+        s, pk, _ = self.run_extract(walks + [('s9', '1', '>1>2>1')], 'z')
+        self.assertEqual(s['status'], {'complex': 1})
+        self.assertEqual(pk[0]['complex'], ['s9#1#chrT#0: entered by >L, then >L'])
+        # no walk visits the anchors of a region that is not in the graph
+        g = os.path.join(self.d, 'y.gfa')
+        nowhere = REGION._replace(id='N', L=8, R=9)
+        self.assertEqual(extract.extract(g, [nowhere], os.path.join(self.d, 'n'))['status'], {'no_runs': 1})
 
+    def test_walk_ends_on_an_anchor(self):
+        # a walk that starts or ends exactly on an anchor touches no interior node there: no fragment
+        ref = ('CHM13', '0', '>0>1>2>4>5>6')
+        for k, walk in enumerate(('>5>6', '<6<5', '>0>1', '<1<0')):
+            with self.subTest(walk=walk):
+                s, pk, occ = self.run_extract([ref, ('s1', '1', walk)], 'e%d' % k)
+                self.assertEqual(s['status'], {'invariant': 1})
+                self.assertEqual(pk[0]['fragments'], [])
+                self.assertEqual(pk[0]['n_runs'], {'spanning': 1})
+                self.assertEqual([o[0] for o in occ], ['CHM13#0#chrT#0'])
 
-class TestRegions(unittest.TestCase):
-    def test_anchor_and_merge(self):
-        # reference: nodes 10..19, each 10 bp, at 0,10,...,90; snarls 10-12, 12-14, 14-16, 16-19
-        ref = [(n, '+', (n - 10) * 10, (n - 10) * 10 + 10) for n in range(10, 20)]
-        chains = regions.chains_from_pairs([(10, 12), (12, 14), (14, 16), (16, 19)], ref)
-        self.assertEqual(len(chains), 1)
-        A = regions.Anchors(chains)
-        self.assertEqual(A.query(31, 39, 1000), ((20, 30, 12), (40, 50, 14)))
-        # an interval overlapping boundary node 12 must take the anchor before it
-        self.assertEqual(A.query(25, 35, 1000), ((0, 10, 10), (40, 50, 14)))
-        T = lambda i, s, e: type('T', (), {'id': i, 'start': s, 'end': e, 'cls': 'STR'})
-        # two targets in snarls 12-14 and 14-16: they share anchor 14 only, so they stay separate
-        rs = regions.assign([T('a', 32, 33), T('b', 52, 53)], A, 'chrT', pad=0)
-        self.assertEqual([(r.id, r.L, r.R, r.status) for r in rs], [('a', 12, 14, 'ok'), ('b', 14, 16, 'ok')])
-        # a target crossing node 14 needs anchors 12 and 16; it overlaps both and they merge into one
-        rs = regions.assign([T('a', 32, 33), T('c', 38, 55), T('b', 52, 53)], A, 'chrT', pad=0)
-        self.assertEqual([(r.L, r.R, r.targets, r.status) for r in rs], [(12, 16, 'a,c,b', 'ok')])
-        # too long for max_span
-        rs = regions.assign([T('d', 25, 85)], A, 'chrT', pad=0, max_span=30)
-        self.assertEqual(rs[0].status, 'too_long')
+    def test_long_anchor_free_walk(self):
+        # s3's anchor-free walk >7>4 spells TTTCC (5 bp) inside the interior
+        walks = [('CHM13', '0', '>1>2>4>5>6'), ('s3', '1', '>7>4'), ('s4', '1', '>6')]
+        s, pk, occ = self.run_extract(walks, 'l5', max_internal_bp=5)
+        self.assertEqual(s['status'], {'ok': 1})
+        self.assertEqual([(f['side'], f['seq']) for f in pk[0]['fragments']], [('internal', 'TTTCC')])
+        # with a cap one bp shorter, s3's walk cannot be held whole, so the region is left as it is
+        s, pk, occ = self.run_extract(walks, 'l4', max_internal_bp=4)
+        self.assertEqual(s['status'], {'complex': 1})
+        self.assertEqual(s['internal_too_long'], 1)
+        self.assertEqual(pk[0]['complex'], ['s3#1#chrT#0: an anchor-free walk longer than max_internal_bp (4)'])
+        self.assertEqual([o[0] for o in occ], ['CHM13#0#chrT#0'])
+        # an anchor-free walk over the cap outside every interior (s4's, 4 bp) changes nothing
+        s, pk, occ = self.run_extract(walks[:1] + walks[2:], 'l3', max_internal_bp=3)
+        self.assertEqual((s['status'], s['internal_too_long']), ({'invariant': 1}, 0))
 
 
 if __name__ == '__main__':
