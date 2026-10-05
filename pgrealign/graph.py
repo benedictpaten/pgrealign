@@ -1,7 +1,7 @@
-"""Reading a graph as a stream of GFA lines, and the walk and reference-path helpers the stages share.
+"""Reading a graph as a stream of GFA lines, and the walk helpers the stages share.
 
 The stages never hold a whole graph's walks in memory. They read `vg convert -f <graph.gbz>` (or a GFA
-file) once, line by line:
+file, plain or gzipped) once, line by line:
 - S lines: segments (nodes), stored as a dict of sequences, or of lengths only;
 - L lines: edges, ignored unless asked for;
 - W lines: walks, one per haplotype fragment or reference path.
@@ -29,6 +29,11 @@ def walk_key(w):
     return '%s#%s#%s#%s' % (w.sample, w.hap, w.contig, w.start)
 
 
+def open_text(path, mode='rt'):
+    """A text file, gzip-compressed when its name ends in .gz. `mode` is 'rt', 'wt' or 'at'."""
+    return gzip.open(path, mode) if path.endswith('.gz') else open(path, mode)
+
+
 def find_vg(vg=None):
     vg = vg or shutil.which('vg')
     if vg is None:
@@ -37,7 +42,9 @@ def find_vg(vg=None):
 
 
 class GfaStream:
-    """Iterate over the lines of a GFA file or of `vg convert -f GBZ`, as a context manager."""
+    """Iterate over the lines of a GFA file (plain or gzipped) or of `vg convert -f GBZ`, as a context
+    manager. `drop_haplotypes` passes `-H` to vg, which leaves out the haplotype walks; it does nothing
+    to a GFA file."""
 
     def __init__(self, path, vg=None, threads=4, drop_haplotypes=False):
         self.path, self.vg, self.threads, self.proc, self.fh = path, vg, threads, None, None
@@ -52,7 +59,7 @@ class GfaStream:
             self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, text=True, bufsize=1 << 20)
             self.fh = self.proc.stdout
         else:
-            self.fh = gzip.open(self.path, 'rt') if self.path.endswith('.gz') else open(self.path)
+            self.fh = open_text(self.path)
         return self.fh
 
     def __exit__(self, *exc):
@@ -80,28 +87,3 @@ def steps(walk_string):
 def spell(path_steps, seq):
     """The sequence a list of (orient, node) steps spells, given node sequences."""
     return ''.join(seq[n] if o == '>' else revcomp(seq[n]) for o, n in path_steps)
-
-
-def reference_walk(stream_path, sample, contig, vg=None):
-    """[(node, orient, start, end)] of the reference W line `sample`/`contig`, 0-based, plus node lengths
-    for every segment. Reads the whole stream once."""
-    lens, ref = {}, None
-    with GfaStream(stream_path, vg) as f:
-        for line in f:
-            t = line[0]
-            if t == 'S':
-                x = line.split('\t', 3)
-                lens[int(x[1])] = len(x[2].rstrip('\n'))
-            elif t == 'W':
-                head = line.split('\t', 4)
-                if head[1] == sample and head[3] == contig:
-                    if ref is not None:
-                        raise ValueError('more than one %s W line for %s' % (sample, contig))
-                    ref = parse_w(line)
-    if ref is None:
-        raise ValueError('no %s W line for %s in %s' % (sample, contig, stream_path))
-    pos, out = int(ref.start), []
-    for o, n in steps(ref.steps):
-        out.append((n, '+' if o == '>' else '-', pos, pos + lens[n]))
-        pos += lens[n]
-    return out
