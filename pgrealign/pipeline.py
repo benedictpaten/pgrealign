@@ -116,7 +116,7 @@ def run_contig(gbz, contig, targets, out_dir, jobs=1, threads=4, vg=None, abpoa=
     if do_qc and not _done(q):
         log('[%s] qc' % contig)
         t = time.time()
-        s = qc.run(ex, msas, q, jobs=jobs, abpoa=abpoa, scores=scores, ref_sample=ref_sample)
+        s = qc.run(ex, msas, q, jobs=jobs, abpoa=abpoa, scores=scores, ref_sample=ref_sample, max_cells=max_cells)
         provenance.write_manifest(q, 'qc', {'msas': msas}, {'extract': ex, 'scores': ' '.join(scores.flags())},
                                   tools=abpoa_tool, extra={'summary': s}, started=t)
         out['qc'] = s

@@ -17,8 +17,9 @@ applies it to the region packages that extract.py writes.
    their k-mer multisets: the copies of each k-mer the two share, over the copies in either. Ties go
    to the earlier allele. In a region so large that comparing every pair exactly would take too long,
    the Jaccard index is estimated from a fixed-size sketch of each multiset (`medoid`).
-2. **Pairwise alignment.** Every other allele is aligned to the centre with a global, unbanded
-   alignment. An allele identical to the centre takes the centre's row; an empty allele, or an empty
+2. **Pairwise alignment.** Every other allele is aligned to the centre with a global alignment,
+   unbanded unless its dynamic-programming matrix would be too large (`max_cells`), in which case it
+   is banded. An allele identical to the centre takes the centre's row; an empty allele, or an empty
    centre, is aligned as one deletion or insertion.
 3. **Normalisation.** Each pair's indels are shifted left wherever the alignment's score stays the
    same.
@@ -309,13 +310,13 @@ def left_normalise_pair(a, b):
     return ''.join(a), ''.join(b)
 
 
-def align_pair(centre, seq, align):
+def align_pair(centre, seq, align, banded=False):
     """The left-normalised global alignment of `seq` to `centre`, as (centre row, row)."""
     if seq == centre:
         return centre, seq
     if not centre or not seq:
         return centre + '-' * len(seq), '-' * len(centre) + seq
-    ca, sa = align([centre, seq], banded=False)
+    ca, sa = align([centre, seq], banded=banded)
     keep = [i for i in range(len(ca)) if ca[i] != '-' or sa[i] != '-']
     ca, sa = ''.join(ca[i] for i in keep), ''.join(sa[i] for i in keep)
     if ca.replace('-', '') != centre or sa.replace('-', '') != seq:
@@ -414,13 +415,15 @@ def respell(row, seq):
 class StarMSA:
     """The result of star_msa: `rows` {id: row}, every row the same length; `centre`, the centre allele's
     id; `slot_alignments`, the number of insertion slots that needed an alignment; `fragments_exact`
-    and `fragments_aligned`, the fragments placed in an allele and aligned to the centre."""
-    __slots__ = ('rows', 'centre', 'slot_alignments', 'fragments_exact', 'fragments_aligned')
+    and `fragments_aligned`, the fragments placed in an allele and aligned to the centre; and
+    `banded_pairs`, the alignments to the centre that were banded because of `max_cells`."""
+    __slots__ = ('rows', 'centre', 'slot_alignments', 'fragments_exact', 'fragments_aligned', 'banded_pairs')
 
-    def __init__(self, rows, centre, slot_alignments, fragments_exact, fragments_aligned):
+    def __init__(self, rows, centre, slot_alignments, fragments_exact, fragments_aligned, banded_pairs=0):
         self.rows, self.centre = rows, centre
         self.slot_alignments = slot_alignments
         self.fragments_exact, self.fragments_aligned = fragments_exact, fragments_aligned
+        self.banded_pairs = banded_pairs
 
 
 def star_msa(alleles, fragments=(), align=None, centre=None, k=K, deadline=None, max_cells=None):
@@ -430,9 +433,10 @@ def star_msa(alleles, fragments=(), align=None, centre=None, k=K, deadline=None,
     (id, sequence, side), side being 'left', 'right' or 'internal'. `align` is the aligner: called with
     a list of sequences and `banded`, it returns their global alignment, one row per sequence in order.
     Pass an Abpoa inside its `with` block. `centre` names the centre allele instead of the medoid.
-    Past `deadline` (a time.time() value), raises TimedOut. If the centre's length times that of the
-    longest sequence aligned to it exceeds `max_cells`, raises TooBig before aligning anything.
-    Returns a StarMSA."""
+    Past `deadline` (a time.time() value), raises TimedOut. An alignment to the centre whose
+    dynamic-programming matrix, the product of the two lengths, would exceed `max_cells` is asked for
+    banded; every other one is unbanded. Returns a StarMSA.
+    """
     if align is None:
         raise ValueError('star_msa needs an aligner, e.g. `with Abpoa() as align`')
     if not alleles:
@@ -462,10 +466,10 @@ def star_msa(alleles, fragments=(), align=None, centre=None, k=K, deadline=None,
             exact.append((fid, side))
         else:
             unplaced.append(fid)
-    longest = max(len(seq[m]) for m in names + unplaced)
-    if max_cells is not None and max(1, len(cseq)) * max(1, longest) > max_cells:
-        raise TooBig('centre %d bp x longest %d bp > %d cells' % (len(cseq), longest, max_cells))
-    pairs = collections.OrderedDict((m, align_pair(cseq, seq[m], align)) for m in names + unplaced)
+    big = set() if max_cells is None else {m for m in names + unplaced if seq[m] != cseq and seq[m] and cseq
+                                           and len(cseq) * len(seq[m]) > max_cells}
+    pairs = collections.OrderedDict((m, align_pair(cseq, seq[m], align, banded=m in big))
+                                    for m in names + unplaced)
     rows, slot_alignments = star_merge(cseq, pairs, align)
     for fid, side in exact:
         rows[fid] = place_fragment(orig[fid], side, found, rows)
@@ -477,4 +481,4 @@ def star_msa(alleles, fragments=(), align=None, centre=None, k=K, deadline=None,
     for m, r in rows.items():
         if r.replace('-', '') != orig[m]:
             raise ValueError('row %s does not spell its sequence' % m)
-    return StarMSA(rows, cid, slot_alignments, len(exact), len(unplaced))
+    return StarMSA(rows, cid, slot_alignments, len(exact), len(unplaced), len(big))

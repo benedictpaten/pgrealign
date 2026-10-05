@@ -3,13 +3,14 @@
 `realign_package` aligns one package from extract.py; `run` aligns a whole packages.jsonl.gz in
 parallel and writes msas.jsonl.gz.
 
-**Limits.** A region the star cannot be built for keeps its old alignment: replace leaves it as it is.
-Its status says why.
-- `too_big`: the unbanded pairwise alignment would exceed `max_cells` dynamic-programming cells, as
-  centre length times the longest allele or unplaced fragment. Before the centre is known, the
-  shortest candidate centre bounds it. abPOA needs about 15 bytes per cell, so the default of 450 M
-  cells is about 6.8 GB, which is 21 kb against 21 kb. A region whose alleles hold more than
-  MAX_TOTAL_BP bases in all is also too big: choosing the centre holds every allele's k-mer counts.
+**Limits.** abPOA's alignment of two sequences fills a matrix of cells, one per pair of their bases, at
+about 15 bytes each. An alignment to the centre whose matrix would exceed `max_cells` cells is banded
+instead: abPOA then fills only a band around its best path, adaptive in width (about 10 cells plus 1%
+of the sequence's length on either side). A region the star cannot be built for keeps its old
+alignment, and replace leaves it as it is. Its status says why:
+- `too_big`: even a banded alignment of the region's longest allele or fragment would exceed
+  `max_cells` cells (with the default, sequences longer than about 150 kb), or its alleles hold more
+  than MAX_TOTAL_BP bases in all, the bound on what choosing the centre holds in memory.
 - `timeout`: the region ran longer than `timeout` seconds.
 - `aligner_failed`: abPOA exited with an error or returned the wrong rows.
 - `no_alleles`: no walk spans the region.
@@ -18,7 +19,8 @@ Its status says why.
 **Output.** msas.jsonl.gz holds one JSON object per region, in package order:
 - `id`, `method` ('medoid_star'), `status`, `seconds`;
 - for `ok`: `centre` (the centre allele's id), `rows` {member id: row}, one per allele and fragment,
-  all the same length, `columns`, `slot_alignments`, `fragments_exact` and `fragments_aligned`;
+  all the same length, `columns`, `slot_alignments`, `fragments_exact`, `fragments_aligned` and
+  `banded_pairs`;
 - otherwise `message`.
 """
 import collections
@@ -33,6 +35,13 @@ MAX_CELLS = 450_000_000
 MAX_TOTAL_BP = 40_000_000     # choosing the centre holds every allele's k-mer counts: up to about 80 bytes per base
 
 
+def banded_cells(length):
+    """About how many cells abPOA fills aligning a sequence of `length` bases to one of the same length
+    with its adaptive band, which reaches 10 cells plus 1% of the length either side of the path, and
+    never more than the whole matrix."""
+    return min(length * length, length * 2 * (10 + length // 100))
+
+
 def realign_package(pkg, abpoa='abpoa', timeout=900, max_cells=MAX_CELLS, workdir=None, scores=SCORES):
     """The medoid-star alignment of one region package, as the dict described in the module docstring."""
     t0 = time.time()
@@ -45,20 +54,16 @@ def realign_package(pkg, abpoa='abpoa', timeout=900, max_cells=MAX_CELLS, workdi
         return res
     try:
         lens = [len(s) for _, s, _ in alleles]
-        longest, total = max(lens), sum(lens)
-        cand = [n for n, (_, _, w) in zip(lens, alleles) if w > 0]
-        shortest = min(cand) if cand else 0
-        # the centre is at least the shortest candidate, so this bounds the cells from below
-        if max(1, shortest) * max(1, longest) > max_cells or total > MAX_TOTAL_BP:
-            raise TooBig('shortest %d bp x longest %d bp > %d cells, or %d bp in all' % (
-                shortest, longest, max_cells, total))
+        longest = max(lens + [len(s) for _, s, _ in fragments])
+        if banded_cells(longest) > max_cells or sum(lens) > MAX_TOTAL_BP:
+            raise TooBig('longest %d bp needs %d cells banded, more than %d, or %d bp in all' % (
+                longest, banded_cells(longest), max_cells, sum(lens)))
         with Abpoa(abpoa, scores, deadline, workdir) as align:
-            msa = star_msa(alleles, fragments, align=align, deadline=deadline,
-                           max_cells=max_cells)
+            msa = star_msa(alleles, fragments, align=align, deadline=deadline, max_cells=max_cells)
         rows = msa.rows
         res.update(status='ok', centre=msa.centre, rows=rows, columns=len(next(iter(rows.values()), '')),
                    slot_alignments=msa.slot_alignments, fragments_exact=msa.fragments_exact,
-                   fragments_aligned=msa.fragments_aligned)
+                   fragments_aligned=msa.fragments_aligned, banded_pairs=msa.banded_pairs)
     except RealignError as e:
         res.update(status=e.status, message=str(e))
     except Exception as e:        # a bug: record it, so that one region cannot stop a contig

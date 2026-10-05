@@ -27,6 +27,11 @@ class TestRealignPackage(unittest.TestCase):
     def test_statuses(self):
         two = [('a1', 'ACGTACGT', 1), ('a2', 'ACGTTCGT', 1)]
         self.assertEqual(realign.realign_package(pkg('R', two), max_cells=10)['status'], 'too_big')
+        long_two = [('a1', 'ACGTACGTAC' * 40, 2), ('a2', 'ACGTTCGTAC' * 40, 1)]   # 400 bp: 160,000 cells unbanded
+        self.assertEqual(realign.realign_package(pkg('R', long_two), max_cells=5000)['status'], 'too_big')
+        r = realign.realign_package(pkg('R', long_two), max_cells=50000)   # banded: about 11,200 cells
+        self.assertEqual((r['status'], r['banded_pairs']), ('ok', 1))
+        self.assertEqual(realign.realign_package(pkg('R', long_two))['banded_pairs'], 0)
         self.assertEqual(realign.realign_package(pkg('R', []))['status'], 'no_alleles')
         self.assertEqual(realign.realign_package(pkg('R', two), timeout=0)['status'], 'timeout')
         r = realign.realign_package(pkg('R', two), abpoa='false')

@@ -64,7 +64,11 @@ class TestPieces(unittest.TestCase):
 
 class FakeAligner:
     """Pads every sequence with gaps on the right: a valid, if poor, global alignment."""
+    def __init__(self):
+        self.calls = []
+
     def __call__(self, seqs, banded=False):
+        self.calls.append((len(seqs), banded))
         w = max(len(s) for s in seqs)
         return [s + '-' * (w - len(s)) for s in seqs]
 
@@ -80,8 +84,16 @@ class TestStarMSAInputs(unittest.TestCase):
             star.star_msa([('a', 'ACGT', 1)], [('a', 'AC', 'left')], align=al)   # duplicate id
         with self.assertRaises(ValueError):
             star.star_msa([('a', 'ACGT', 1)], [('f', 'AC', 'middle')], align=al)
-        with self.assertRaises(star.TooBig):
-            star.star_msa([('a', 'ACGT' * 10, 1), ('b', 'ACGT' * 20, 1)], align=al, max_cells=100)
+
+    def test_large_pairs_are_banded(self):
+        al = FakeAligner()
+        m = star.star_msa([('a', 'ACGT' * 10, 2), ('b', 'ACGT' * 20, 1), ('c', 'ACGA' * 2, 1)], align=al,
+                          centre='a', max_cells=100)
+        self.assertEqual(m.banded_pairs, 2)                      # a x b is 3,200 cells and a x c 320, both over 100
+        self.assertEqual(sorted(al.calls), [(2, True), (2, True)])
+        al = FakeAligner()
+        m = star.star_msa([('a', 'ACGT' * 10, 2), ('b', 'ACGT' * 20, 1)], align=al, centre='a')
+        self.assertEqual((m.banded_pairs, al.calls), (0, [(2, False)]))
 
     def test_centre_and_weight_zero(self):
         al = FakeAligner()

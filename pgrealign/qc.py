@@ -24,8 +24,9 @@ and how much of it forces unrelated sequence into shared columns.
   unrelated sequence aligned base against base.
 
 The optimal alignment of a pair is global, unbanded and left-normalised, under the scores given, which
-should be those the alignment was built with. Pairs are drawn with a seed fixed per region, so a rerun
-measures the same pairs.
+should be those the alignment was built with. A pair whose unbanded alignment would exceed `max_cells`
+cells has no optimum to compare with; it is left out and counted in `skipped`. Pairs are drawn with a
+seed fixed per region, so a rerun measures the same pairs.
 
 **Output.** A TSV with one row per region that realign made `ok` and that has at least two alleles,
 and a summary (written next to it as .json) with the sums and the F1 values over all regions.
@@ -39,7 +40,7 @@ import zlib
 from .star import Abpoa, SCORES, align_pair
 
 FIELDS = ['id', 'alleles', 'longest', 'sequence', 'pair_tp', 'pair_opt', 'pair_msa', 'ref_tp', 'ref_opt',
-          'ref_msa', 'ref_sv', 'ref_sv_opt', 'forced', 'forced_opt']
+          'ref_msa', 'ref_sv', 'ref_sv_opt', 'forced', 'forced_opt', 'skipped']
 SV_RUN = 50
 WINDOW, MIN_SHARED, MAX_MISMATCH = 40, 20, 0.30
 
@@ -104,7 +105,7 @@ def sequence_bp(rows):
     return sum(len({rows[m][c] for m in names} - {'-'}) for c in range(len(rows[names[0]])))
 
 
-def region_qc(pkg, rows, align, pairs=20, refs=20):
+def region_qc(pkg, rows, align, pairs=20, refs=20, max_cells=None):
     """The metrics of one region (see the module docstring), as a dict keyed by FIELDS."""
     alleles = [(a['id'], a['seq'].upper(), a['weight']) for a in pkg['alleles']]
     seqs = {a: s for a, s, _ in alleles}
@@ -115,8 +116,12 @@ def region_qc(pkg, rows, align, pairs=20, refs=20):
     others = [a for a, _, _ in alleles if a != ref]
     rng = random.Random(zlib.crc32(pkg['id'].encode()))
     cand = [(i, j) for i in range(len(others)) for j in range(i + 1, len(others))]
+    too_big = lambda a, b: max_cells is not None and len(seqs[a]) * len(seqs[b]) > max_cells
     for i, j in sorted(rng.sample(cand, min(pairs, len(cand)))):
         a, b = others[i], others[j]
+        if too_big(a, b):
+            out['skipped'] += 1
+            continue
         opt = align_pair(seqs[a], seqs[b], align)
         ind = induced(rows[a], rows[b])
         o, m = aligned_pairs(*opt), aligned_pairs(*ind)
@@ -128,6 +133,9 @@ def region_qc(pkg, rows, align, pairs=20, refs=20):
     if ref is not None and ref in rows:
         heaviest = sorted((a for a in alleles if a[0] != ref), key=lambda a: (-a[2], a[0]))[:refs]
         for b, _, _ in heaviest:
+            if too_big(ref, b):
+                out['skipped'] += 1
+                continue
             opt = align_pair(seqs[ref], seqs[b], align)
             ind = induced(rows[ref], rows[b])
             o, m = aligned_pairs(*opt), aligned_pairs(*ind)
@@ -160,7 +168,7 @@ def summarise(rows):
 def _one(args):
     pkg, rows, kw = args
     with Abpoa(kw['abpoa'], kw['scores'], workdir=kw['workdir']) as align:
-        return region_qc(pkg, rows, align, kw['pairs'], kw['refs'])
+        return region_qc(pkg, rows, align, kw['pairs'], kw['refs'], kw['max_cells'])
 
 
 def reference_alleles(occurrences_path, ref_sample):
@@ -178,7 +186,7 @@ def reference_alleles(occurrences_path, ref_sample):
 
 
 def run(extract_dir, msas_path, out_path, pairs=20, refs=20, sample=None, jobs=1, abpoa='abpoa',
-        scores=SCORES, workdir=None, ref_sample='CHM13'):
+        scores=SCORES, workdir=None, ref_sample='CHM13', max_cells=450_000_000):
     """Measure every region realign made `ok` (or a fixed random `sample` of them) and write the TSV and
     its summary. `extract_dir` is extract's output directory. Returns the summary."""
     import concurrent.futures
@@ -199,7 +207,7 @@ def run(extract_dir, msas_path, out_path, pairs=20, refs=20, sample=None, jobs=1
         ref = reference_alleles(os.path.join(extract_dir, 'occurrences.tsv.gz'), ref_sample)
         for p in todo:
             p.setdefault('ref', ref.get(p['id']))
-    kw = {'pairs': pairs, 'refs': refs, 'abpoa': abpoa, 'scores': scores, 'workdir': workdir}
+    kw = {'pairs': pairs, 'refs': refs, 'abpoa': abpoa, 'scores': scores, 'workdir': workdir, 'max_cells': max_cells}
     out = []
     with concurrent.futures.ProcessPoolExecutor(max(1, jobs)) as ex:
         for r in ex.map(_one, [(p, msas[p['id']], kw) for p in todo], chunksize=4):

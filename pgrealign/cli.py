@@ -132,7 +132,7 @@ def cmd_qc(a):
     started = time.time()
     scores = scores_of(a)
     summary = qc.run(a.extract, a.msas, a.out, pairs=a.pairs, refs=a.refs, sample=a.sample, jobs=a.jobs,
-                     abpoa=a.abpoa, scores=scores, ref_sample=a.ref_sample)
+                     abpoa=a.abpoa, scores=scores, ref_sample=a.ref_sample, max_cells=a.max_cells)
     provenance.write_manifest(a.out, 'qc', {'msas': a.msas},
                               {'extract': a.extract, 'pairs': a.pairs, 'refs': a.refs, 'sample': a.sample,
                                'scores': ' '.join(scores.flags())},
@@ -253,8 +253,8 @@ def main(argv=None):
     c.add_argument('--abpoa', default='abpoa', help='abPOA binary [abpoa on PATH]')
     c.add_argument('--timeout', type=float, default=900, help='seconds per region [900]')
     c.add_argument('--max-cells', type=int, default=MAX_CELLS,
-                   help='leave a region as it is when an unbanded pairwise alignment would exceed this many cells '
-                        '[%d]' % MAX_CELLS)
+                   help='band a pairwise alignment that would exceed this many cells unbanded, and leave a region as '
+                        'it is when even a banded one would [%d]' % MAX_CELLS)
     c.add_argument('--scores', metavar='FLAGS', help=scores_help)
     c.set_defaults(func=cmd_realign)
 
@@ -291,6 +291,8 @@ def main(argv=None):
     c.add_argument('--ref-sample', default='CHM13', help='the reference sample, for packages that do not name it [CHM13]')
     c.add_argument('--scores', metavar='FLAGS', help="abPOA's scores for the optimal pairwise alignments; use the "
                    "scores the alignment was built with [%s]" % ' '.join(SCORES.flags()))
+    c.add_argument('--max-cells', type=int, default=MAX_CELLS,
+                   help='skip a pair whose unbanded optimal alignment would exceed this many cells [%d]' % MAX_CELLS)
     c.add_argument('-j', '--jobs', type=int, default=1, help='regions measured in parallel [1]')
     c.add_argument('--abpoa', default='abpoa', help='abPOA binary [abpoa on PATH]')
     c.set_defaults(func=cmd_qc)
