@@ -49,7 +49,9 @@ class TestChains(unittest.TestCase):
         # an interval overlapping boundary node 12 must take the anchor before it
         self.assertEqual(A.query(25, 35, 1000), ((0, 10, 10), (40, 50, 14)))
         # an interval reaching into the first boundary node is clamped, and anchored on it
-        self.assertEqual(A.query(0, 5, 1000), ((0, 10, 10), (20, 30, 12)))
+        self.assertEqual(A.query(0, 15, 1000), ((0, 10, 10), (20, 30, 12)))
+        # an interval wholly inside it has nothing between anchors to realign
+        self.assertRaises(regions.AnchorError, A.query, 0, 5, 1000)
         # the tightest pair over every chain wins: a second chain, 11-13-15, is tighter around 41-49
         A = anchors([(10, 12), (12, 14), (14, 16), (16, 19), (11, 13), (13, 15)])
         self.assertEqual(A.query(31, 39, 1000), ((20, 30, 12), (40, 50, 14)))
@@ -114,6 +116,13 @@ class TestAssign(unittest.TestCase):
         self.assertEqual(rows(rs), [('d', '.', '.', 25, 85, 60, 'd', 'too_long',
                                      'no chain encloses 25-85 within 30 bp'),
                                     ('a', 12, 14, 30, 40, 30, 'a', 'ok', '')])
+
+    def test_target_outside_the_boundary_nodes(self):
+        # one chain, 12-14-16: a target wholly before node 12 or after node 16 has no anchors on both sides
+        A = anchors([(12, 14), (14, 16)])
+        for start, end in ((0, 15), (70, 95)):
+            r = regions.assign([Target('T', start, end, 'STR')], A, 'chrT', pad=0)
+            self.assertEqual([x.status for x in r], ['too_long'], (start, end))
 
     def test_pad(self):
         # the padded target is anchored; its row still has the interior between the anchors

@@ -32,11 +32,14 @@ seed fixed per region, so a rerun measures the same pairs.
 and a summary (written next to it as .json) with the sums and the F1 values over all regions.
 """
 import collections
+import concurrent.futures
 import gzip
 import json
+import os
 import random
 import zlib
 
+from .extract import read_packages
 from .star import Abpoa, SCORES, align_pair
 
 FIELDS = ['id', 'alleles', 'longest', 'sequence', 'pair_tp', 'pair_opt', 'pair_msa', 'ref_tp', 'ref_opt',
@@ -189,9 +192,6 @@ def run(extract_dir, msas_path, out_path, pairs=20, refs=20, sample=None, jobs=1
         scores=SCORES, workdir=None, ref_sample='CHM13', max_cells=450_000_000):
     """Measure every region realign made `ok` (or a fixed random `sample` of them) and write the TSV and
     its summary. `extract_dir` is extract's output directory. Returns the summary."""
-    import concurrent.futures
-    import os
-    from .extract import read_packages
     packages_path = os.path.join(extract_dir, 'packages.jsonl.gz')
     msas = {}
     with gzip.open(msas_path, 'rt') as f:
@@ -212,12 +212,14 @@ def run(extract_dir, msas_path, out_path, pairs=20, refs=20, sample=None, jobs=1
     with concurrent.futures.ProcessPoolExecutor(max(1, jobs)) as ex:
         for r in ex.map(_one, [(p, msas[p['id']], kw) for p in todo], chunksize=4):
             out.append(r)
-    with open(out_path, 'w') as f:
+    summary = summarise(out)
+    with open(out_path + '.json.tmp', 'w') as f:
+        json.dump(summary, f, indent=1)
+        f.write('\n')
+    with open(out_path + '.tmp', 'w') as f:
         f.write('\t'.join(FIELDS) + '\n')
         for r in out:
             f.write('\t'.join(str(r[k]) for k in FIELDS) + '\n')
-    summary = summarise(out)
-    with open(out_path + '.json', 'w') as f:
-        json.dump(summary, f, indent=1)
-        f.write('\n')
+    os.replace(out_path + '.json.tmp', out_path + '.json')
+    os.replace(out_path + '.tmp', out_path)
     return summary

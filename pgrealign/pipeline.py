@@ -9,11 +9,13 @@ For a contig C of a whole-genome GBZ, `run_contig` writes, under OUT/C/:
 | extract | extract/ | extract/summary.json exists |
 | realign | msas.jsonl.gz | it exists; an interrupted realign resumes from msas.jsonl.gz.partial |
 | replace | C.realigned.gbz, and replace.json | the GBZ exists |
-| verify | verify.json | it exists |
+| verify | verify.json | it exists; run stops if it records a failure |
 | qc | qc.tsv and qc.tsv.json | it exists, or qc is off |
 
-Each stage also writes its manifest, <output>.manifest.json, as the subcommands do. The realigned contigs
-of a genome are then combined with `pgrealign merge`.
+The file by which run judges a stage done is written after the stage's other files, under a temporary
+name renamed into place once complete, so a run killed partway through a stage redoes that stage. Each
+stage then writes its manifest, <output>.manifest.json, as the subcommands do. The realigned contigs of a genome are
+then combined with `pgrealign merge`.
 """
 import json
 import os
@@ -94,8 +96,8 @@ def run_contig(gbz, contig, targets, out_dir, jobs=1, threads=4, vg=None, abpoa=
         t = time.time()
         gfa = os.path.join(d, contig + '.realigned.gfa')
         s = replace.replace(cgbz, ex, msas, gfa, id_start=id_start, vg=vg, threads=threads)
-        replace.to_gbz(gfa, rgbz, vg=vg)
         _write_json(os.path.join(d, 'replace.json'), s)
+        replace.to_gbz(gfa, rgbz, vg=vg)
         provenance.write_manifest(rgbz, 'replace', {'graph': cgbz, 'msas': msas},
                                   {'extract': ex, 'id_mode': 'dense', 'id_start': id_start}, tools=vg_tool,
                                   extra={'summary': s}, started=t)
@@ -108,9 +110,10 @@ def run_contig(gbz, contig, targets, out_dir, jobs=1, threads=4, vg=None, abpoa=
         s = verify.verify(cgbz, rgbz, vg=vg)
         _write_json(ver, s)
         provenance.write_manifest(ver, 'verify', {'before': cgbz, 'after': rgbz}, {}, tools=vg_tool, started=t)
-        if not s['ok']:
-            raise RuntimeError('verify failed for %s: see %s' % (contig, ver))
         out['verify'] = {k: s[k] for k in ('ok', 'paths', 'bases', 'metadata_identical')}
+    with open(ver) as f:
+        if not json.load(f)['ok']:
+            raise RuntimeError('verify failed for %s: see %s' % (contig, ver))
 
     q = os.path.join(d, 'qc.tsv')
     if do_qc and not _done(q):

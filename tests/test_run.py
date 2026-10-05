@@ -67,6 +67,14 @@ class TestRun(unittest.TestCase):
             self.assertIsNotNone(pkg['ref'])
             again = pipeline.run_contig(gbz, 'chrT1', targets, out, drop_samples=(), log=quiet)
             self.assertEqual(set(again), {'prepare', 'id_range'})          # every later stage resumed
+            ver = os.path.join(out, 'chrT1', 'verify.json')
+            good = open(ver).read()
+            with open(ver, 'w') as f:
+                json.dump(dict(json.loads(good), ok=False), f)
+            with self.assertRaises(RuntimeError):                          # a recorded failure stops every run
+                pipeline.run_contig(gbz, 'chrT1', targets, out, drop_samples=(), log=quiet)
+            with open(ver, 'w') as f:
+                f.write(good)
             s2 = pipeline.run_contig(gbz, 'chrT2', targets, out, drop_samples=(), log=quiet)
             self.assertEqual(s2['regions']['regions'], 0)
             g = os.path.join(d, 'merged.gbz')

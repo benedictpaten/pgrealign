@@ -14,7 +14,7 @@ reference contig), cut out as they are. Nothing is renumbered.
    reference samples are those with reference paths in any input; `vg gbwt` would otherwise drop the
    tag and read them as haplotypes.
 5. The output is checked: its node count, edge count and length are the sums of the inputs', and its
-   path names are exactly the union of theirs.
+   path names are exactly the union of theirs. If not, it is renamed to <output>.failed.
 """
 import os
 import shutil
@@ -99,9 +99,13 @@ def merge(gbzs, out_gbz, vg=None, workdir=None):
         shutil.rmtree(wd, ignore_errors=True)
     got = graph_size(out_gbz, vg)
     got_names, got_refs = path_names(out_gbz, vg)
+    problem = None
     if got != size:
-        raise ValueError('merged graph has %s, the inputs sum to %s' % (got, size))
-    if got_names != names:
-        raise ValueError('merged graph has %d paths, the inputs %d' % (len(got_names), len(names)))
+        problem = 'merged graph has %s, the inputs sum to %s' % (got, size)
+    elif got_names != names:
+        problem = 'merged graph has %d paths, the inputs %d' % (len(got_names), len(names))
+    if problem:
+        os.replace(out_gbz, out_gbz + '.failed')
+        raise ValueError(problem + '; the graph is left in %s.failed' % out_gbz)
     return {'inputs': len(gbzs), 'id_ranges': {g: list(r) for g, r in ranges.items()}, **got,
             'paths': len(got_names), 'reference_samples': sorted(got_refs)}

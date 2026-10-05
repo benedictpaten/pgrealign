@@ -105,7 +105,8 @@ def write_manifest(out_path, stage, inputs, params, tools=(), extra=None, starte
     }
     if extra:
         m.update(extra)
-    with open(out_path + '.manifest.json', 'w') as f:
+    with open(out_path + '.manifest.json.tmp', 'w') as f:
         json.dump(m, f, indent=1, sort_keys=True)
         f.write('\n')
+    os.replace(out_path + '.manifest.json.tmp', out_path + '.manifest.json')
     return m

@@ -258,8 +258,10 @@ def extract(graph, regions, out_dir, vg=None, threads=4, max_internal_bp=200000,
             it.write('%s\t%s\n' % (rid, ','.join(str(n) for n in sorted(rr.interior))))
     summary = {'walks': n_walks, 'regions': len(regs), 'status': dict(status),
                'internal_candidates': len(candidates), 'internal_too_long': n_long}
-    with open(os.path.join(out_dir, 'summary.json'), 'w') as f:
+    path = os.path.join(out_dir, 'summary.json')
+    with open(path + '.tmp', 'w') as f:
         json.dump(summary, f, indent=1)
+    os.replace(path + '.tmp', path)
     return summary
 
 

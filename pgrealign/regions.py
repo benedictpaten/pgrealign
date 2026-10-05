@@ -5,9 +5,11 @@ snarls come from `vg snarls -T -P <ref>`, trivial snarls included, so consecutiv
 share a boundary node.
 - Only boundary nodes the reference visits once, forward, are used.
 - The target is padded by `pad` on each side, within the contig, and then clamped to lie between the
-  reference's first and last boundary nodes, so a target reaching into either is anchored on it.
+  end of the reference's first boundary node and the start of its last, so a target reaching into
+  either is anchored on it. A target that lies wholly before the first node's end, or wholly after
+  the last node's start, has no boundary nodes on both sides.
 - L is the chain's last boundary node ending at or before the padded target start.
-- R is its first boundary node starting at or after the padded target end.
+- R is its first boundary node starting at or after the padded target end, and is never L itself.
 - Over every chain, top-level or nested, the pair with the smallest reference span wins.
 
 Two boundary nodes of one chain separate the graph. So every path that crosses the region crosses both
@@ -43,6 +45,7 @@ import bisect
 import collections
 import gzip
 import json
+import os
 import subprocess
 
 from . import catalog
@@ -110,6 +113,8 @@ class Anchors:
     def query(self, a0, b0, max_span):
         """(L, R) as (start, end, node) around [a0, b0), clamped to the outermost boundary nodes."""
         a0, b0 = max(a0, self.first_end), min(b0, self.last_start)
+        if a0 >= b0:
+            raise AnchorError('no boundary nodes on both sides of %d-%d' % (a0, b0))
         left = {}
         i = bisect.bisect_right(self.ends, a0)
         lo_lim = b0 - max_span
@@ -136,6 +141,8 @@ class Anchors:
         best = None
         for ci in set(left) & set(right):
             L, R = left[ci], right[ci]
+            if R[0] < L[1]:
+                continue       # one node, or anchors that overlap: nothing lies between them
             span = R[1] - L[0]
             if span <= max_span and (best is None or span < best[0]):
                 best = (span, L, R)
@@ -201,10 +208,11 @@ def assign(targets, anchors, contig, pad=200, max_span=100000, contig_length=Non
 
 def write_regions(regions, path):
     op = gzip.open if path.endswith('.gz') else open
-    with op(path, 'wt') as f:
+    with op(path + '.tmp', 'wt') as f:
         f.write('#' + HEADER + '\n')
         for r in regions:
             f.write('\t'.join(str(v) for v in r) + '\n')
+    os.replace(path + '.tmp', path)
 
 
 def read_regions(path):
