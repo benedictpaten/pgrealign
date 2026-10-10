@@ -1,4 +1,5 @@
-"""End to end, with vg: a two-contig genome, each contig through `run_contig`, then `merge`."""
+"""End to end, with vg: a two-contig genome, each contig through `run_contig`, then `merge`; and one contig
+of it as a graph already cut, in vg's format, through `index_contig` and the stages."""
 import gzip
 import json
 import os
@@ -7,7 +8,7 @@ import subprocess
 import tempfile
 import unittest
 
-from pgrealign import merge, pipeline
+from pgrealign import extract, merge, pipeline, prepare, realign, regions, replace, verify
 
 FLANK_L = 'CCTAGGCTTAGGACCTGATCGGATCCAGTA'
 FLANK_R = 'GGATCCTAGCATTCGGATCCAAGTTCCAGA'
@@ -81,6 +82,39 @@ class TestRun(unittest.TestCase):
             g = os.path.join(d, 'merged.gbz')
             merge.merge([os.path.join(out, c, c + '.realigned.gbz') for c in ('chrT1', 'chrT2')], g)
             self.assertEqual(path_seqs(g), path_seqs(gbz))
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_vg_graph(self):
+        """A graph already cut, in vg's own format (as Minigraph-Cactus writes each chromosome), through
+        index_contig and the stages, with the GFA's index and replace's output to compare against."""
+        d = tempfile.mkdtemp()
+        try:
+            gfa, vgg = os.path.join(d, 'genome.gfa'), os.path.join(d, 'genome.vg')
+            genome_gfa(gfa)
+            with open(vgg, 'wb') as f:
+                subprocess.run(['vg', 'convert', '-g', '-p', gfa], check=True, stdout=f)
+            targets = os.path.join(d, 'targets.bed')
+            with open(targets, 'w') as f:
+                f.write('chrT1\t%d\t%d\tTR1\n' % (len(FLANK_L), len(FLANK_L) + 3 * len(UNIT)))
+            ix = {}
+            for g in (gfa, vgg):
+                ix[g] = prepare.index_contig(g, 'chrT1', os.path.join(d, os.path.basename(g) + '.ix'))
+            self.assertEqual(prepare.read_ref_index(ix[vgg]['ref']), prepare.read_ref_index(ix[gfa]['ref']))
+            reg = os.path.join(d, 'regions.tsv.gz')
+            regions.build(targets, 'chrT1', ix[vgg]['snarls'], ix[vgg]['ref'], reg)
+            ex = os.path.join(d, 'extract')
+            s = extract.extract(vgg, list(regions.read_regions(reg)), ex)
+            self.assertEqual(s['status'], {'ok': 1})
+            msas = os.path.join(d, 'msas.jsonl.gz')
+            realign.run(os.path.join(ex, 'packages.jsonl.gz'), msas)
+            outs = {}
+            for g in (gfa, vgg):
+                outs[g] = os.path.join(d, os.path.basename(g) + '.realigned.gfa')
+                replace.replace(g, ex, msas, outs[g])
+            with open(outs[gfa]) as a, open(outs[vgg]) as b:
+                self.assertEqual(sorted(a), sorted(b))
+            self.assertTrue(verify.verify(vgg, outs[vgg])['ok'])
         finally:
             shutil.rmtree(d, ignore_errors=True)
 

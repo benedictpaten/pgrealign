@@ -26,7 +26,7 @@ contig, and `merge` joins the realigned contigs into one graph.
 ### Installation and tools
 
 The [README](../README.md#install) gives the requirements: Python, vg, abPOA 1.5 or later, and a C
-compiler for `catalog --reference`. The stages find `vg` and `abpoa` on `PATH` unless `--vg` and
+compiler for `catalog --reference`, unless `--trfind` names a trfind binary built elsewhere. The stages find `vg` and `abpoa` on `PATH` unless `--vg` and
 `--abpoa` name them. pgrealign does not check vg's version; the vg in use must support the commands
 pgrealign runs: `vg convert -f` (with `-H`), `vg chunk --gbz --contig`, `vg gbwt` (with `-Z`, `-R`,
 `--set-reference`, `--tags`, `-x`, `-G`, `-f` and `--gbz-format`), `vg snarls -T -P`, `vg view -Rj`,
@@ -34,12 +34,13 @@ pgrealign runs: `vg convert -f` (with `-H`), `vg chunk --gbz --contig`, `vg gbwt
 
 ### Graphs
 
-pgrealign reads graphs in two formats. GFA is a text format with one record per line, the first
-character naming its type: a node (an S line) has an integer id and a sequence, and an edge (an L
-line) joins the ends of two nodes. GBZ is vg's compressed format, which holds the nodes and edges
-with a GBWT, a compressed index of the graph's paths. `extract` and `replace` read a file whose name
-ends in `.gbz` through `vg convert -f`, which writes it as GFA, and any other file as GFA, gzipped
-when its name ends in `.gz`. `verify` passes either kind of file to vg.
+pgrealign reads graphs as GFA. GFA is a text format with one record per line, the first character
+naming its type: a node (an S line) has an integer id and a sequence, and an edge (an L line) joins
+the ends of two nodes. GBZ is vg's compressed format, which holds the nodes and edges with a GBWT, a
+compressed index of the graph's paths. `extract`, `replace` and `qc` read a file whose name ends in
+`.gbz`, or in `.vg`, `.pg`, `.hg` or `.xg` for vg's other formats, through `vg convert -f`, which
+writes it as GFA, and any other file as GFA, gzipped when its name ends in `.gz`. `verify` passes
+every kind of file to vg.
 
 ### Walks
 
@@ -179,6 +180,13 @@ catalogue's place. It reads one or both of:
   finder, on them, on N files at once with `-j N`, so with one file per contig the contigs run in
   parallel.
 
+- `--trf`: a TRF binary, as a path or a name on `PATH`, to run on the `--reference` files as well, the
+  way RepeatMasker 4.1 finds its Simple_repeat records, in place of a RepeatMasker annotation the
+  reference lacks ([method](method.md#trf)). `-j N` runs N TRF processes at once.
+
+Sources that hold no record on the selected contigs, such as a reference with no tandem repeat, give
+a catalogue with a header and no entry; giving neither source is an error.
+
 `--contigs` takes a comma-separated list of contig names, or `all`. Without it, `catalog` keeps a
 fixed list, chr1 to chr22 and chrX, and drops every other contig, such as chrY, chrM, or the records
 of a FASTA named 1, 2 and so on; such contigs need `--contigs` or `all`.
@@ -197,7 +205,8 @@ The summary holds the number of `records` kept (RepeatMasker records of the thre
 trfind's records, on the selected contigs), the number of `regions` (catalogue entries) written,
 `records_by_source_class` (keys such as `rm/STR` and `trfind/VNTR`), `regions_by_class`, the
 entries' total length in `bp`, and, when trfind ran, `trfind`: the hashes, compiler flags and
-platform that name its build.
+platform that name its build, or, with `--trfind`, `binary`, the path of the binary that ran, and,
+with `--trf`, `trf`: the TRF binary's path and the parameters of each stage.
 
 #### Records, trfind and merging
 
@@ -212,6 +221,9 @@ platform that name its build.
 - `catalog` compiles trfind on first use into `$PGREALIGN_CACHE`, or else `~/.cache/pgrealign`, with
   `$CC`, or else the first of `cc`, `clang` and `gcc` on `PATH`. The cached binary's name holds a
   hash of the source, the compiler flags and the platform, so a changed source is compiled again.
+- `--trfind` names a trfind binary built elsewhere from `pgrealign/c/trfind.c`, as a path or a name
+  on `PATH`, for a system with no C compiler, such as a container. `catalog` then compiles nothing,
+  and cannot check that the binary was built from this version's source.
 - `catalog` merges the records of one contig that overlap or lie within `--gap` bp of each other
   into one entry. Raise `--gap` to join repeats separated by short stretches into one entry, and so
   into one target.
@@ -256,6 +268,15 @@ would give those regions fragments.
   stops if dropping would leave no reference sample.
 
 The realigned graph has no cover either ([Known gaps](#known-gaps) gives the commands that add one).
+
+#### A graph already cut
+
+`--graph`, in place of `--gbz`, names a graph that is already the contig's: a GFA, a GBZ, or a graph
+in another of vg's formats, such as the `<contig>.vg` that Minigraph-Cactus writes for each reference
+chromosome. `prepare` then writes only `<contig>.snarls.pb`, `<contig>.ref.tsv.gz` and the manifest,
+and the later stages read the graph itself, by its own name. It cuts nothing, so the graph may hold
+the reference sample's paths on other contigs, and it drops no sample: it takes neither
+`--drop-sample` nor `--keep-all-samples`, so a cover the graph holds must be removed beforehand.
 
 ### regions
 

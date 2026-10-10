@@ -93,7 +93,8 @@ later stages take any intervals, and the sequences in them, as they come.
 ## The catalogue
 
 `catalog` lists the tandem repeats of a reference, from its RepeatMasker annotation
-(`--repeatmasker`), its FASTA (`--reference`), or both, on the contigs that `--contigs` names. The
+(`--repeatmasker`), its FASTA (`--reference`), or both, on the contigs that `--contigs` names. With
+`--trf`, it also runs TRF on the FASTA, in place of a RepeatMasker annotation the reference lacks. The
 chrom names of both sources must be the graph's contig names, because `regions` keeps only the
 targets on its own contig. Each entry of the catalogue is a target, of one of four classes:
 
@@ -144,6 +145,32 @@ file on its own, upper-cased, so soft-masked (lower-case) bases count like any o
 
 A trfind repeat is VNTR when q is 7 or more and STR otherwise. Its motif is the first q bases of its
 interval in the reference.
+
+### TRF
+
+RepeatMasker 4.1 finds its Simple_repeat records with TRF (Tandem Repeats Finder), and `--trf`, naming
+a TRF binary, runs TRF the same way, for a reference that has no RepeatMasker annotation.
+
+1. Batches. Each record of each FASTA file is cut into RepeatMasker's batches: windows of 60 kb, each
+   starting 58 kb after the one before, so neighbours overlap by 2 kb, the last reaching the record's
+   end. Besides following RepeatMasker, this bounds the work TRF does on any one repeat: run on the
+   whole of CHM13's chr20, TRF had not finished after 48 minutes, and on its batches it took 10.
+2. Stages. Every batch goes through RepeatMasker's two TRF stages, each with its own parameters
+   (match, mismatch, indel, PM, PI, minimum score and maximum period) and its own copy number that a
+   repeat must exceed to be kept: one for young repeats, `2 7 7 80 10 50 10` and 4 copies, and one
+   for old repeats, `2 3 5 75 20 33 7` and 5 copies. `-j` runs that many TRF processes at once, each
+   on its share of the batches.
+3. Records. Each repeat kept is placed on its record by its batch's offset, and becomes a
+   Simple_repeat record named `(MOTIF)n` by TRF's consensus motif, so STR or VNTR by the rule above,
+   from the source `trf`. A repeat in the overlap of two batches can be found in both, and the two
+   records merge.
+
+RepeatMasker then rescores each repeat's alignment with its own matrix and drops the low-scoring
+ones, and it masks interspersed repeats, such as Alu elements with their poly-A tails, before looking
+for simple ones; `catalog` does neither. So TRF finds about every Simple_repeat that RepeatMasker would,
+and more besides. On CHM13 chr20, TRF and trfind together find 98% of the entries of the shipped
+catalogue, built from RepeatMasker's annotation and trfind (98% of its STRs, 99% of its VNTRs, within
+200 bp), and write 1.9 times as many entries.
 
 ### Merging records into entries
 

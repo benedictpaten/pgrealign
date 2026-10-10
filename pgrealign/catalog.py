@@ -21,7 +21,16 @@ as input.
   - A repeat becomes VNTR at a period of 7 or more, and STR below.
   - trfind is compiled on first use into the cache directory ($PGREALIGN_CACHE, else
     ~/.cache/pgrealign), under a key that hashes its source, the compiler flags and the platform
-    (trfind_build).
+    (trfind_build), unless `--trfind` names a binary built from c/trfind.c elsewhere, as where there is
+    no C compiler (prebuilt_trfind).
+- **TRF** (Tandem Repeats Finder, `--trf`, run on the reference FASTA), the way RepeatMasker 4.1 finds
+  its Simple_repeat records, for a reference with no RepeatMasker annotation. Each sequence is cut into
+  RepeatMasker's batches of 60 kb that overlap by 2 kb, which also keeps TRF from spending hours on a
+  centromere's satellites, and each batch goes through RepeatMasker's two TRF stages (TRF_STAGES): one
+  for young repeats and one for old. A repeat of more copies than the stage's minimum becomes a
+  Simple_repeat record named by TRF's consensus motif, so STR or VNTR by the rule above. RepeatMasker
+  then rescores each repeat's alignment and masks interspersed repeats first; catalog does neither, so
+  TRF finds about every Simple_repeat RepeatMasker would, and more besides.
 
 **Merging.** Records on a contig that overlap or lie within `gap` bp of each other merge into one
 region.
@@ -183,15 +192,112 @@ def _trfind_one(args):
     return out
 
 
-def run_trfind(fastas, minp=7, maxp=2000, contigs=None, jobs=1):
-    """trfind Records from one or more FASTA files (one contig per file runs them in parallel)."""
-    binary = trfind_binary()
+def prebuilt_trfind(binary):
+    """The path of a trfind binary built elsewhere from c/trfind.c, such as by a package that has no C
+    compiler where it runs. `binary` is a path, or a name to find on PATH."""
+    path = shutil.which(binary)
+    if path is None:
+        raise RuntimeError('trfind binary %s not found, or not executable' % binary)
+    return os.path.abspath(path)
+
+
+def run_trfind(fastas, minp=7, maxp=2000, contigs=None, jobs=1, binary=None):
+    """trfind Records from one or more FASTA files (one contig per file runs them in parallel). `binary` is
+    a prebuilt trfind (prebuilt_trfind), or None to compile one on first use (trfind_binary)."""
+    binary = prebuilt_trfind(binary) if binary else trfind_binary()
     contigs = set(contigs) if contigs else None
     recs = []
     with concurrent.futures.ThreadPoolExecutor(max(1, jobs)) as ex:
         for r in ex.map(_trfind_one, [(binary, f, minp, maxp, contigs) for f in fastas]):
             recs.extend(r)
     return recs
+
+
+# ----------------------------------------------------------------------------- TRF
+
+# RepeatMasker 4.1's two TRF stages (runTRFStage in its RepeatMasker script): the parameters it gives
+# TRF, as match, mismatch, delta, PM, PI, minscore and maxperiod, and the copy number a repeat must
+# exceed to be kept
+TRF_STAGES = (('perfect', (2, 7, 7, 80, 10, 50, 10), 4),
+              ('old', (2, 3, 5, 75, 20, 33, 7), 5))
+TRF_BATCH, TRF_OVERLAP = 60000, 2000     # RepeatMasker's batches: their length, and their overlap
+
+
+def trf_batches(seqs, size=None, overlap=None):
+    """(contig, offset, sequence) of the batches that cover each of `seqs` {contig: sequence}: windows of
+    `size` bp (TRF_BATCH), each starting `size - overlap` bp (TRF_OVERLAP) after the one before, the last
+    reaching the end."""
+    size = size or TRF_BATCH
+    overlap = TRF_OVERLAP if overlap is None else overlap
+    for contig, s in seqs.items():
+        start = 0
+        while True:
+            yield contig, start, s[start:start + size]
+            if start + size >= len(s):
+                break
+            start += size - overlap
+
+
+def parse_trf(lines, batches, min_copies):
+    """Records from TRF's -ngs output, `lines`: an '@<name>' line for each sequence with repeats, then a
+    line per repeat: start and end (1-based, inclusive), period, copy number, consensus size, percent
+    matches, percent indels, score, A, C, G, T, entropy, consensus, sequence, and the two flanks. A
+    sequence's name is its index in `batches`, [(contig, offset)], which places it on its contig. A
+    repeat of `min_copies` copies or fewer is dropped."""
+    out, where = [], None
+    for line in lines:
+        if line.startswith('@'):
+            where = batches[int(line[1:].split()[0])]
+            continue
+        x = line.split()
+        if not x or float(x[3]) <= min_copies:
+            continue
+        cls, period, motif = classify('Simple_repeat', '(%s)n' % x[13])
+        out.append(Record(where[0], where[1] + int(x[0]) - 1, where[1] + int(x[1]), cls, period, motif, 'trf'))
+    return out
+
+
+def _trf_one(args):
+    """Run one TRF stage on one FASTA file of batches, and return its Records."""
+    binary, fasta, params, min_copies, batches = args
+    p = subprocess.run([binary, fasta, *map(str, params), '-h', '-ngs'], capture_output=True, text=True,
+                       cwd=os.path.dirname(fasta))
+    if p.returncode:
+        raise RuntimeError('%s failed (%d) on %s: %s' % (binary, p.returncode, fasta, p.stderr[-2000:]))
+    return parse_trf(p.stdout.splitlines(), batches, min_copies)
+
+
+def run_trf(fastas, binary, contigs=None, jobs=1):
+    """TRF Records from one or more FASTA files (see the module docstring), with the batches of every file
+    shared out over `jobs` TRF processes. A repeat in the overlap of two batches can be found
+    in each, as two records that merge. `binary` is a path, or a name to find on PATH."""
+    exe = shutil.which(binary)
+    if exe is None:
+        raise RuntimeError('TRF binary %s not found, or not executable' % binary)
+    contigs = set(contigs) if contigs else None
+    batches = []
+    for f in fastas:
+        seqs = {n: s.upper() for n, s in fasta_records(f) if contigs is None or n in contigs}
+        batches.extend(trf_batches(seqs))
+    n = max(1, min(jobs, len(batches)))
+    places = [b[:2] for b in batches]
+    tmp = tempfile.mkdtemp(prefix='pgrealign-trf.')
+    try:
+        work = []
+        for k in range(n):
+            # every n-th batch, so the slow ones, which cluster in a centromere, are shared out
+            path = os.path.join(tmp, 'batches_%d.fa' % k)
+            with open(path, 'w') as t:
+                for i in range(k, len(batches), n):
+                    t.write('>%d\n%s\n' % (i, batches[i][2]))
+            work.extend((exe, path, params, min_copies, places) for _, params, min_copies in TRF_STAGES)
+        recs = []
+        with concurrent.futures.ThreadPoolExecutor(n) as ex:
+            for r in ex.map(_trf_one, work):
+                recs.extend(r)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return sorted(set(recs))
 
 
 # ----------------------------------------------------------------------------- merge and write
@@ -339,16 +445,23 @@ def _bed_ids(regions):
         yield r._replace(id=rid)
 
 
-def build(out, repeatmasker=None, fastas=(), gap=50, contigs=None, minp=7, maxp=2000, jobs=1):
-    """Read the sources, merge and write; returns a summary dict, with trfind_build() as `trfind` when
-    trfind ran."""
+def build(out, repeatmasker=None, fastas=(), gap=50, contigs=None, minp=7, maxp=2000, jobs=1, trfind=None,
+          trf=None):
+    """Read the sources, merge and write; returns a summary dict, with `trfind` when trfind ran: its
+    trfind_build(), or {'binary': its path} for a prebuilt `trfind` (run_trfind). `trf`, a TRF binary,
+    runs TRF on the `fastas` too (run_trf), and the summary's `trf` gives its path. Sources that hold no
+    record on the selected contigs, such as a reference with no tandem repeat, give an empty catalogue."""
+    if not repeatmasker and not fastas:
+        raise ValueError('no sources: give a RepeatMasker BED and/or reference FASTA files')
+    if trf and not fastas:
+        raise ValueError('TRF needs reference FASTA files to run on')
     recs = []
     if repeatmasker:
         recs.extend(read_repeatmasker(repeatmasker, contigs))
     if fastas:
-        recs.extend(run_trfind(fastas, minp, maxp, contigs, jobs))
-    if not recs:
-        raise ValueError('no records: give a RepeatMasker BED and/or reference FASTA files')
+        recs.extend(run_trfind(fastas, minp, maxp, contigs, jobs, binary=trfind))
+    if trf:
+        recs.extend(run_trf(fastas, trf, contigs, jobs))
     regions = merge(recs, gap)
     write_catalog(regions, out)
     summary = {'records': len(recs), 'regions': len(regions),
@@ -357,5 +470,8 @@ def build(out, repeatmasker=None, fastas=(), gap=50, contigs=None, minp=7, maxp=
                'regions_by_class': dict(collections.Counter(r.cls for r in regions)),
                'bp': sum(r.end - r.start for r in regions)}
     if fastas:
-        summary['trfind'] = trfind_build()
+        summary['trfind'] = {'binary': prebuilt_trfind(trfind)} if trfind else trfind_build()
+    if trf:
+        summary['trf'] = {'binary': os.path.abspath(shutil.which(trf)),
+                          'stages': {name: list(params) for name, params, _ in TRF_STAGES}}
     return summary

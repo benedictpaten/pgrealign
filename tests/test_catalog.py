@@ -188,6 +188,84 @@ class TestCatalog(unittest.TestCase):
         self.assertGreaterEqual(best.end, 2000 + 37 * 11)
         self.assertEqual(len(best.motif), 37)
 
+    @unittest.skipUnless(HAVE_CC, 'no C compiler')
+    def test_prebuilt_trfind(self):
+        rng = random.Random(2)
+        rand = lambda n: ''.join(rng.choice('ACGT') for _ in range(n))
+        fa = os.path.join(self.d, 'ref.fa')
+        with open(fa, 'w') as f:
+            f.write('>chrT\n%s\n' % (rand(1000) + rand(23) * 10 + rand(1000)))
+        with mock.patch.dict(os.environ, {'PGREALIGN_CACHE': os.path.join(self.d, 'cache')}):
+            built = catalog.trfind_binary()
+            want = catalog.run_trfind([fa])
+        # a binary built elsewhere, found by path or on PATH, finds the same repeats and compiles nothing
+        binary = os.path.join(self.d, 'bin', 'trfind')
+        os.makedirs(os.path.dirname(binary))
+        shutil.copy(built, binary)
+        nocc = {'PGREALIGN_CACHE': os.path.join(self.d, 'nocache'), 'CC': 'false'}
+        with mock.patch.dict(os.environ, {**nocc, 'PATH': os.path.dirname(binary) + os.pathsep + os.environ['PATH']}):
+            self.assertEqual(catalog.run_trfind([fa], binary=binary), want)
+            s = catalog.build(os.path.join(self.d, 'cat.bed'), fastas=[fa], contigs=['chrT'], trfind='trfind')
+        self.assertTrue(want)
+        self.assertEqual(s['trfind'], {'binary': binary})
+        self.assertFalse(os.path.exists(nocc['PGREALIGN_CACHE']))
+        with self.assertRaisesRegex(RuntimeError, 'not found'):
+            catalog.run_trfind([fa], binary=os.path.join(self.d, 'missing'))
+
+    @unittest.skipUnless(HAVE_CC, 'no C compiler')
+    def test_no_repeats_is_an_empty_catalogue(self):
+        # a reference with no tandem repeat, such as a short contig, gives a catalogue with no entry
+        fa = os.path.join(self.d, 'ref.fa')
+        with open(fa, 'w') as f:
+            f.write('>chrT\nACGTTGCAAGTCATGGA\n')
+        out = os.path.join(self.d, 'cat.bed.gz')
+        with mock.patch.dict(os.environ, {'PGREALIGN_CACHE': os.path.join(self.d, 'cache')}):
+            s = catalog.build(out, fastas=[fa], contigs=['chrT'])
+        self.assertEqual((s['records'], s['regions']), (0, 0))
+        self.assertEqual(list(catalog.read_catalog(out)), [])
+        with self.assertRaisesRegex(ValueError, 'no sources'):
+            catalog.build(out)
+
+    def test_trf_batches(self):
+        seqs = {'a': 'x' * 25, 'b': 'y' * 10, 'c': 'z' * 4}
+        got = [(c, o, len(s)) for c, o, s in catalog.trf_batches(seqs, size=10, overlap=3)]
+        # windows of 10 every 7 bp, the last reaching the end; a sequence no longer than one window is one
+        self.assertEqual(got, [('a', 0, 10), ('a', 7, 10), ('a', 14, 10), ('a', 21, 4), ('b', 0, 10), ('c', 0, 4)])
+
+    def test_parse_trf(self):
+        lines = ['@1 a description',
+                 '11 40 2 15.0 2 100 0 60 50 50 0 0 1.00 AC ACAC . .',
+                 '50 61 6 2.0 6 100 0 24 50 50 0 0 1.00 ACGTTG ACGTTGACGTTG . .',   # too few copies
+                 '@0',
+                 '1 300 9 33.3 9 95 1 500 25 25 25 25 2.00 ACGTTGCAA ACG . .']
+        recs = catalog.parse_trf(lines, [('chrT', 0), ('chrT', 7000)], min_copies=4)
+        R = catalog.Record
+        self.assertEqual(recs, [R('chrT', 7010, 7040, 'STR', 2, 'AC', 'trf'),
+                                R('chrT', 0, 300, 'VNTR', 9, 'ACGTTGCAA', 'trf')])
+
+    @unittest.skipUnless(shutil.which('trf'), 'trf not on PATH')
+    def test_run_trf(self):
+        # a (CA)n of 40 copies across a batch boundary is found whole, on the contig's coordinates
+        rng = random.Random(3)
+        rand = lambda n: ''.join(rng.choice('ACGT') for _ in range(n))
+        fa = os.path.join(self.d, 'ref.fa')
+        with open(fa, 'w') as f:
+            f.write('>chrT description\n%s\n>chrU\n%s\n' % (rand(950) + 'CA' * 40 + rand(950), rand(500)))
+        with mock.patch.object(catalog, 'TRF_BATCH', 1000), mock.patch.object(catalog, 'TRF_OVERLAP', 200):
+            recs = catalog.run_trf([fa], 'trf', contigs=['chrT'], jobs=2)
+        hits = [r for r in recs if r.period == 2]
+        self.assertTrue(hits, recs)
+        self.assertEqual({(r.chrom, r.cls, r.src) for r in hits}, {('chrT', 'STR', 'trf')})
+        self.assertEqual(min(r.start for r in hits), 950)
+        self.assertEqual(max(r.end for r in hits), 1030)
+        if HAVE_CC:
+            with mock.patch.dict(os.environ, {'PGREALIGN_CACHE': os.path.join(self.d, 'cache')}):
+                s = catalog.build(os.path.join(self.d, 'cat.bed'), fastas=[fa], contigs=['chrT'], trf='trf')
+            self.assertEqual(s['trf']['binary'], os.path.abspath(shutil.which('trf')))
+            self.assertIn('trf/STR', s['records_by_source_class'])
+        with self.assertRaisesRegex(ValueError, 'TRF needs reference FASTA'):
+            catalog.build(os.path.join(self.d, 'cat.bed'), repeatmasker=self.rm, trf='trf')
+
 
 if __name__ == '__main__':
     unittest.main()
