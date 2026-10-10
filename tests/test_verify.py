@@ -6,7 +6,7 @@ import subprocess
 import tempfile
 import unittest
 
-from pgrealign import prepare, verify
+from pgrealign import graph, prepare, verify
 
 
 def write_gfa(path, segments, links, walks, ref='REF'):
@@ -135,6 +135,11 @@ class TestRefIndex(unittest.TestCase):
         for lines in ([], [w, w.replace('\t100\t121\t', '\t200\t221\t')], ['P\tCHM13#0#chrB\t1+']):
             with self.assertRaises(RuntimeError):
                 self.index(lines)
+        # a walk is named by its sample and contig alone: CHM13's walk on another contig, and another sample's
+        # whose name starts like CHM13's, are passed over
+        self.assertEqual(self.index(['W\tCHM13\t0\tchrAB\t0\t21\t>1>2<4', 'W\tCHM13x\t0\tchrA\t0\t21\t>1>2<4', w]),
+                         [(n, o, s + 100, e + 100) for n, o, s, e in CHR_A_INDEX])
+        self.assertEqual(graph.walk_name(w + '\n'), ('CHM13', '0', 'chrA'))
 
     def test_the_reference_cannot_be_dropped(self):
         with self.assertRaises(ValueError):

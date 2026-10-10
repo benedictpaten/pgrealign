@@ -29,7 +29,7 @@ import shutil
 import subprocess
 import tempfile
 
-from .graph import GfaStream, find_vg, parse_w, steps
+from .graph import GfaStream, find_vg, parse_w, steps, walk_name
 
 DROP_SAMPLES = ('gref_CHM13',)
 
@@ -124,8 +124,10 @@ def write_ref_index(graph, ref_sample, contig, out, vg=None, threads=4):
                 x = line.split('\t', 3)
                 lens[int(x[1])] = len(x[2].rstrip('\n'))
             elif t == 'W':
-                w = parse_w(line)
-                if w.sample == ref_sample and w.contig == contig:
+                # every haplotype's walk is read, but only the reference's is split
+                sample, _, walk_contig = walk_name(line)
+                if sample == ref_sample and walk_contig == contig:
+                    w = parse_w(line)
                     found.append((int(w.start), w.steps))
             elif t == 'P':
                 x = line.rstrip('\n').split('\t')

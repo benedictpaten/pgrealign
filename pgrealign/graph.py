@@ -77,6 +77,14 @@ class GfaStream:
         return False
 
 
+def walk_name(line):
+    """(sample, haplotype, contig) of a W line, read without copying its walk, for a stage that wants only
+    a few of a graph's walks."""
+    a = line.index('\t', 2)
+    b = line.index('\t', a + 1)
+    return line[2:a], line[a + 1:b], line[b + 1:line.index('\t', b + 1)]
+
+
 def parse_w(line):
     """A W line as a Walk whose `steps` is still the raw walk string."""
     x = line.rstrip('\n').split('\t')
