@@ -21,8 +21,8 @@ as input.
   - A repeat becomes VNTR at a period of 7 or more, and STR below.
   - trfind is compiled on first use into the cache directory ($PGREALIGN_CACHE, else
     ~/.cache/pgrealign), under a key that hashes its source, the compiler flags and the platform
-    (trfind_build), unless `--trfind` names a binary built from c/trfind.c elsewhere, as where there is
-    no C compiler (prebuilt_trfind).
+    (tool_build), unless `--trfind` names a binary built from c/trfind.c elsewhere, as where there is
+    no C compiler (prebuilt_tool).
 - **TRF** (Tandem Repeats Finder, `--trf`, run on the reference FASTA), the way RepeatMasker 4.1 finds
   its Simple_repeat records, for a reference with no RepeatMasker annotation. Each sequence is cut into
   RepeatMasker's batches of 60 kb that overlap by 2 kb, which also keeps TRF from spending hours on a
@@ -31,6 +31,11 @@ as input.
   Simple_repeat record named by TRF's consensus motif, so STR or VNTR by the rule above. RepeatMasker
   then rescores each repeat's alignment and masks interspersed repeats first; catalog does neither, so
   TRF finds about every Simple_repeat RepeatMasker would, and more besides.
+- **strf** (c/strf.c, `--strf`), pgrealign's own reimplementation of the part of TRF that catalog
+  uses, run in TRF's place on the same batches and stages. It takes TRF's command line and writes
+  TRF's -ngs output, for periods up to 20 and PM 75 or 80 only, and finds nearly the same records
+  (docs/method.md). It is compiled on first use as trfind is, unless `--strf` names a binary built from
+  c/strf.c elsewhere.
 
 **Merging.** Records on a contig that overlap or lie within `gap` bp of each other merge into one
 region.
@@ -111,48 +116,61 @@ def read_repeatmasker(path, contigs=None):
             yield Record(x[0], int(x[1]), int(x[2]), *c, 'rm')
 
 
-# ----------------------------------------------------------------------------- trfind
+# ----------------------------------------------------------------------------- the C tools
 
 CC_FLAGS = ('-O2', '-lm')
+C_TOOLS = ('trfind', 'strf')   # c/trfind.c and c/strf.c
 
 
-def _trfind_source():
-    return os.path.join(os.path.dirname(os.path.abspath(__file__)), 'c', 'trfind.c')
+def _c_source(name):
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), 'c', name + '.c')
 
 
-def trfind_build():
-    """How trfind is built here: the sha256 of c/trfind.c, the compiler flags, the platform, and `key`,
-    a sha256 of all of them that names the cached binary."""
-    with open(_trfind_source(), 'rb') as f:
+def tool_build(name):
+    """How the C tool `name` (C_TOOLS) is built here: the sha256 of c/<name>.c, the compiler flags, the
+    platform, and `key`, a sha256 of all of them that names the cached binary."""
+    with open(_c_source(name), 'rb') as f:
         b = {'source_sha256': hashlib.sha256(f.read()).hexdigest(), 'cc_flags': ' '.join(CC_FLAGS),
              'system': platform.system(), 'machine': platform.machine()}
     b['key'] = hashlib.sha256('\t'.join(b[k] for k in sorted(b)).encode()).hexdigest()
     return b
 
 
-def trfind_binary(cache=None):
-    """Path of the trfind binary for trfind_build()'s key, compiled on first use into the cache directory
-    (`cache`, else $PGREALIGN_CACHE, else ~/.cache/pgrealign) with $CC, else cc, clang or gcc. It is
-    compiled under a temporary name and renamed into place, so no run ever sees a partial binary."""
+def tool_binary(name, cache=None):
+    """Path of the C tool `name`'s binary for tool_build(name)'s key, compiled on first use into the cache
+    directory (`cache`, else $PGREALIGN_CACHE, else ~/.cache/pgrealign) with $CC, else cc, clang or gcc.
+    It is compiled under a temporary name and renamed into place, so no run ever sees a partial binary."""
     cache = cache or os.environ.get('PGREALIGN_CACHE') or os.path.expanduser('~/.cache/pgrealign')
-    out = os.path.join(cache, 'trfind-' + trfind_build()['key'][:16])
+    out = os.path.join(cache, '%s-%s' % (name, tool_build(name)['key'][:16]))
     if os.path.exists(out):
         return out
     cc = shlex.split(os.environ.get('CC', '')) or [shutil.which('cc') or shutil.which('clang') or
                                                    shutil.which('gcc')]
     if cc[0] is None:
-        raise RuntimeError('trfind needs a C compiler (set CC)')
+        raise RuntimeError('%s needs a C compiler (set CC)' % name)
     os.makedirs(cache, exist_ok=True)
-    tmp = tempfile.mkdtemp(prefix='.trfind-', dir=cache)
+    tmp = tempfile.mkdtemp(prefix='.%s-' % name, dir=cache)
     try:
-        p = subprocess.run([*cc, '-o', os.path.join(tmp, 'trfind'), _trfind_source(), *CC_FLAGS],
+        p = subprocess.run([*cc, '-o', os.path.join(tmp, name), _c_source(name), *CC_FLAGS],
                            capture_output=True, text=True)
         if p.returncode:
-            raise RuntimeError('compiling trfind failed: %s\n%s' % (' '.join(p.args), p.stderr))
-        os.replace(os.path.join(tmp, 'trfind'), out)
+            raise RuntimeError('compiling %s failed: %s\n%s' % (name, ' '.join(p.args), p.stderr))
+        os.replace(os.path.join(tmp, name), out)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     return out
+
+
+def prebuilt_tool(name, binary):
+    """The path of a binary of the C tool `name` built elsewhere from c/<name>.c, such as by a package
+    that has no C compiler where it runs. `binary` is a path, or a name to find on PATH."""
+    path = shutil.which(binary)
+    if path is None:
+        raise RuntimeError('%s binary %s not found, or not executable' % (name, binary))
+    return os.path.abspath(path)
+
+
+# ----------------------------------------------------------------------------- trfind
 
 
 def fasta_records(path):
@@ -192,19 +210,10 @@ def _trfind_one(args):
     return out
 
 
-def prebuilt_trfind(binary):
-    """The path of a trfind binary built elsewhere from c/trfind.c, such as by a package that has no C
-    compiler where it runs. `binary` is a path, or a name to find on PATH."""
-    path = shutil.which(binary)
-    if path is None:
-        raise RuntimeError('trfind binary %s not found, or not executable' % binary)
-    return os.path.abspath(path)
-
-
 def run_trfind(fastas, minp=7, maxp=2000, contigs=None, jobs=1, binary=None):
     """trfind Records from one or more FASTA files (one contig per file runs them in parallel). `binary` is
-    a prebuilt trfind (prebuilt_trfind), or None to compile one on first use (trfind_binary)."""
-    binary = prebuilt_trfind(binary) if binary else trfind_binary()
+    a prebuilt trfind (prebuilt_tool), or None to compile one on first use (tool_binary)."""
+    binary = prebuilt_tool('trfind', binary) if binary else tool_binary('trfind')
     contigs = set(contigs) if contigs else None
     recs = []
     with concurrent.futures.ThreadPoolExecutor(max(1, jobs)) as ex:
@@ -213,7 +222,7 @@ def run_trfind(fastas, minp=7, maxp=2000, contigs=None, jobs=1, binary=None):
     return recs
 
 
-# ----------------------------------------------------------------------------- TRF
+# ----------------------------------------------------------------------------- TRF and strf
 
 # RepeatMasker 4.1's two TRF stages (runTRFStage in its RepeatMasker script): the parameters it gives
 # TRF, as match, mismatch, delta, PM, PI, minscore and maxperiod, and the copy number a repeat must
@@ -238,12 +247,12 @@ def trf_batches(seqs, size=None, overlap=None):
             start += size - overlap
 
 
-def parse_trf(lines, batches, min_copies):
+def parse_trf(lines, batches, min_copies, src='trf'):
     """Records from TRF's -ngs output, `lines`: an '@<name>' line for each sequence with repeats, then a
     line per repeat: start and end (1-based, inclusive), period, copy number, consensus size, percent
     matches, percent indels, score, A, C, G, T, entropy, consensus, sequence, and the two flanks. A
     sequence's name is its index in `batches`, [(contig, offset)], which places it on its contig. A
-    repeat of `min_copies` copies or fewer is dropped."""
+    repeat of `min_copies` copies or fewer is dropped. `src` is the Records' source, 'trf' or 'strf'."""
     out, where = [], None
     for line in lines:
         if line.startswith('@'):
@@ -253,24 +262,25 @@ def parse_trf(lines, batches, min_copies):
         if not x or float(x[3]) <= min_copies:
             continue
         cls, period, motif = classify('Simple_repeat', '(%s)n' % x[13])
-        out.append(Record(where[0], where[1] + int(x[0]) - 1, where[1] + int(x[1]), cls, period, motif, 'trf'))
+        out.append(Record(where[0], where[1] + int(x[0]) - 1, where[1] + int(x[1]), cls, period, motif, src))
     return out
 
 
 def _trf_one(args):
     """Run one TRF stage on one FASTA file of batches, and return its Records."""
-    binary, fasta, params, min_copies, batches = args
+    binary, fasta, params, min_copies, batches, src = args
     p = subprocess.run([binary, fasta, *map(str, params), '-h', '-ngs'], capture_output=True, text=True,
                        cwd=os.path.dirname(fasta))
     if p.returncode:
         raise RuntimeError('%s failed (%d) on %s: %s' % (binary, p.returncode, fasta, p.stderr[-2000:]))
-    return parse_trf(p.stdout.splitlines(), batches, min_copies)
+    return parse_trf(p.stdout.splitlines(), batches, min_copies, src)
 
 
-def run_trf(fastas, binary, contigs=None, jobs=1):
+def run_trf(fastas, binary, contigs=None, jobs=1, src='trf'):
     """TRF Records from one or more FASTA files (see the module docstring), with the batches of every file
     shared out over `jobs` TRF processes. A repeat in the overlap of two batches can be found
-    in each, as two records that merge. `binary` is a path, or a name to find on PATH."""
+    in each, as two records that merge. `binary` is a path, or a name to find on PATH, of TRF, or of strf
+    with `src` 'strf'."""
     exe = shutil.which(binary)
     if exe is None:
         raise RuntimeError('TRF binary %s not found, or not executable' % binary)
@@ -290,7 +300,7 @@ def run_trf(fastas, binary, contigs=None, jobs=1):
             with open(path, 'w') as t:
                 for i in range(k, len(batches), n):
                     t.write('>%d\n%s\n' % (i, batches[i][2]))
-            work.extend((exe, path, params, min_copies, places) for _, params, min_copies in TRF_STAGES)
+            work.extend((exe, path, params, min_copies, places, src) for _, params, min_copies in TRF_STAGES)
         recs = []
         with concurrent.futures.ThreadPoolExecutor(n) as ex:
             for r in ex.map(_trf_one, work):
@@ -298,6 +308,13 @@ def run_trf(fastas, binary, contigs=None, jobs=1):
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     return sorted(set(recs))
+
+
+def run_strf(fastas, binary=None, contigs=None, jobs=1):
+    """strf Records from one or more FASTA files: run_trf with strf in TRF's place. `binary` is a prebuilt
+    strf (prebuilt_tool), or None to compile one on first use (tool_binary)."""
+    binary = prebuilt_tool('strf', binary) if binary else tool_binary('strf')
+    return run_trf(fastas, binary, contigs, jobs, src='strf')
 
 
 # ----------------------------------------------------------------------------- merge and write
@@ -446,15 +463,19 @@ def _bed_ids(regions):
 
 
 def build(out, repeatmasker=None, fastas=(), gap=50, contigs=None, minp=7, maxp=2000, jobs=1, trfind=None,
-          trf=None):
+          trf=None, strf=None):
     """Read the sources, merge and write; returns a summary dict, with `trfind` when trfind ran: its
-    trfind_build(), or {'binary': its path} for a prebuilt `trfind` (run_trfind). `trf`, a TRF binary,
-    runs TRF on the `fastas` too (run_trf), and the summary's `trf` gives its path. Sources that hold no
-    record on the selected contigs, such as a reference with no tandem repeat, give an empty catalogue."""
+    tool_build(), or {'binary': its path} for a prebuilt `trfind` (run_trfind). `trf`, a TRF binary,
+    runs TRF on the `fastas` too (run_trf), and the summary's `trf` gives its path. `strf`, True or a
+    prebuilt strf binary, runs strf in TRF's place (run_strf), and the summary's `strf` gives its build or
+    path; each also gives the stages' parameters. Sources that hold no record on the selected contigs,
+    such as a reference with no tandem repeat, give an empty catalogue."""
     if not repeatmasker and not fastas:
         raise ValueError('no sources: give a RepeatMasker BED and/or reference FASTA files')
-    if trf and not fastas:
-        raise ValueError('TRF needs reference FASTA files to run on')
+    if trf and strf:
+        raise ValueError('give TRF or strf, not both: strf finds what TRF does')
+    if (trf or strf) and not fastas:
+        raise ValueError('%s needs reference FASTA files to run on' % ('TRF' if trf else 'strf'))
     recs = []
     if repeatmasker:
         recs.extend(read_repeatmasker(repeatmasker, contigs))
@@ -462,6 +483,8 @@ def build(out, repeatmasker=None, fastas=(), gap=50, contigs=None, minp=7, maxp=
         recs.extend(run_trfind(fastas, minp, maxp, contigs, jobs, binary=trfind))
     if trf:
         recs.extend(run_trf(fastas, trf, contigs, jobs))
+    if strf:
+        recs.extend(run_strf(fastas, None if strf is True else strf, contigs, jobs))
     regions = merge(recs, gap)
     write_catalog(regions, out)
     summary = {'records': len(recs), 'regions': len(regions),
@@ -469,9 +492,12 @@ def build(out, repeatmasker=None, fastas=(), gap=50, contigs=None, minp=7, maxp=
                                            sorted(collections.Counter((r.src, r.cls) for r in recs).items())},
                'regions_by_class': dict(collections.Counter(r.cls for r in regions)),
                'bp': sum(r.end - r.start for r in regions)}
+    stages = {name: list(params) for name, params, _ in TRF_STAGES}
     if fastas:
-        summary['trfind'] = {'binary': prebuilt_trfind(trfind)} if trfind else trfind_build()
+        summary['trfind'] = {'binary': prebuilt_tool('trfind', trfind)} if trfind else tool_build('trfind')
     if trf:
-        summary['trf'] = {'binary': os.path.abspath(shutil.which(trf)),
-                          'stages': {name: list(params) for name, params, _ in TRF_STAGES}}
+        summary['trf'] = {'binary': os.path.abspath(shutil.which(trf)), 'stages': stages}
+    if strf:
+        summary['strf'] = {**(tool_build('strf') if strf is True else {'binary': prebuilt_tool('strf', strf)}),
+                           'stages': stages}
     return summary

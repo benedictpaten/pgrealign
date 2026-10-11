@@ -25,7 +25,7 @@ def cmd_catalog(a):
     contigs = None if a.contigs == 'all' else (a.contigs.split(',') if a.contigs else catalog.DEFAULT_CONTIGS)
     summary = catalog.build(a.out, repeatmasker=a.repeatmasker, fastas=a.reference or (), gap=a.gap,
                             contigs=contigs, minp=a.min_period, maxp=a.max_period, jobs=a.jobs,
-                            trfind=a.trfind, trf=a.trf)
+                            trfind=a.trfind, trf=a.trf, strf=a.strf)
     inputs = {'repeatmasker': a.repeatmasker} if a.repeatmasker else {}
     inputs.update({'reference_%d' % i: f for i, f in enumerate(a.reference or ())})
     provenance.write_manifest(a.out, 'catalog', inputs,
@@ -229,20 +229,26 @@ def main(argv=None):
     c.add_argument('-o', '--out', required=True, help='output catalogue (.bed or .bed.gz)')
     c.add_argument('--repeatmasker', help='RepeatMasker annotation as BED (10 columns)')
     c.add_argument('--reference', nargs='+', metavar='FASTA',
-                   help='reference FASTA file(s) to run trfind on (one per contig runs them in parallel)')
+                   help='reference FASTA file(s) to run trfind, and TRF or strf, on (one per contig runs '
+                        'trfind on them in parallel)')
     c.add_argument('--gap', type=int, default=50, help='merge records that overlap or lie within this many bp [50]')
     c.add_argument('--min-period', type=int, default=7, help='trfind smallest period [7]')
     c.add_argument('--max-period', type=int, default=2000, help='trfind largest period [2000]')
     c.add_argument('--contigs', default=None, help="comma-separated contigs, or 'all' [chr1-22,chrX]")
     c.add_argument('-j', '--jobs', type=int, default=1,
-                   help='trfind processes, and TRF processes [1]')
+                   help='trfind processes, and TRF or strf processes [1]')
     c.add_argument('--trfind', metavar='BINARY',
                    help='a trfind binary built from pgrealign/c/trfind.c, as a path or a name on PATH '
                         '[compiled on first use]')
-    c.add_argument('--trf', metavar='BINARY',
-                   help="also run TRF (Tandem Repeats Finder) on the --reference files, as RepeatMasker 4.1 "
-                        "finds its Simple_repeat records, for a reference with no RepeatMasker annotation: "
-                        "the TRF binary, as a path or a name on PATH")
+    short = c.add_mutually_exclusive_group()
+    short.add_argument('--trf', metavar='BINARY',
+                       help="also run TRF (Tandem Repeats Finder) on the --reference files, as RepeatMasker 4.1 "
+                            "finds its Simple_repeat records, for a reference with no RepeatMasker annotation: "
+                            "the TRF binary, as a path or a name on PATH")
+    short.add_argument('--strf', nargs='?', const=True, metavar='BINARY',
+                       help="also run strf, pgrealign's reimplementation of the part of TRF that --trf uses, "
+                            "in TRF's place: compiled on first use from pgrealign/c/strf.c, or else a strf "
+                            "binary built from it, as a path or a name on PATH")
     c.set_defaults(func=cmd_catalog)
 
     c = sub.add_parser('prepare', help='cut one contig from a whole-genome GBZ; its snarls and reference index')

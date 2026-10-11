@@ -94,7 +94,8 @@ later stages take any intervals, and the sequences in them, as they come.
 
 `catalog` lists the tandem repeats of a reference, from its RepeatMasker annotation
 (`--repeatmasker`), its FASTA (`--reference`), or both, on the contigs that `--contigs` names. With
-`--trf`, it also runs TRF on the FASTA, in place of a RepeatMasker annotation the reference lacks. The
+`--trf`, it also runs TRF on the FASTA, in place of a RepeatMasker annotation the reference lacks, and
+with `--strf` it runs strf, pgrealign's reimplementation of that part of TRF, instead. The
 chrom names of both sources must be the graph's contig names, because `regions` keeps only the
 targets on its own contig. Each entry of the catalogue is a target, of one of four classes:
 
@@ -172,9 +173,58 @@ and more besides. On CHM13 chr20, TRF and trfind together find 98% of the entrie
 catalogue, built from RepeatMasker's annotation and trfind (98% of its STRs, 99% of its VNTRs, within
 200 bp), and write 1.9 times as many entries.
 
+### strf
+
+strf (`pgrealign/c/strf.c`) is pgrealign's own reimplementation of the part of TRF that `--trf` uses,
+so that a reference without a RepeatMasker annotation needs no TRF, whose licence is the AGPL; strf,
+like the rest of pgrealign, is MIT. `--strf` runs it in TRF's place, on the same batches and through
+the same stages, and its records come from the source `strf`. It takes TRF's command line,
+`strf File Match Mismatch Delta PM PI Minscore MaxPeriod`, and writes TRF's `-ngs` output, so the
+steps above apply to it unchanged. It covers only what the two stages need:
+
+- a PM of 80 or 75, the two values for which TRF has detection thresholds;
+- periods up to 20, for which TRF allows no indels in detection, so that PI has no effect; strf
+  ignores PI;
+- the `-ngs` output.
+
+It follows Benson (1999), "Tandem repeats finder: a program to analyze DNA sequences" (Nucleic Acids
+Research 27:573-580), where the paper is specific, and TRF's observed behaviour where it is not. The
+header of c/strf.c states the rules in full.
+
+1. Detection. For each candidate period d up to MaxPeriod + 3, and at most 20, a position that ends
+   a run of at least k bases each equal to the base d before it is a hit (k = 4 for PM 80 and 3 for
+   PM 75, as in the paper's Table 1) when at least 5 of the last max(d, 20) bases lie in such runs,
+   and the first such run in that window ends soon enough after its start: within a waiting time,
+   computed from PM, of 18 bases for PM 80 and 15 for PM 75.
+2. Alignment. The d bases ending at the hit are a pattern, aligned to the sequence around the hit by
+   wraparound dynamic programming with the stage's match, mismatch and indel scores. A backward pass
+   finds the left end, and a forward pass from there the right end and the alignment.
+3. Tests. The alignment must hold at least 1.9 copies, and d must be among the three strongest peaks
+   of the region's histogram of distances between identical 2-mers, once a linear trend is removed,
+   so that a repeat of period p is analysed at p, 2p and 3p only. At d = 1, one base must instead
+   make up at least 80% of the region.
+4. Consensus. Each column of the pattern takes a majority vote, ties going to A, C, G and T in that
+   order and a gap winning a tie with a base, which deletes the column; a base is inserted where at
+   least half of the copies have an insertion. The region is aligned again to the consensus, and the
+   repeat is kept when its score reaches the stage's minimum and it still holds 1.9 copies.
+5. Period and redundancy. The reported period is the most common distance between matching bases of
+   adjacent copies, which can differ from the consensus size. A repeat is dropped when its period
+   exceeds MaxPeriod, and when at least 90% of it lies within another repeat of the same period and
+   no lower score, or of a period that divides its own and a score at least 1/1.1 of its own.
+
+strf was written without TRF's source code: from the paper, TRF's documentation, a description of
+TRF's behaviour checked against the binary, and runs of the TRF binary, which settled each rule the
+paper leaves open. It reads FASTA as TRF does, and treats N and every other letter but A, C, G and T as
+TRF does; the header of c/strf.c says how. On the batches of CHM13 chr20, GRCh38 chr21 and yeast
+S288C, it reproduces the start, end and period of 99.9% to 100% of TRF's records exactly in the first
+stage and 99.1% to 99.3% in the second; the records it misses or adds are marginal ones, scoring near
+the stage's minimum. With trfind, on chr20, it finds 98.0% of the shipped catalogue's STRs, 98.9% of
+its VNTRs and 97.8% of all its entries, where TRF finds 98.2%, 99.1% and 98.0%. It runs both stages
+on chr20's batches in 52 s of CPU, against 73 s for the fastest TRF tested, in 7 MB of memory.
+
 ### Merging records into entries
 
-The records of each contig, from both sources, are taken in order of start, then end. A record joins
+The records of each contig, from every source, are taken in order of start, then end. A record joins
 the current entry when its start lies at most `--gap` bp past the entry's end so far, so records
 that overlap or lie within `--gap` bp of each other become one entry.
 - The entry's class is the class whose records cover the most bp of it. Ties go to VNTR, then SAT,

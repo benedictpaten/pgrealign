@@ -26,7 +26,8 @@ contig, and `merge` joins the realigned contigs into one graph.
 ### Installation and tools
 
 The [README](../README.md#install) gives the requirements: Python, vg, abPOA 1.5 or later, and a C
-compiler for `catalog --reference`, unless `--trfind` names a trfind binary built elsewhere. The stages find `vg` and `abpoa` on `PATH` unless `--vg` and
+compiler for `catalog --reference` and `--strf`, unless `--trfind` and `--strf` name trfind and strf
+binaries built elsewhere. The stages find `vg` and `abpoa` on `PATH` unless `--vg` and
 `--abpoa` name them. pgrealign does not check vg's version; the vg in use must support the commands
 pgrealign runs: `vg convert -f` (with `-H`), `vg chunk --gbz --contig`, `vg gbwt` (with `-Z`, `-R`,
 `--set-reference`, `--tags`, `-x`, `-G`, `-f` and `--gbz-format`), `vg snarls -T -P`, `vg view -Rj`,
@@ -183,6 +184,11 @@ catalogue's place. It reads one or both of:
 - `--trf`: a TRF binary, as a path or a name on `PATH`, to run on the `--reference` files as well, the
   way RepeatMasker 4.1 finds its Simple_repeat records, in place of a RepeatMasker annotation the
   reference lacks ([method](method.md#trf)). `-j N` runs N TRF processes at once.
+- `--strf`: runs strf, pgrealign's reimplementation of the part of TRF that `--trf` uses
+  (`pgrealign/c/strf.c`, [method](method.md#strf)), in TRF's place: on the same batches, with the same
+  stages, `-j N` processes at once. Alone, `--strf` compiles strf on first use, as trfind is compiled;
+  `--strf BINARY` names a strf binary built elsewhere from `pgrealign/c/strf.c`, as a path or a name on
+  `PATH`. `--trf` and `--strf` cannot both be given.
 
 Sources that hold no record on the selected contigs, such as a reference with no tandem repeat, give
 a catalogue with a header and no entry; giving neither source is an error.
@@ -206,7 +212,9 @@ trfind's records, on the selected contigs), the number of `regions` (catalogue e
 `records_by_source_class` (keys such as `rm/STR` and `trfind/VNTR`), `regions_by_class`, the
 entries' total length in `bp`, and, when trfind ran, `trfind`: the hashes, compiler flags and
 platform that name its build, or, with `--trfind`, `binary`, the path of the binary that ran, and,
-with `--trf`, `trf`: the TRF binary's path and the parameters of each stage.
+with `--trf`, `trf`: the TRF binary's path and the parameters of each stage. With `--strf`, `strf`
+holds the parameters of each stage too, along with strf's build, or with `--strf BINARY` its `binary`,
+as `trfind` does.
 
 #### Records, trfind and merging
 
@@ -218,12 +226,14 @@ with `--trf`, `trf`: the TRF binary's path and the parameters of each stage.
   `--max-period`, both included; seeds of about the same period chain into a repeat. It reports the
   smallest divisor of the chain's period that explains the repeat about as well, so a reported
   period can fall below `--min-period`.
-- `catalog` compiles trfind on first use into `$PGREALIGN_CACHE`, or else `~/.cache/pgrealign`, with
-  `$CC`, or else the first of `cc`, `clang` and `gcc` on `PATH`. The cached binary's name holds a
-  hash of the source, the compiler flags and the platform, so a changed source is compiled again.
+- `catalog` compiles trfind, and strf with `--strf`, on first use into `$PGREALIGN_CACHE`, or else
+  `~/.cache/pgrealign`, with `$CC`, or else the first of `cc`, `clang` and `gcc` on `PATH`. The
+  cached binary's name holds the tool's name and a hash of its source, the compiler flags and the
+  platform, so a changed source is compiled again.
 - `--trfind` names a trfind binary built elsewhere from `pgrealign/c/trfind.c`, as a path or a name
-  on `PATH`, for a system with no C compiler, such as a container. `catalog` then compiles nothing,
-  and cannot check that the binary was built from this version's source.
+  on `PATH`, for a system with no C compiler, such as a container, and `--strf BINARY` names a strf
+  binary built from `pgrealign/c/strf.c` the same way. `catalog` then compiles neither, and cannot
+  check that the binary was built from this version's source.
 - `catalog` merges the records of one contig that overlap or lie within `--gap` bp of each other
   into one entry. Raise `--gap` to join repeats separated by short stretches into one entry, and so
   into one target.
@@ -721,7 +731,7 @@ Each line is one catalogue entry, made by merging repeat records
 | `motif` | the motif; for a RepeatMasker record whose name is not `(MOTIF)n`, its name |
 | `n_members` | the number of records merged into the entry |
 | `member_classes` | the merged records by class, such as `STR:2,VNTR:1` |
-| `sources` | the merged records by source, `rm` (RepeatMasker) or `trfind`, such as `rm:2,trfind:1` |
+| `sources` | the merged records by source, `rm` (RepeatMasker), `trfind`, `trf` or `strf`, such as `rm:2,trfind:1` |
 
 `catalog` writes the contigs `chr1`, `chr2`, ... in numeric order, then other contigs in sorted
 order, and each contig's entries by start. A repeated id is an error.
@@ -989,11 +999,12 @@ sorted:
 A tool's `path` is its absolute path, or null when it cannot be found. Its `version` is the first
 line that `vg version`, or `<tool> --version` for any other tool, prints; it is null when the tool
 cannot be run, exits with an error or prints nothing, and `error` then names the cause. `catalog`
-records no tools; its summary names trfind's build instead.
+records TRF when `--trf` runs it, and no other tool; its summary names the builds of trfind and strf
+instead.
 
 | stage | manifest | `inputs` | `params` | `tools` |
 |---|---|---|---|---|
-| `catalog` | `<out>.manifest.json` | `repeatmasker`, `reference_0`, ... | `gap`, `contigs`, `min_period`, `max_period` | none |
+| `catalog` | `<out>.manifest.json` | `repeatmasker`, `reference_0`, ... | `gap`, `contigs`, `min_period`, `max_period` | TRF with `--trf`, else none |
 | `prepare` | `<out>/<contig>.manifest.json` | `gbz` | `contig`, `ref_sample`, `drop_samples` | vg |
 | `regions` | `<out>.manifest.json` | `targets`, `snarls`, `ref` | `contig`, `pad`, `max_span` | vg |
 | `extract` | `<out>/extract.manifest.json` | `graph`, `regions` | `ref_sample`, `max_internal_bp` | vg |
