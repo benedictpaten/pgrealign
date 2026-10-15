@@ -20,6 +20,11 @@ cannot be built for keeps its old alignment, and replace leaves it as it is. Its
 - `aligner_failed`: abPOA exited with an error or returned the wrong rows, as when the system refuses
   its reservation of address space.
 - `no_alleles`: no walk spans the region.
+- `not_homologous`: an allele of the region shares less than `min_share` (MIN_SHARE) of its 15-mers
+  with the centre (star.py), as an unrelated or reversed allele does at an inversion or a
+  non-homologous structural variant. Aligned forward, it would only be threaded through the centre with
+  chance matches, each a variant of its own. Decided before anything is aligned, for alleles and a
+  centre of at least 100 bp (star.HOMOLOGY_BP).
 - `error`: any other failure, with its message; it means a bug.
 
 **Memory.** `peak_bytes` estimates, from a package alone, the most memory its region can take. `run`
@@ -45,6 +50,11 @@ from .star import Abpoa, RealignError, SCORES, TooBig, star_msa
 
 MAX_CELLS = 450_000_000
 MAX_TOTAL_BP = 40_000_000     # choosing the centre holds every allele's k-mer counts: KMER_BYTES per base
+# Of the 1.12 million regions realigned in the HPRC CHM13 graph, MIN_SHARE 0.5 refuses 2,794 (0.6% of their
+# span): every region of the chrX and chr15 loci where unrelated or inverted alleles had been threaded
+# through the centre, and few others. On chrX that takes back 410,601 non-reference sample-records that
+# realignment had added to the VCF, and gives up 2,904 it had removed (docs/method.md).
+MIN_SHARE = 0.5
 # Measured on a 1 Mbp allele: its k-mer counts hold 74 bytes per base, 85 at most while they grow, and
 # sketching it takes 49 more per base, comparing it exactly with another 25.
 KMER_BYTES, COMPARE_BYTES = 80, 50
@@ -73,8 +83,10 @@ def peak_bytes(pkg, max_cells=MAX_CELLS, page=memory.PAGE):
     return memory.BASE + KMER_BYTES * sum(alleles) + COMPARE_BYTES * max(alleles) + aligner
 
 
-def realign_package(pkg, abpoa='abpoa', timeout=900, max_cells=MAX_CELLS, workdir=None, scores=SCORES):
-    """The medoid-star alignment of one region package, as the dict described in the module docstring."""
+def realign_package(pkg, abpoa='abpoa', timeout=900, max_cells=MAX_CELLS, workdir=None, scores=SCORES,
+                    min_share=MIN_SHARE):
+    """The medoid-star alignment of one region package, as the dict described in the module docstring.
+    `min_share` 0 or None aligns the region however little its alleles share with the centre."""
     t0 = time.time()
     deadline = t0 + timeout
     res = {'id': pkg['id'], 'method': 'medoid_star'}
@@ -90,7 +102,8 @@ def realign_package(pkg, abpoa='abpoa', timeout=900, max_cells=MAX_CELLS, workdi
             raise TooBig('longest %d bp needs %d cells banded, more than %d, or %d bp in all' % (
                 longest, banded_cells(longest), max_cells, sum(lens)))
         with Abpoa(abpoa, scores, deadline, workdir) as align:
-            msa = star_msa(alleles, fragments, align=align, deadline=deadline, max_cells=max_cells)
+            msa = star_msa(alleles, fragments, align=align, deadline=deadline, max_cells=max_cells,
+                           min_share=min_share)
         rows = msa.rows
         res.update(status='ok', centre=msa.centre, rows=rows, columns=len(next(iter(rows.values()), '')),
                    slot_alignments=msa.slot_alignments, fragments_exact=msa.fragments_exact,

@@ -259,6 +259,18 @@ class TestReplace(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'appears twice'):
             replace.replace(fx.graph, fx.extract, [fx.single_msas, fx.msas[1]], several)
 
+    def test_anchor_free_walk_against_the_region(self):
+        # d's anchor-free walk runs against R1: extract flips it, and replace writes it back reversed
+        walks = [w if w[0] != 'd' else ('d', '1', '<13<12') for w in WALKS]
+        fx = Fixture(self.d, walks=walks)
+        with gzip.open(os.path.join(fx.extract, 'occurrences.tsv.gz'), 'rt') as f:
+            self.assertEqual([l.split('\t')[2:4] for l in f if l.startswith('d#')], [['internal', '-']])
+        for mode in ('reuse', 'dense'):
+            out = os.path.join(self.d, 'out.%s.gfa' % mode)
+            replace.replace(fx.graph, fx.extract, fx.single_msas, out, id_start=1000, id_mode=mode)
+            seq1, walks1 = self.check_roundtrip(fx.graph, out)
+            self.assertEqual({o for o, _ in walks1['d#1']}, {'<'})
+
     def test_path_through_a_region(self):
         fx = Fixture(self.d, paths=PATHS + [('gen3', '40+,41+,51+')])
         for mode, start in (('reuse', 1000), ('dense', None)):

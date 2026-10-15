@@ -338,8 +338,8 @@ A walk can pass through one region more than once, and then has one run for each
 run is empty when L and R are adjacent in the walk; a prefix or a suffix never is, since a walk that
 starts or ends on an anchor has no run at that end. A run's `orient` is `+` when its walk runs in the
 region's forward orientation and `-` when it runs the other way, and its sequence is spelled in the
-forward orientation, a reverse run's steps reversed and each flipped. An internal run is always `+`,
-spelled as its walk runs (see Known gaps).
+forward orientation, a reverse run's steps reversed and each flipped. An internal run has no anchor
+visit to orient it, and takes its `orient` from the region's other runs (see Orientation).
 
 ### Walks that visit no anchor
 
@@ -355,6 +355,24 @@ and a long one only as the nodes it visits, which bounds the memory the pass nee
   never recorded as a run, and `replace` refuses to rewrite a walk through a replaced interior
   outside a recorded run;
 - an anchor-free walk that visits no interior node is left alone.
+
+### Orientation
+
+Turned to the region's forward orientation, as each run's sequence is, every run should visit each
+interior node the same way. A node can be stored reversed, as when an insertion was first added to
+the graph from a contig on the reverse strand: every run then visits it `<`, and spells the right
+sequence through it. But a node that runs visit both ways marks an inversion between haplotypes: the
+reference crosses its nodes forward and an inverted haplotype crosses them backward, or one walk
+turns back on itself, as in a hairpin. `realign` would spell the inverted allele as a plain forward
+sequence and align it to the centre forward, losing the reversal, so such a region is made `complex`
+and keeps its subgraph, the reversed walks included. Each run is checked against the ways earlier
+runs, and its own earlier steps, visited its nodes.
+
+An internal run is oriented by the nodes it shares with the region's spanning, prefix and suffix
+runs. When it visits each of them the way those runs do, it is `+`. When it visits each the other
+way, it runs against the region: it is `-`, and spelled reversed and flipped, as a reverse run is,
+so that its fragment can be found in the alleles. When it agrees on some nodes and not on others, it
+runs both ways through the region, and the region is made `complex`.
 
 ### Alleles and fragments
 
@@ -379,7 +397,7 @@ Each region gets the first status that applies:
 
 | status | when |
 |---|---|
-| `complex` | a walk has a complex run, or an anchor-free walk makes the region complex as above |
+| `complex` | a walk has a complex run, runs visit an interior node both ways, or an anchor-free walk makes the region complex as above |
 | `no_runs` | no walk has a run in the region |
 | `invariant` | there is one allele and no fragment, so there is nothing to realign |
 | `ok` | any other region: two or more alleles, or at least one fragment |
@@ -461,6 +479,47 @@ of a k-mer hashed as an element of its own, so that copy number still counts. J(
 as the fraction of the 1,000 smallest values of the two sketches' union that lie in both sketches;
 two empty sketches are at distance 1 (see Known gaps). The hash is a fixed function, so the
 sketches, and the centre, are the same in every run.
+
+### Homology
+
+The star assumes that every allele is a variant of the centre. An allele that is unrelated to it, as
+at a non-homologous structural variant, or reversed, as at an inversion, has no good forward
+alignment to it, but the aligner returns one anyway: the allele threaded through the centre by
+hundreds of short chance matches, each of which becomes a variant of its own in the graph, and a VCF
+record for every haplotype that carries the allele. So once the centre is chosen, and before anything
+is aligned, `realign` compares each allele of positive weight with it, using the 15-mers that chose
+the centre, as sets:
+
+    share = shared distinct k-mers / the distinct k-mers of whichever of the two has fewer
+
+so an allele that is the centre plus an insertion, or minus a deletion, shares them all. If any
+allele shares less than `--min-share`, 0.5, the region is `not_homologous`, and keeps its subgraph.
+An allele shorter than 100 bp is not judged, nor is any allele when the centre is that short: one
+variant can remove most of a short allele's k-mers, and a short allele cannot be threaded into many
+variants. Fragments are not judged. The status's message names the allele that shares least, its
+weight, and what it shares reverse-complemented, which is high for an inversion.
+
+Measured on the HPRC graph realigned on CHM13 (1,122,539 realigned regions, 915.7 Mb of reference),
+against the change in each region's non-reference VCF sample-records that realignment made, on chrX
+and chr15:
+
+| `--min-share` | regions refused | span | chrX: added records taken back / removed records given up | chr15: the same |
+|---|---|---|---|---|
+| 0.3 | 1,041 | 3.5 Mb | 402,166 / 30 | 55,355 / 2,242 |
+| 0.4 | 1,761 | 4.3 Mb | 409,282 / 1,232 | 90,409 / 3,044 |
+| 0.5 | 2,843 | 5.6 Mb | 410,601 / 2,904 | 159,993 / 6,396 |
+| 0.6 | 4,267 | 7.4 Mb | 425,028 / 5,135 | 164,057 / 9,812 |
+| 0.7 | 6,762 | 10.0 Mb | 429,317 / 11,936 | 172,202 / 12,367 |
+
+These count every allele; judging only alleles and centres of 100 bp or more refuses 2,794 regions at
+0.5 with the same chrX figures. At 0.5 the refused regions include the eight regions at four chrX
+loci of inversion-polymorphic segmental duplications (MAGED4B, MAGEA, H2BW and HSFX), the five of
+chr15's acrocentric p-arm cluster at 14.2-14.4 Mb and the one at GOLGA6L1, where realignment had
+added most of the records, and few others: the other regions refused on chrX took back 55,227 records
+and gave up 2,904. A lower threshold misses most of the chr15 regions, and a higher one gives up more than it
+takes back. Counting events, the variants an allele has against the centre once aligned, was tried
+as well and not adopted: among the regions the share passes, every event threshold tried gave up
+about as many records on chrX as it took back.
 
 ### Pairwise alignment to the centre
 
@@ -561,6 +620,7 @@ as it is:
 | `timeout` | the region ran longer than `--timeout` seconds |
 | `aligner_failed` | abPOA exited with an error, left out a row, or returned pairwise rows that do not spell their inputs |
 | `no_alleles` | the region has fragments but no allele: no walk spans it |
+| `not_homologous` | an allele shares less than `--min-share` of its 15-mers with the centre (see Homology) |
 | `error` | any other failure, recorded with its message: a bug, a slot alignment whose rows the final check rejects, or abPOA could not be started |
 
 Both size limits are checked before any work. A banded alignment of a sequence of length n to one
@@ -794,9 +854,6 @@ theirs; an output that is not is renamed to `<output>.failed`.
 - When several contigs share a connected component, prepare's GBZ holds them all, but `regions`
   anchors only the targets of the contig named. Preparing another contig of the component cuts the
   same component again, and `merge` stops on the overlapping ids.
-- An internal fragment from a walk that runs against the region's forward orientation is the reverse
-  complement of what the alleles hold, so it is usually found in no allele and aligns poorly to the
-  centre, though its walk still spells what it did.
 - A fragment found in no allele is aligned to the centre end to end: its side plays no part, and the
   stretch of the region it does not cover is scored as an ordinary gap.
 - A node between the anchors that no recorded run visits is not in the interior, so `replace` keeps

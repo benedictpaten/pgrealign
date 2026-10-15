@@ -160,6 +160,7 @@ Options that control the same thing in several stages:
 | `--scores` | realign, qc, run | abPOA's scores |
 | `--max-cells` | realign, qc, run | the largest pairwise alignment run unbanded ([Limits](#limits), [qc](#qc)) |
 | `--timeout` | realign, run | `realign`'s time limit per region ([Limits](#limits)) |
+| `--min-share` | realign, run | the least share of an allele's 15-mers with the centre for its region to be aligned ([Limits](#limits)) |
 | `--max-internal-bp` | extract, run | the longest anchor-free walk `extract` records ([Statuses](#statuses)) |
 | `--id-start` | replace, run | the first node id `replace` gives ([Node ids](#node-ids)) |
 
@@ -347,9 +348,10 @@ contig's total sequence. `--ref-sample` names the sample whose spanning run give
 `extract` gives each package the first of these statuses that applies, in this order. Only `ok`
 packages go on to `realign` and `replace`.
 
-- `complex`: a run is complex, an anchor-free walk ([Regions and runs](#regions-and-runs)) uses the
-  interiors of more than one region, or an anchor-free walk longer than `--max-internal-bp` uses
-  the interior.
+- `complex`: a run is complex, runs visit an interior node both ways once turned to the region's
+  forward orientation, as at an inversion ([method.md](method.md#orientation)), an anchor-free walk
+  ([Regions and runs](#regions-and-runs)) uses the interiors of more than one region or runs both
+  ways through one, or an anchor-free walk longer than `--max-internal-bp` uses the interior.
 - `no_runs`: no walk has a run in the region.
 - `invariant`: there are no fragments, and all spanning runs spell the same sequence (one allele).
 - `ok`: every other region.
@@ -399,6 +401,13 @@ reason in its status ([statuses](#msasjsonlgz)).
   which it does not start past the limit and stops when the limit is reached. The work before the
   first check (counting k-mers) and after the last abPOA call is not limited, so a region can run
   past the limit and still be `ok`. Raise it to align regions left `timeout`.
+- `--min-share` refuses a region, as `not_homologous`, once its centre is chosen and before anything
+  is aligned, when an allele of positive weight shares less than that fraction of its distinct
+  15-mers with the centre, over those of whichever of the two has fewer. An allele shorter than
+  `star.HOMOLOGY_BP` (100) bases is not judged, nor is any allele when the centre is that short, nor
+  any fragment. Such an allele is unrelated to the centre or reversed against it, and aligning it
+  forward would thread it through the centre with chance matches
+  ([method.md](method.md#homology)). The default is 0.5, and 0 aligns every region.
 
 `--scores` sets abPOA's scores for every alignment ([Scores](#scores-and-scores)).
 
@@ -846,6 +855,8 @@ the region's runs visit, sorted and comma-separated (empty when there are none).
 | `status` | the number of packages of each status |
 | `internal_candidates` | the number of anchor-free walks held whole, as possible internal fragments |
 | `internal_too_long` | the number of regions made `complex` by an anchor-free walk longer than `--max-internal-bp` |
+| `both_ways` | the number of regions made `complex` because runs visit an interior node both ways |
+| `internal_flipped` | the number of anchor-free walks that run against their region, and so were reversed and flipped |
 
 ### `msas.jsonl.gz`
 
@@ -877,6 +888,7 @@ file, including gzip files concatenated with `cat`.
 | `timeout` | over `--timeout` |
 | `aligner_failed` | abPOA exited with an error, or returned rows that do not match its input |
 | `no_alleles` | the package has fragments but no allele |
+| `not_homologous` | an allele shares less than `--min-share` of its 15-mers with the centre; the message names the allele that shares least, its weight, and what it shares reverse-complemented ([limits](#limits)) |
 | `error` | any other failure, as the exception's type and message; it means a bug |
 
 `replace` reads only `id`, `status` and `rows`, so a program can feed it MSAs made another way
@@ -1041,7 +1053,8 @@ The other functions below run whole stages or parts of them. In the signatures, 
 ### `star.star_msa`
 
 ```python
-star_msa(alleles, fragments=(), align=None, centre=None, k=K, deadline=None, max_cells=None)
+star_msa(alleles, fragments=(), align=None, centre=None, k=K, deadline=None, max_cells=None,
+         min_share=None)
 ```
 
 | argument | meaning |
@@ -1053,6 +1066,7 @@ star_msa(alleles, fragments=(), align=None, centre=None, k=K, deadline=None, max
 | `k` | the k-mer size for choosing the centre; `star.K` is 15 |
 | `deadline` | a `time.time()` value; choosing the centre past it raises `TimedOut` |
 | `max_cells` | an alignment to the centre whose matrix, the product of the two sequences' lengths, would exceed this is asked for banded, and every other one unbanded; None, the default, bands none |
+| `min_share` | once the centre is chosen, raise `NotHomologous` if an allele of positive weight and at least `star.HOMOLOGY_BP` bases shares less than this fraction of its k-mers with the centre (`star.share`), the centre having that many bases too; None, the default, or 0 checks nothing |
 
 It returns a [`StarMSA`](#starmsa). Its rows spell the inputs upper-cased. The aligner sees only A,
 C, G, T and N: `star_msa` gives it any other character as N and restores the character in the rows.
@@ -1155,6 +1169,7 @@ except the long-gap extension, which stays 1 ([method.md](method.md#scores) give
 | `TooBig` | `too_big` | `realign.realign_package`'s size checks fail ([limits](#limits)); `star_msa` does not raise it |
 | `TimedOut` | `timeout` | choosing the centre runs past `deadline`, or `Abpoa` runs past its own |
 | `AlignerFailed` | `aligner_failed` | abPOA fails, or a pairwise alignment does not spell its inputs |
+| `NotHomologous` | `not_homologous` | `star_msa` is given `min_share`, and an allele shares less than that with the centre (`star.check_homology`) |
 
 `realign` never passes `star_msa` a package without alleles: it records `no_alleles` for one itself.
 `star_msa` raises `ValueError` for the other arguments it cannot use (no aligner, repeated ids, an
@@ -1256,7 +1271,8 @@ else:
 ### `realign.realign_package`
 
 ```python
-realign_package(pkg, abpoa='abpoa', timeout=..., max_cells=..., workdir=None, scores=SCORES)
+realign_package(pkg, abpoa='abpoa', timeout=..., max_cells=..., workdir=None, scores=SCORES,
+                min_share=...)
 peak_bytes(pkg, max_cells=..., page=...)
 run(packages_path, out_path, select='any', shard=(0, 1), jobs=1, max_memory=None, **kw)
 ```
@@ -1264,7 +1280,7 @@ run(packages_path, out_path, select='any', shard=(0, 1), jobs=1, max_memory=None
 `realign_package` aligns one package with `star_msa` and `Abpoa`, and returns its record in the
 [`msas.jsonl.gz` format](#msasjsonlgz). The package is a dict in the [package
 format](#packagesjsonlgz), of which it reads `id`, `alleles` and `fragments`. It applies `realign`'s
-[limits](#limits) on cells and total bases, passing `max_cells` to `star_msa`, and records a failure
+[limits](#limits) on cells and total bases, passing `max_cells` and `min_share` to `star_msa`, and records a failure
 to align in the record's status rather than raising it: `no_alleles` for a package without alleles,
 `too_big` for its own size checks, the status of any `RealignError` that `star_msa` or `Abpoa`
 raises, and `error` for any other exception. `realign.write_msas(path, records)` writes records to
@@ -1272,7 +1288,7 @@ a `msas.jsonl.gz`.
 
 `peak_bytes` is a package's [memory estimate](#memory) in bytes, `page` being the page size, the
 machine's by default. `run` is the `realign` stage: it passes `kw` (`abpoa`, `timeout`, `max_cells`,
-`workdir`, `scores`) to `realign_package`, runs within `max_memory` GB, None meaning half the
+`workdir`, `scores`, `min_share`) to `realign_package`, runs within `max_memory` GB, None meaning half the
 machine's physical memory, records a package whose estimate alone exceeds that as `too_big` itself,
 and returns the summary.
 
@@ -1335,7 +1351,7 @@ memory), `graph`, `vg` and `threads` included, and `workdir` for its temporary f
 ```python
 run_contig(gbz, contig, targets, out_dir, jobs=..., threads=..., vg=None, abpoa='abpoa',
            ref_sample='CHM13', drop_samples=None, scores=SCORES, timeout=..., max_cells=...,
-           max_internal_bp=..., id_start=None, do_qc=True, max_memory=None, log=print)
+           max_internal_bp=..., id_start=None, do_qc=True, max_memory=None, log=print, min_share=...)
 merge(gbzs, out_gbz, vg=None, workdir=None)
 ```
 
@@ -1359,11 +1375,6 @@ its check, after renaming it to `<out_gbz>.failed`.
 - A walk that visits no anchor and spells more than `--max-internal-bp` bases is never recorded as a
   run, and `replace` cannot rewrite a walk through an interior outside a recorded run. So `extract`
   makes a region whose interior such a walk uses `complex`, and the region is left as it is.
-- An anchor-free walk that passes through an interior against the reference's direction is spelled
-  in its own direction, so its internal fragment is the reverse complement of the region's forward
-  sequence. `star_msa` does not find it in an allele, and aligns it to the centre on the wrong
-  strand. `replace` still rewrites the walk correctly, so `verify` passes, but the region's graph
-  gains nodes for sequence that does not align with the rest.
 - `star_msa` upper-cases every row, so lower-case (soft-masked) bases in a replaced region come out
   upper-case. `verify` upper-cases both graphs' paths before comparing them, so it does not report
   this.

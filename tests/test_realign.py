@@ -1,6 +1,7 @@
 import gzip
 import json
 import os
+import random
 import shutil
 import tempfile
 import unittest
@@ -27,7 +28,8 @@ class TestRealignPackage(unittest.TestCase):
     def test_statuses(self):
         two = [('a1', 'ACGTACGT', 1), ('a2', 'ACGTTCGT', 1)]
         self.assertEqual(realign.realign_package(pkg('R', two), max_cells=10)['status'], 'too_big')
-        long_two = [('a1', 'ACGTACGTAC' * 40, 2), ('a2', 'ACGTTCGTAC' * 40, 1)]   # 400 bp: 160,000 cells unbanded
+        # 400 bp: 160,000 cells unbanded. One substitution, so that they share their 15-mers (min_share)
+        long_two = [('a1', 'ACGTACGTAC' * 40, 2), ('a2', 'ACGTACGTAC' * 20 + 'ACGTTCGTAC' + 'ACGTACGTAC' * 19, 1)]
         self.assertEqual(realign.realign_package(pkg('R', long_two), max_cells=5000)['status'], 'too_big')
         r = realign.realign_package(pkg('R', long_two), max_cells=50000)   # banded: about 11,200 cells
         self.assertEqual((r['status'], r['banded_pairs']), ('ok', 1))
@@ -36,6 +38,37 @@ class TestRealignPackage(unittest.TestCase):
         self.assertEqual(realign.realign_package(pkg('R', two), timeout=0)['status'], 'timeout')
         r = realign.realign_package(pkg('R', two), abpoa='false')
         self.assertEqual(r['status'], 'aligner_failed', r)
+
+
+class TestHomology(unittest.TestCase):
+    """A region with an allele unrelated to the centre is refused before anything is aligned, so these
+    need no abPOA (abpoa='false' would fail any alignment)."""
+
+    def setUp(self):
+        rng = random.Random(9)
+        rand = lambda n: ''.join(rng.choice('ACGT') for _ in range(n))
+        centre = rand(300)
+        self.unrelated = pkg('U', [('a1', centre, 3), ('a2', centre[:150] + 'T' + centre[150:], 1),
+                                   ('a3', rand(300), 1)])
+
+    def test_realign_package(self):
+        r = realign.realign_package(self.unrelated, abpoa='false')
+        self.assertEqual(r['status'], 'not_homologous', r)
+        self.assertIn('the least, a3 (weight 1), shares 0.', r['message'])
+        self.assertNotIn('rows', r)
+        self.assertEqual(realign.realign_package(self.unrelated, abpoa='false', min_share=0)['status'],
+                         'aligner_failed')        # aligned, so abpoa='false' fails it
+
+    def test_run(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        pk, out = os.path.join(d, 'packages.jsonl.gz'), os.path.join(d, 'msas.jsonl.gz')
+        with gzip.open(pk, 'wt') as f:
+            f.write(json.dumps(self.unrelated) + '\n')
+        s = realign.run(pk, out, abpoa='false')
+        self.assertEqual(s['realigned'], {'not_homologous': 1})
+        self.assertEqual([r['status'] for r in map(json.loads, gzip.open(out, 'rt'))], ['not_homologous'])
+        self.assertEqual(realign.run(pk, out, abpoa='false', min_share=0)['realigned'], {'aligner_failed': 1})
 
 
 @unittest.skipUnless(shutil.which('abpoa'), 'abpoa not on PATH')

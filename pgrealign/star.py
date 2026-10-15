@@ -17,6 +17,14 @@ applies it to the region packages that extract.py writes.
    their k-mer multisets: the copies of each k-mer the two share, over the copies in either. Ties go
    to the earlier allele. In a region so large that comparing every pair exactly would take too long,
    the Jaccard index is estimated from a fixed-size sketch of each multiset (`medoid`).
+   - **Homology.** With `min_share`, the region is refused (NotHomologous) when an allele of positive
+     weight shares less than that fraction of its distinct k-mers with the centre's, over those of
+     whichever of the two has fewer (`share`), so an allele that is the centre plus an insertion, or
+     minus a deletion, shares them all. Such an allele is unrelated to the centre, or reversed, as at
+     an inversion: it has no good forward alignment to it, and the aligner would thread it through
+     the centre with chance matches, each a variant of its own. An allele shorter than HOMOLOGY_BP is
+     not judged, nor is any allele when the centre is: one variant can remove most of a short allele's
+     k-mers, and a short allele cannot be threaded into many variants. Fragments are not judged.
 2. **Pairwise alignment.** Every other allele is aligned to the centre with a global alignment,
    unbanded unless its dynamic-programming matrix would be too large (`max_cells`), in which case it
    is banded. An allele identical to the centre takes the centre's row; an empty allele, or an empty
@@ -43,8 +51,10 @@ import tempfile
 import time
 
 K = 15
+HOMOLOGY_BP = 100       # the shortest allele, and centre, that check_homology judges
 _CODE = {'A': 0, 'C': 1, 'G': 2, 'T': 3}
 _ALIGNABLE = frozenset('ACGTN')
+_COMPLEMENT = str.maketrans('ACGTN', 'TGCAN')
 
 
 class RealignError(Exception):
@@ -65,6 +75,10 @@ class TimedOut(RealignError):
 
 class AlignerFailed(RealignError):
     status = 'aligner_failed'
+
+
+class NotHomologous(RealignError):
+    status = 'not_homologous'
 
 
 # ----------------------------------------------------------------------------- scores
@@ -244,14 +258,15 @@ def sketch_distance(a, b, size=SKETCH):
     return 1.0 - sum(1 for h in union if h in sa and h in sb) / len(union)
 
 
-def medoid(seqs, weights, k=K, deadline=None, max_work=MEDOID_WORK):
+def medoid(seqs, weights, k=K, deadline=None, max_work=MEDOID_WORK, counts=None):
     """Index of the sequence minimising sum_j w_j (1 - Jaccard(i, j)) over all the others; ties go to the
     lower index. Jaccard is over k-mer multisets: the copies of each k-mer the two share, over the
     copies in either. When comparing every pair exactly would take more than `max_work` steps, Jaccard
     is estimated from each sequence's sketch. Only sequences of positive weight are candidates, when
-    there are any. Past `deadline`, raises TimedOut."""
+    there are any. `counts` are the sequences' kmer_counts, if made already. Past `deadline`, raises
+    TimedOut."""
     n = len(seqs)
-    counts = [kmer_counts(s, k) for s in seqs]
+    counts = [kmer_counts(s, k) for s in seqs] if counts is None else counts
     sizes = [sum(c.values()) for c in counts]
     distinct = sorted(len(c) for c in counts)
     # each pair costs about the smaller one's distinct k-mers; sorted, the i-th is the smaller n-1-i times
@@ -280,6 +295,38 @@ def medoid(seqs, weights, k=K, deadline=None, max_work=MEDOID_WORK):
         if best is None or d < best[0]:
             best = (d, i)
     return best[1]
+
+
+def share(a, b):
+    """The distinct k-mers that two kmer_counts `a` and `b` share, as a fraction of the distinct k-mers of
+    whichever has fewer, or None if either has none. A sequence that is the other plus an insertion, or
+    minus a deletion, shares them all."""
+    fewer = min(len(a), len(b))
+    if not fewer:
+        return None
+    return len(a.keys() & b.keys()) / fewer
+
+
+def check_homology(names, weights, counts, ci, seqs, min_share, k=K):
+    """Raise NotHomologous if an allele of positive weight and at least HOMOLOGY_BP bases shares (`share`)
+    less than `min_share` of its k-mers with the centre, names[ci], when the centre has HOMOLOGY_BP bases
+    or more. `counts` are the alleles' kmer_counts, and `seqs` {name: sequence} their sequences."""
+    if len(seqs[names[ci]]) < HOMOLOGY_BP:
+        return
+    low = []
+    for i, (w, c) in enumerate(zip(weights, counts)):
+        if i != ci and w > 0 and len(seqs[names[i]]) >= HOMOLOGY_BP:
+            s = share(c, counts[ci])
+            if s is not None and s < min_share:
+                low.append((s, i))
+    if not low:
+        return
+    s, i = min(low)
+    rc = share(kmer_counts(seqs[names[i]].translate(_COMPLEMENT)[::-1], k), counts[ci])
+    raise NotHomologous('%d of %d alleles (weight %d) share less than %g of their %d-mers with the centre %s; '
+                        'the least, %s (weight %d), shares %.3f, and %.3f reverse-complemented' % (
+                            len(low), len(names), sum(weights[j] for _, j in low), min_share, k, names[ci],
+                            names[i], weights[i], s, rc or 0.0))
 
 
 # ----------------------------------------------------------------------------- pieces of the star
@@ -426,7 +473,8 @@ class StarMSA:
         self.banded_pairs = banded_pairs
 
 
-def star_msa(alleles, fragments=(), align=None, centre=None, k=K, deadline=None, max_cells=None):
+def star_msa(alleles, fragments=(), align=None, centre=None, k=K, deadline=None, max_cells=None,
+             min_share=None):
     """The medoid star of a region (see the module docstring).
 
     `alleles` is a sequence of (id, sequence, weight), with distinct ids; `fragments` is a sequence of
@@ -435,7 +483,9 @@ def star_msa(alleles, fragments=(), align=None, centre=None, k=K, deadline=None,
     Pass an Abpoa inside its `with` block. `centre` names the centre allele instead of the medoid.
     Past `deadline` (a time.time() value), raises TimedOut. An alignment to the centre whose
     dynamic-programming matrix, the product of the two lengths, would exceed `max_cells` is asked for
-    banded; every other one is unbanded. Returns a StarMSA.
+    banded; every other one is unbanded. With `min_share`, raises NotHomologous, before aligning
+    anything, if an allele of positive weight shares less than that fraction of its k-mers with the
+    centre (check_homology). Returns a StarMSA.
     """
     if align is None:
         raise ValueError('star_msa needs an aligner, e.g. `with Abpoa() as align`')
@@ -451,13 +501,16 @@ def star_msa(alleles, fragments=(), align=None, centre=None, k=K, deadline=None,
     seq = {m: s if set(s) <= _ALIGNABLE else ''.join(c if c in _ALIGNABLE else 'N' for c in s)
            for m, s in orig.items()}
     names = [a[0] for a in alleles]
+    weights = [a[2] for a in alleles]
+    counts = [kmer_counts(seq[m], k) for m in names] if centre is None or min_share else None
     if centre is None:
-        ci = medoid([seq[m] for m in names], [a[2] for a in alleles], k, deadline)
-        cid = names[ci]
+        cid = names[medoid([seq[m] for m in names], weights, k, deadline, counts=counts)]
     elif centre in seq and centre in names:
         cid = centre
     else:
         raise ValueError('centre %r is not an allele' % (centre,))
+    if min_share:
+        check_homology(names, weights, counts, names.index(cid), seq, min_share, k)
     cseq = seq[cid]
     found = [(m, orig[m]) for m in names]
     exact, unplaced = [], []
