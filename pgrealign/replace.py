@@ -56,6 +56,7 @@ from .graph import GfaStream, parse_w, revcomp, walk_key, STEP
 from .extract import read_packages
 
 GRAPH_NAME_TAGS = ('NM:', 'SG:', 'TL:')     # H-line tags that name the graph and relate it to others
+ORDER = 'replace needs every S and L line before the first W line, as vg convert -f writes them'
 FLIP = {'+': '-', '-': '+'}
 
 
@@ -111,12 +112,17 @@ def read_occurrences(path, keep):
 
 def old_node_ids(graph, vg=None, threads=4):
     """Every node id of the input graph, from its S lines (`vg convert -f -H` for a GBZ, so no haplotype
-    walks are written)."""
+    walks are written). A GFA file is read only to its first W line, since replace needs every S line
+    before it (ORDER), so that the walks, nearly all of the file, are read once, by rewrite. A node whose
+    S line comes later is missed, and named as out of order by whichever check meets it first."""
     ids = []
-    with GfaStream(graph, vg, threads, drop_haplotypes=True) as f:
+    stream = GfaStream(graph, vg, threads, drop_haplotypes=True)
+    with stream as f:
         for line in f:
             if line[0] == 'S':
                 ids.append(int(line.split('\t', 2)[1]))
+            elif line[0] == 'W' and stream.proc is None:
+                break
     return ids
 
 
@@ -178,7 +184,8 @@ def number_dense(old_ids, removed, regions, id_start=None):
             new_ids[rid] = list(range(k, k + size))
             k += size
     if after:
-        raise ValueError('%d left anchors are not nodes of the graph' % len(after))
+        raise ValueError('%d left anchors are not nodes of the graph, or their S lines come after a W line: '
+                         '%s' % (len(after), ORDER))
     return renumber, new_ids, (first, k - 1)
 
 
@@ -206,6 +213,11 @@ def number_reuse(regions, interiors, id_start):
     return new_ids, next_id
 
 
+def out_of_order(n):
+    """The error for node `n`, which has no id under the dense numbering: its S line comes after a W line."""
+    return ValueError('node %d has no S line before the first W line: %s' % (n, ORDER))
+
+
 class Splice:
     """What `rewrite` applies to the input graph, in the output's ids:
     - `seq` {node: sequence} and `edges` {(from, from_orient, to, to_orient)}: the new nodes and edges;
@@ -225,7 +237,7 @@ class Splice:
         def out_id(n):
             if n < 0:
                 return ids[-n - 1]
-            return n if self.renumber is None else self.renumber[n]
+            return n if self.renumber is None else self.renumbered(n)
         for n, sq in rg.seq.items():
             self.seq[out_id(n)] = sq
         for a, ao, b, bo in rg.edges:
@@ -234,6 +246,14 @@ class Splice:
             self.walks[(rid, m)] = [out_id(n) for n in w]
         for x in pkg['alleles'] + pkg['fragments']:
             self.spelling[(rid, x['id'])] = x['seq'].upper()
+
+    def renumbered(self, n):
+        """Input node `n`'s id in the output, under `renumber`. old_node_ids gave every node whose S line
+        comes before the first W line an id, so a node without one is out of ORDER."""
+        try:
+            return self.renumber[n]
+        except KeyError:
+            raise out_of_order(n) from None
 
     def check_outside(self, key, toks):
         """Steps `toks` of walk `key` lie outside every run, so they must not visit a removed node."""
@@ -247,7 +267,12 @@ class Splice:
         self.check_outside(key, toks)
         if self.renumber is None:
             return ''.join(o + n for o, n in toks)
-        return ''.join(o + str(self.renumber[int(n)]) for o, n in toks)
+        # every step of every walk comes through here, so the lookup is the dict's own (see renumbered)
+        renumber = self.renumber
+        try:
+            return ''.join(o + str(renumber[int(n)]) for o, n in toks)
+        except KeyError as e:
+            raise out_of_order(e.args[0]) from None
 
     def path_line(self, line):
         """P line `line`, renumbered. It must not visit a removed node: extract records no runs of P
@@ -261,7 +286,10 @@ class Splice:
                                  'not paths (P lines)' % (x[1], s[:-1], rid))
         if self.renumber is None:
             return line
-        x[2] = ','.join('%d%s' % (self.renumber[int(s[:-1])], s[-1]) for s in steps)
+        try:
+            x[2] = ','.join('%d%s' % (self.renumber[int(s[:-1])], s[-1]) for s in steps)
+        except KeyError as e:
+            raise out_of_order(e.args[0]) from None
         return '\t'.join(x) + '\n'
 
 
@@ -290,8 +318,7 @@ def rewrite_walk(line, sp, old_seq, counts):
         except KeyError as e:
             n = e.args[0]
             if n in sp.removed:
-                raise ValueError('walk %s comes before the S line of node %d: replace needs every S and L '
-                                 'line before the first W line' % (key, n)) from None
+                raise ValueError('walk %s comes before the S line of node %d: %s' % (key, n, ORDER)) from None
             raise ValueError('run %s %d-%d of walk %s visits node %d, which no replaced interior holds: the '
                              'extract outputs are not from this graph' % (rid, a, b, key, n)) from None
         new_walk = sp.walks[(rid, mid)]
@@ -332,8 +359,7 @@ def rewrite(graph, out_gfa, sp, vg=None, threads=4):
             for line in f:
                 t = line[0]
                 if new_written and t in ('S', 'L'):
-                    raise ValueError('%s has an %s line after a W line: replace needs every S and L line '
-                                     'before the first W line, as vg convert -f writes them' % (graph, t))
+                    raise ValueError('%s has an %s line after a W line: %s' % (graph, t, ORDER))
                 if t == 'S':
                     x = line.split('\t', 3)
                     n = int(x[1])
@@ -354,7 +380,7 @@ def rewrite(graph, out_gfa, sp, vg=None, threads=4):
                         counts['edges_removed'] += 1
                         continue
                     if renumber is not None:
-                        a, b = renumber[a], renumber[b]
+                        a, b = sp.renumbered(a), sp.renumbered(b)
                         x[1], x[3] = str(a), str(b)
                         line = '\t'.join(x)
                     if a in direct_ends:

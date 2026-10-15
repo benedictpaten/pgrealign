@@ -24,13 +24,14 @@ def cmd_catalog(a):
     started = time.time()
     contigs = None if a.contigs == 'all' else (a.contigs.split(',') if a.contigs else catalog.DEFAULT_CONTIGS)
     summary = catalog.build(a.out, repeatmasker=a.repeatmasker, fastas=a.reference or (), gap=a.gap,
-                            contigs=contigs, minp=a.min_period, maxp=a.max_period, jobs=a.jobs)
+                            contigs=contigs, minp=a.min_period, maxp=a.max_period, jobs=a.jobs,
+                            trfind=a.trfind, trf=a.trf, strf=a.strf)
     inputs = {'repeatmasker': a.repeatmasker} if a.repeatmasker else {}
     inputs.update({'reference_%d' % i: f for i, f in enumerate(a.reference or ())})
     provenance.write_manifest(a.out, 'catalog', inputs,
                               {'gap': a.gap, 'contigs': contigs, 'min_period': a.min_period,
-                               'max_period': a.max_period}, extra={'summary': summary}, started=started,
-                              checksums=True)
+                               'max_period': a.max_period}, tools={'trf': a.trf} if a.trf else {},
+                              extra={'summary': summary}, started=started, checksums=True)
     _print(summary)
 
 
@@ -45,10 +46,20 @@ def drop_samples_of(a):
 def cmd_prepare(a):
     from . import prepare, provenance
     started = time.time()
-    drop = drop_samples_of(a)
-    out = prepare.prepare(a.gbz, a.contig, a.out, ref_sample=a.ref_sample, drop_samples=drop, vg=a.vg,
-                          threads=a.threads)
-    provenance.write_manifest(os.path.join(a.out, a.contig), 'prepare', {'gbz': a.gbz},
+    if a.graph:
+        if a.drop_sample or a.keep_all_samples:
+            sys.exit('pgrealign prepare: --graph drops no sample, so it takes neither --drop-sample nor '
+                     '--keep-all-samples')
+        drop = ()
+        out = {'graph': a.graph, **prepare.index_contig(a.graph, a.contig, a.out, ref_sample=a.ref_sample,
+                                                       vg=a.vg, threads=a.threads)}
+        inputs = {'graph': a.graph}
+    else:
+        drop = drop_samples_of(a)
+        out = prepare.prepare(a.gbz, a.contig, a.out, ref_sample=a.ref_sample, drop_samples=drop, vg=a.vg,
+                              threads=a.threads)
+        inputs = {'gbz': a.gbz}
+    provenance.write_manifest(os.path.join(a.out, a.contig), 'prepare', inputs,
                               {'contig': a.contig, 'ref_sample': a.ref_sample, 'drop_samples': list(drop)},
                               tools=_tools(a, 'vg'), extra={'outputs': out}, started=started)
     _print(out)
@@ -218,16 +229,33 @@ def main(argv=None):
     c.add_argument('-o', '--out', required=True, help='output catalogue (.bed or .bed.gz)')
     c.add_argument('--repeatmasker', help='RepeatMasker annotation as BED (10 columns)')
     c.add_argument('--reference', nargs='+', metavar='FASTA',
-                   help='reference FASTA file(s) to run trfind on (one per contig runs them in parallel)')
+                   help='reference FASTA file(s) to run trfind, and TRF or strf, on (one per contig runs '
+                        'trfind on them in parallel)')
     c.add_argument('--gap', type=int, default=50, help='merge records that overlap or lie within this many bp [50]')
     c.add_argument('--min-period', type=int, default=7, help='trfind smallest period [7]')
     c.add_argument('--max-period', type=int, default=2000, help='trfind largest period [2000]')
     c.add_argument('--contigs', default=None, help="comma-separated contigs, or 'all' [chr1-22,chrX]")
-    c.add_argument('-j', '--jobs', type=int, default=1, help='trfind processes [1]')
+    c.add_argument('-j', '--jobs', type=int, default=1,
+                   help='trfind processes, and TRF or strf processes [1]')
+    c.add_argument('--trfind', metavar='BINARY',
+                   help='a trfind binary built from pgrealign/c/trfind.c, as a path or a name on PATH '
+                        '[compiled on first use]')
+    short = c.add_mutually_exclusive_group()
+    short.add_argument('--trf', metavar='BINARY',
+                       help="also run TRF (Tandem Repeats Finder) on the --reference files, as RepeatMasker 4.1 "
+                            "finds its Simple_repeat records, for a reference with no RepeatMasker annotation: "
+                            "the TRF binary, as a path or a name on PATH")
+    short.add_argument('--strf', nargs='?', const=True, metavar='BINARY',
+                       help="also run strf, pgrealign's reimplementation of the part of TRF that --trf uses, "
+                            "in TRF's place: compiled on first use from pgrealign/c/strf.c, or else a strf "
+                            "binary built from it, as a path or a name on PATH")
     c.set_defaults(func=cmd_catalog)
 
     c = sub.add_parser('prepare', help='cut one contig from a whole-genome GBZ; its snarls and reference index')
-    c.add_argument('--gbz', required=True, help='whole-genome GBZ')
+    g = c.add_mutually_exclusive_group(required=True)
+    g.add_argument('--gbz', help='whole-genome GBZ')
+    g.add_argument('--graph', help="the contig's graph, already cut: a GFA, or a graph vg reads (.gbz, .vg, "
+                                   ".pg, .hg, .xg); only its snarls and reference index are written")
     c.add_argument('--contig', required=True)
     c.add_argument('-o', '--out', required=True, help='output directory')
     c.add_argument('--ref-sample', default='CHM13', help='the reference sample [CHM13]')
@@ -249,7 +277,7 @@ def main(argv=None):
     c.set_defaults(func=cmd_regions)
 
     c = sub.add_parser('extract', help="every walk's run through every region, in one streaming pass")
-    c.add_argument('--graph', required=True, help='<contig>.gbz from prepare, or a GFA')
+    c.add_argument('--graph', required=True, help="<contig>.gbz from prepare, prepare --graph's graph, or a GFA")
     c.add_argument('--regions', required=True, help='regions.tsv(.gz) from regions')
     c.add_argument('-o', '--out', required=True, help='output directory')
     c.add_argument('--ref-sample', default='CHM13', help='the reference sample, whose allele each package names [CHM13]')
@@ -279,7 +307,7 @@ def main(argv=None):
     c.set_defaults(func=cmd_realign)
 
     c = sub.add_parser('replace', help="splice the realigned regions into the contig's graph")
-    c.add_argument('--graph', required=True, help='<contig>.gbz from prepare, or a GFA')
+    c.add_argument('--graph', required=True, help="<contig>.gbz from prepare, prepare --graph's graph, or a GFA")
     c.add_argument('--extract', required=True, help='the extract output directory')
     c.add_argument('--msas', required=True, nargs='+', help='msas.jsonl.gz from realign, or one per shard')
     c.add_argument('-o', '--out', required=True, help='output GFA')
@@ -313,7 +341,7 @@ def main(argv=None):
                    "scores the alignment was built with [%s]" % ' '.join(SCORES.flags()))
     c.add_argument('--max-cells', type=int, default=MAX_CELLS,
                    help='band a pair whose unbanded optimal alignment would exceed this many cells [%d]' % MAX_CELLS)
-    c.add_argument('--graph', help="the graph extract read (GBZ or GFA): measure its own alignment of each region too")
+    c.add_argument('--graph', help="the graph extract read: measure its own alignment of each region too")
     c.add_argument('-j', '--jobs', type=int, default=1, help='the most regions measured in parallel [1]')
     c.add_argument('--max-memory', type=gigabytes, default=default_memory, metavar='GB',
                    help='the memory the regions measured at once may need in all, by their estimates; a pair that '

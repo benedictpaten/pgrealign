@@ -1,7 +1,8 @@
 """Reading a graph as a stream of GFA lines, and the walk helpers the stages share.
 
-The stages never hold a whole graph's walks in memory. They read `vg convert -f <graph.gbz>` (or a GFA
-file, plain or gzipped) once, line by line:
+The stages never hold a whole graph's walks in memory. They read `vg convert -f <graph>` of a graph in one
+of vg's own formats (VG_SUFFIXES: a GBZ, or a .vg such as a Minigraph-Cactus chromosome graph), or a GFA
+file, plain or gzipped, once, line by line:
 - S lines: segments (nodes), stored as a dict of sequences, or of lengths only;
 - L lines: edges, ignored unless asked for;
 - W lines: walks, one per haplotype fragment or reference path.
@@ -16,6 +17,8 @@ import subprocess
 
 STEP = re.compile(r'([<>])(\d+)')
 COMP = str.maketrans('ACGTNacgtn', 'TGCANtgcan')
+# graphs read through `vg convert -f`; a file with any other name is read as GFA
+VG_SUFFIXES = ('.gbz', '.vg', '.pg', '.hg', '.xg')
 
 Walk = collections.namedtuple('Walk', 'sample hap contig start end steps')
 
@@ -42,16 +45,17 @@ def find_vg(vg=None):
 
 
 class GfaStream:
-    """Iterate over the lines of a GFA file (plain or gzipped) or of `vg convert -f GBZ`, as a context
-    manager. `drop_haplotypes` passes `-H` to vg, which leaves out the haplotype walks; it does nothing
-    to a GFA file."""
+    """Iterate over the lines of a GFA file (plain or gzipped), or of `vg convert -f` of a graph whose name
+    ends in one of VG_SUFFIXES, as a context manager. `drop_haplotypes` passes `-H` to vg, which leaves
+    out a GBZ's haplotype walks. A caller must still expect them: vg keeps them for its other formats,
+    and a GFA file is read as it is."""
 
     def __init__(self, path, vg=None, threads=4, drop_haplotypes=False):
         self.path, self.vg, self.threads, self.proc, self.fh = path, vg, threads, None, None
         self.drop_haplotypes = drop_haplotypes
 
     def __enter__(self):
-        if self.path.endswith('.gbz'):
+        if self.path.endswith(VG_SUFFIXES):
             cmd = [find_vg(self.vg), 'convert', '-f', '-t', str(self.threads)]
             if self.drop_haplotypes:
                 cmd.append('-H')
@@ -71,6 +75,14 @@ class GfaStream:
         elif self.fh is not None:
             self.fh.close()
         return False
+
+
+def walk_name(line):
+    """(sample, haplotype, contig) of a W line, read without copying its walk, for a stage that wants only
+    a few of a graph's walks."""
+    a = line.index('\t', 2)
+    b = line.index('\t', a + 1)
+    return line[2:a], line[a + 1:b], line[b + 1:line.index('\t', b + 1)]
 
 
 def parse_w(line):

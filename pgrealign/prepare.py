@@ -10,6 +10,11 @@
 3. `<contig>.snarls.pb`: `vg snarls -T -P <ref>#0#<contig>`, the decomposition vg call itself uses.
 4. `<contig>.ref.tsv.gz`: the reference path's nodes, as node, orient, start and end (0-based).
 
+`index_contig` does steps 3 and 4 alone, for a graph that is already the contig's: a GFA, or a graph in
+one of vg's formats (graph.VG_SUFFIXES), such as a Minigraph-Cactus chromosome graph (`<contig>.vg`). Such
+a graph is taken as it is: nothing is cut from it and no sample is dropped, and it may hold the
+reference's paths on other contigs too.
+
 With the default DROP_SAMPLES, the output graph, and so the realigned graph built from it, has no gref
 cover. To give the realigned graph one, compute it on a mutable copy and rebuild the GBZ from that:
 
@@ -24,7 +29,7 @@ import shutil
 import subprocess
 import tempfile
 
-from .graph import GfaStream, find_vg, parse_w, steps
+from .graph import GfaStream, find_vg, parse_w, steps, walk_name
 
 DROP_SAMPLES = ('gref_CHM13',)
 
@@ -55,18 +60,26 @@ def prepare(gbz, contig, out_dir, ref_sample='CHM13', drop_samples=None, vg=None
                 os.replace(out + '.tmp', out)
             else:
                 os.replace(chunk, out)
-        ref_path = '%s#0#%s' % (ref_sample, contig)
-        snarls = os.path.join(out_dir, contig + '.snarls.pb')
-        if not os.path.exists(snarls):
-            with open(snarls + '.tmp', 'wb') as f:
-                run([vg, 'snarls', '-T', '-P', ref_path, '-t', threads, out], stdout=f)
-            os.replace(snarls + '.tmp', snarls)
-        ref = os.path.join(out_dir, contig + '.ref.tsv.gz')
-        if not os.path.exists(ref):
-            write_ref_index(out, ref_sample, contig, ref, vg=vg, threads=threads)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
-    return {'gbz': out, 'snarls': snarls, 'ref': ref}
+    return {'gbz': out, **index_contig(out, contig, out_dir, ref_sample=ref_sample, vg=vg, threads=threads)}
+
+
+def index_contig(graph, contig, out_dir, ref_sample='CHM13', vg=None, threads=4):
+    """Write `contig`'s snarls and reference index from `graph`, the contig's graph, to `out_dir`, skipping
+    each that exists (steps 3 and 4 of the module docstring). Returns their paths."""
+    vg = find_vg(vg)
+    os.makedirs(out_dir, exist_ok=True)
+    ref_path = '%s#0#%s' % (ref_sample, contig)
+    snarls = os.path.join(out_dir, contig + '.snarls.pb')
+    if not os.path.exists(snarls):
+        with open(snarls + '.tmp', 'wb') as f:
+            run([vg, 'snarls', '-T', '-P', ref_path, '-t', threads, graph], stdout=f)
+        os.replace(snarls + '.tmp', snarls)
+    ref = os.path.join(out_dir, contig + '.ref.tsv.gz')
+    if not os.path.exists(ref):
+        write_ref_index(graph, ref_sample, contig, ref, vg=vg, threads=threads)
+    return {'snarls': snarls, 'ref': ref}
 
 
 def reference_samples(gbwt, vg):
@@ -100,7 +113,8 @@ def drop_samples_from(gbz, samples, out, tmp, vg):
 def write_ref_index(graph, ref_sample, contig, out, vg=None, threads=4):
     """Write the reference path's nodes with their 0-based positions to `out`. The path is the W line of
     `ref_sample` on `contig`, or a P line named <ref_sample>#0#<contig> or <ref_sample>#<contig>. A GBZ
-    is read with `vg convert -f -H`, which leaves out the haplotype walks."""
+    is read with `vg convert -f -H`, which leaves out the haplotype walks, and any other graph of vg's
+    with `vg convert -f`."""
     names = ('%s#0#%s' % (ref_sample, contig), '%s#%s' % (ref_sample, contig))
     lens, found = {}, []
     with GfaStream(graph, vg, threads, drop_haplotypes=True) as f:
@@ -110,8 +124,10 @@ def write_ref_index(graph, ref_sample, contig, out, vg=None, threads=4):
                 x = line.split('\t', 3)
                 lens[int(x[1])] = len(x[2].rstrip('\n'))
             elif t == 'W':
-                w = parse_w(line)
-                if w.sample == ref_sample and w.contig == contig:
+                # every haplotype's walk is read, but only the reference's is split
+                sample, _, walk_contig = walk_name(line)
+                if sample == ref_sample and walk_contig == contig:
+                    w = parse_w(line)
                     found.append((int(w.start), w.steps))
             elif t == 'P':
                 x = line.rstrip('\n').split('\t')

@@ -278,14 +278,29 @@ class TestReplace(unittest.TestCase):
 
         def last(t):
             return lambda lines: [x for x in lines if x[0] != t] + [x for x in lines if x[0] == t]
-        # a removed node's S line after the walks is missed by the first run through it; another node's,
-        # and any L line, when it is read
+        # Keeping its ids ('reuse'), replace finds a removed node's S line after the walks missing from the
+        # first run through it, and another node's, or any L line, when it is read
+        late10 = lambda lines: [x for x in lines if not x.startswith('S\t10\t')] + ['S\t10\tAAAA\n']
+        reuse = {'id_mode': 'reuse', 'id_start': 1000}
         self.assert_fails('walk CHM13#0#chrT#0 comes before the S line of node 11',
+                          self.edited(fx.graph, last('S')), fx, **reuse)
+        self.assert_fails('an S line after a W line', self.edited(fx.graph, late10), fx, **reuse)
+        self.assert_fails('an L line after a W line', self.edited(fx.graph, last('L')), fx, **reuse)
+        # Renumbering ('dense'), it reads a GFA's node ids only up to the first W line, so it misses those
+        # S lines, and names them out of order when it needs their ids
+        self.assert_fails('3 left anchors are not nodes of the graph, or their S lines come after a W line',
                           self.edited(fx.graph, last('S')), fx)
-        g = self.edited(fx.graph, lambda lines: [x for x in lines if not x.startswith('S\t10\t')] +
-                        ['S\t10\tAAAA\n'])
-        self.assert_fails('an S line after a W line', g, fx)
+        self.assert_fails('node 10 has no S line before the first W line', self.edited(fx.graph, late10), fx)
         self.assert_fails('an L line after a W line', self.edited(fx.graph, last('L')), fx)
+
+    def test_old_node_ids_stop_at_the_walks(self):
+        # a GFA's node ids are read up to its first W line, which comes after every S line it may have
+        fx = Fixture(self.d)
+        with open(fx.graph) as f:
+            want = sorted(int(x.split('\t')[1]) for x in f if x[0] == 'S')
+        self.assertEqual(sorted(replace.old_node_ids(fx.graph)), want)
+        g = self.edited(fx.graph, lambda lines: lines + ['S\tnot-an-id\tA\n'])
+        self.assertEqual(sorted(replace.old_node_ids(g)), want)
 
     def test_reuse_id_start_in_use(self):
         fx = Fixture(self.d)

@@ -12,7 +12,7 @@ import sys
 from . import __version__
 
 # The arguments that make a tool print its version, by tool name, where they are not --version.
-VERSION_ARGS = {'vg': ('version',)}
+VERSION_ARGS = {'vg': ('version',), 'trf': ('-v',)}
 
 
 def tool_version(name, args=None, binary=None):
