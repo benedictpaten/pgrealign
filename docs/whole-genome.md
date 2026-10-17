@@ -448,9 +448,10 @@ These statuses can be changed by an option, or point to a fault:
 | status | what it means | what to do |
 |---|---|---|
 | `too_long` | no pair of anchors within `--max-span` encloses the target | raise regions' `--max-span`, at the cost of larger regions |
-| `complex` | a path passes through the region in a way replace cannot rewrite | if it visits no anchor and spells more than `--max-internal-bp` bases, raise that |
+| `complex` | a path passes through the region in a way replace cannot rewrite, or runs visit one of its nodes both ways, as at an inversion | if it visits no anchor and spells more than `--max-internal-bp` bases, raise that; an inversion is left as it is by design |
 | `too_big` | the longest allele or fragment would need more than `--max-cells` cells even banded, or the alleles hold more than 40 million bases, or the region's memory estimate alone exceeds `--max-memory` | for the first, raise `--max-cells`, and for the last `--max-memory`, if memory allows; no option changes the second |
 | `timeout` | the region took longer than `--timeout` seconds | raise `--timeout` |
+| `not_homologous` | an allele shares less than `--min-share` of its 15-mers with the centre: it is unrelated to the others, or reversed | nothing: such a region keeps its subgraph by design ([method.md](method.md#homology)); lower `--min-share`, or 0, only to measure what aligning it would do |
 | `aligner_failed`, `error` | abPOA failed, or realign hit a bug | read the region's `message` in `msas.jsonl.gz`, and report an `error` with it and the region's package |
 
 ### qc

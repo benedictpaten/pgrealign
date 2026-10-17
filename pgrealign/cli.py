@@ -108,11 +108,12 @@ def cmd_realign(a):
     i, n = (int(x) for x in a.shard.split('/'))
     scores = scores_of(a)
     summary = realign.run(a.packages, a.out, select=a.select, shard=(i, n), jobs=a.jobs, max_memory=a.max_memory,
-                          abpoa=a.abpoa, timeout=a.timeout, max_cells=a.max_cells, scores=scores)
+                          abpoa=a.abpoa, timeout=a.timeout, max_cells=a.max_cells, scores=scores,
+                          min_share=a.min_share)
     provenance.write_manifest(a.out, 'realign', {'packages': a.packages},
                               {'method': 'medoid_star', 'select': a.select, 'shard': a.shard, 'timeout': a.timeout,
                                'max_cells': a.max_cells, 'max_memory': a.max_memory,
-                               'scores': ' '.join(scores.flags())},
+                               'scores': ' '.join(scores.flags()), 'min_share': a.min_share},
                               tools=_tools(a, 'abpoa'), extra={'summary': summary}, started=started)
     _print(summary)
 
@@ -171,8 +172,9 @@ def cmd_run(a):
     summary = pipeline.run_contig(a.gbz, a.contig, a.targets, a.out, jobs=a.jobs, threads=a.threads, vg=a.vg,
                                   abpoa=a.abpoa, ref_sample=a.ref_sample, drop_samples=drop_samples_of(a),
                                   scores=scores_of(a), timeout=a.timeout, max_cells=a.max_cells,
-                                  max_internal_bp=a.max_internal_bp, id_start=a.id_start, do_qc=not a.no_qc,
-                                  max_memory=a.max_memory, log=lambda m: print(m, file=sys.stderr))
+                                  min_share=a.min_share, max_internal_bp=a.max_internal_bp, id_start=a.id_start,
+                                  do_qc=not a.no_qc, max_memory=a.max_memory,
+                                  log=lambda m: print(m, file=sys.stderr))
     _print(summary)
 
 
@@ -206,7 +208,7 @@ def cmd_project(a):
 def main(argv=None):
     from .memory import default_gb
     from .prepare import DROP_SAMPLES
-    from .realign import MAX_CELLS
+    from .realign import MAX_CELLS, MIN_SHARE
     from .star import SCORES
     default_drop = ','.join(DROP_SAMPLES) or 'none'
     default_memory = default_gb()
@@ -303,6 +305,10 @@ def main(argv=None):
     c.add_argument('--max-cells', type=int, default=MAX_CELLS,
                    help='band a pairwise alignment that would exceed this many cells unbanded, and leave a region as '
                         'it is when even a banded one would [%d]' % MAX_CELLS)
+    c.add_argument('--min-share', type=float, default=MIN_SHARE,
+                   help="leave a region as it is (not_homologous) when an allele shares less than this fraction of "
+                        "its 15-mers with the centre, counted against whichever of the two has fewer, as an "
+                        "unrelated or inverted allele does; 0 aligns every region [%g]" % MIN_SHARE)
     c.add_argument('--scores', metavar='FLAGS', help=scores_help)
     c.set_defaults(func=cmd_realign)
 
@@ -366,6 +372,7 @@ def main(argv=None):
     c.add_argument('--scores', metavar='FLAGS', help=scores_help)
     c.add_argument('--timeout', type=float, default=900, help='seconds per region [900]')
     c.add_argument('--max-cells', type=int, default=MAX_CELLS, help='as for realign [%d]' % MAX_CELLS)
+    c.add_argument('--min-share', type=float, default=MIN_SHARE, help='as for realign [%g]' % MIN_SHARE)
     c.add_argument('--max-internal-bp', type=int, default=200000, help='as for extract [200000]')
     c.add_argument('--id-start', type=int, help="replace's first node id [the contig's smallest id]")
     c.add_argument('--no-qc', action='store_true', help='skip the qc stage')

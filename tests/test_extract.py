@@ -146,6 +146,46 @@ class TestExtract(unittest.TestCase):
         s, pk, occ = self.run_extract(walks[:1] + walks[2:], 'l3', max_internal_bp=3)
         self.assertEqual((s['status'], s['internal_too_long']), ({'invariant': 1}, 0))
 
+    def test_inversion(self):
+        # s1 crosses the reference's interior nodes 2 and 4 backward between the anchors: an inversion
+        walks = [('CHM13', '0', '>1>2>4>5>6'), ('s1', '1', '>1<4<2>5>6'), ('s2', '1', '>1>3>4>5>6')]
+        s, pk, occ = self.run_extract(walks, 'inv')
+        self.assertEqual((s['status'], s['both_ways']), ({'complex': 1}, 1))
+        self.assertEqual(pk[0]['complex'], ['s1#1#chrT#0: visits node 4 both ways, as at an inversion'])
+        # a reverse run that crosses the inversion forward meets the reference's way after its flip
+        rev = [('CHM13', '0', '>1>2>4>5>6'), ('s1', '2', '<6<5>2>4<1')]
+        s, pk, occ = self.run_extract(rev, 'inv2')
+        self.assertEqual(pk[0]['complex'], ['s1#2#chrT#0: visits node 4 both ways, as at an inversion'])
+        # one run that visits a node both ways, as in a hairpin, is complex on its own
+        s, pk, occ = self.run_extract([('s1', '1', '>1>2<2>5>6')], 'hairpin')
+        self.assertEqual(pk[0]['complex'], ['s1#1#chrT#0: visits node 2 both ways, as at an inversion'])
+
+    def test_node_stored_reversed(self):
+        # node 7 is stored reversed: every run visits it backward, forward runs and the reverse one alike
+        walks = [('CHM13', '0', '>1>2>4>5>6'), ('s1', '1', '>1>2<7>4>5>6'), ('s2', '1', '<6<5<4>7<2<1'),
+                 ('s3', '1', '>7<2')]       # anchor-free: runs against the region, so it is flipped
+        s, pk, occ = self.run_extract(walks, 'stored')
+        self.assertEqual((s['status'], s['both_ways'], s['internal_flipped']), ({'ok': 1}, 0, 1))
+        self.assertEqual({a['seq']: a['weight'] for a in pk[0]['alleles']}, {'CCC': 1, 'CAAACC': 2})
+        self.assertEqual([(f['side'], f['seq']) for f in pk[0]['fragments']], [('internal', 'CAAA')])
+        self.assertEqual([o[2:6] for o in occ if o[0] == 's3#1#chrT#0'], [['internal', '-', '0', '2']])
+
+    def test_anchor_free_walk_orientation(self):
+        ref = [('CHM13', '0', '>1>2>4>5>6'), ('s1', '1', '>1>2>7>4>5>6')]
+        # with the region: kept as it is
+        s, pk, occ = self.run_extract(ref + [('s3', '1', '>7>4')], 'with')
+        self.assertEqual((s['status'], s['internal_flipped']), ({'ok': 1}, 0))
+        self.assertEqual([o[3] for o in occ if o[0] == 's3#1#chrT#0'], ['+'])
+        # against it: flipped, to spell the same fragment as the walk with the region does
+        s, pk, occ = self.run_extract(ref + [('s3', '1', '<4<7')], 'against')
+        self.assertEqual((s['status'], s['internal_flipped']), ({'ok': 1}, 1))
+        self.assertEqual([(f['side'], f['seq']) for f in pk[0]['fragments']], [('internal', 'TTTCC')])
+        self.assertEqual([o[3] for o in occ if o[0] == 's3#1#chrT#0'], ['-'])
+        # both ways: the region is complex
+        s, pk, occ = self.run_extract(ref + [('s3', '1', '>7<4')], 'both')
+        self.assertEqual(s['status'], {'complex': 1})
+        self.assertEqual(pk[0]['complex'], ['s3#1#chrT#0: an anchor-free walk runs both ways through the region'])
+
 
 if __name__ == '__main__':
     unittest.main()

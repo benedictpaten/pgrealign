@@ -39,7 +39,7 @@ def _write_json(path, obj):
 
 def run_contig(gbz, contig, targets, out_dir, jobs=1, threads=4, vg=None, abpoa='abpoa', ref_sample='CHM13',
                drop_samples=None, scores=SCORES, timeout=900, max_cells=realign.MAX_CELLS, max_internal_bp=200000,
-               id_start=None, do_qc=True, max_memory=None, log=print):
+               id_start=None, do_qc=True, max_memory=None, log=print, min_share=realign.MIN_SHARE):
     """Run every stage for `contig` (see the module docstring). `drop_samples` None means prepare's
     default, and `max_memory` None means memory.default_gb(). Returns {stage: summary} for the stages
     it ran, and the contig's node-id range."""
@@ -86,10 +86,11 @@ def run_contig(gbz, contig, targets, out_dir, jobs=1, threads=4, vg=None, abpoa=
         log('[%s] realign' % contig)
         t = time.time()
         s = realign.run(os.path.join(ex, 'packages.jsonl.gz'), msas, jobs=jobs, max_memory=max_memory, abpoa=abpoa,
-                        timeout=timeout, max_cells=max_cells, scores=scores)
+                        timeout=timeout, max_cells=max_cells, scores=scores, min_share=min_share)
         provenance.write_manifest(msas, 'realign', {'packages': os.path.join(ex, 'packages.jsonl.gz')},
                                   {'method': 'medoid_star', 'scores': ' '.join(scores.flags()),
-                                   'timeout': timeout, 'max_cells': max_cells, 'max_memory': max_memory},
+                                   'timeout': timeout, 'max_cells': max_cells, 'max_memory': max_memory,
+                                   'min_share': min_share},
                                   tools=abpoa_tool, extra={'summary': s}, started=t)
         out['realign'] = s
 

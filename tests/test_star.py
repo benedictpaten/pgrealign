@@ -101,6 +101,42 @@ class TestStarMSAInputs(unittest.TestCase):
         self.assertEqual(star.star_msa(alleles, align=al, k=5).centre, 'c')   # the only positive weight
         self.assertEqual(star.star_msa(alleles, align=al, centre='b', k=5).centre, 'b')
 
+    def test_share(self):
+        a, b = star.kmer_counts('ACGTACGGTTCA', 4), star.kmer_counts('ACGTACGGTTCATTGA', 4)
+        self.assertEqual(star.share(a, b), 1.0)                  # b is a plus an insertion
+        self.assertEqual(star.share(b, a), 1.0)
+        self.assertEqual(star.share(star.kmer_counts('AAAATTTT', 4), star.kmer_counts('AAAACCCC', 4)), 0.2)
+        self.assertIsNone(star.share(star.kmer_counts('ACG', 4), b))   # too short to hold a 4-mer
+
+    def test_homology(self):
+        rng = random.Random(5)
+        rand = lambda n: ''.join(rng.choice('ACGT') for _ in range(n))
+        rc = lambda s: s.translate(str.maketrans('ACGT', 'TGCA'))[::-1]
+        centre = rand(400)
+        snps = ''.join(c if i % 40 else 'ACGT'[('ACGT'.index(c) + 1) % 4] for i, c in enumerate(centre))
+        kept = [('c', centre, 5), ('snps', snps, 2), ('ins', centre[:200] + rand(600) + centre[200:], 1),
+                ('del', centre[:100] + centre[300:], 1), ('empty', '', 1), ('short', rand(10), 1)]
+        al = FakeAligner()
+        m = star.star_msa(kept + [('unrelated', rand(400), 0)], align=al, min_share=0.5)
+        self.assertEqual(m.centre, 'c')            # weight 0, so not judged
+        for name, other, weight in (('unrelated', rand(400), 1), ('inverted', rc(centre), 2)):
+            al = FakeAligner()
+            with self.assertRaises(star.NotHomologous) as e:
+                star.star_msa(kept + [(name, other, weight)], align=al, min_share=0.5)
+            self.assertEqual(e.exception.status, 'not_homologous')
+            self.assertEqual(al.calls, [])         # refused before anything is aligned
+            msg = str(e.exception)
+            self.assertIn('1 of 7 alleles (weight %d) share less than 0.5 of their 15-mers with the centre c'
+                          % weight, msg)
+            self.assertIn('the least, %s (weight %d)' % (name, weight), msg)
+            self.assertTrue(msg.endswith('1.000 reverse-complemented') == (name == 'inverted'), msg)
+            # without min_share, or with 0, the region is aligned
+            self.assertEqual(star.star_msa(kept + [(name, other, weight)], align=FakeAligner()).centre, 'c')
+            star.star_msa(kept + [(name, other, weight)], align=FakeAligner(), min_share=0)
+        # a centre given by name is judged against too
+        with self.assertRaises(star.NotHomologous):
+            star.star_msa(kept, align=FakeAligner(), centre='snps', min_share=0.99)
+
 
 @unittest.skipUnless(shutil.which('abpoa'), 'abpoa not on PATH')
 class TestStarMSA(unittest.TestCase):
