@@ -1,4 +1,4 @@
-"""The medoid star: one multiple alignment of a region's alleles and fragments.
+"""The star: one multiple alignment of a region's alleles and fragments, around one of its alleles.
 
 This module is the alignment method on its own. It takes sequences and returns rows, and knows nothing
 of graphs, files or the pipeline's stages, so other tools can call `star_msa` directly. realign.py
@@ -12,7 +12,8 @@ applies it to the region packages that extract.py writes.
   fragment touches neither end.
 
 **Method.**
-1. **Centre.** The centre is the allele of positive weight with the least weighted sum of k-mer
+1. **Centre.** The centre is the allele the caller names, as realign.py names a region's reference
+   allele, or else the medoid: the allele of positive weight with the least weighted sum of k-mer
    distances to all the alleles. The distance between two alleles is one minus the Jaccard index of
    their k-mer multisets: the copies of each k-mer the two share, over the copies in either. Ties go
    to the earlier allele. In a region so large that comparing every pair exactly would take too long,
@@ -75,6 +76,17 @@ class TimedOut(RealignError):
 
 class AlignerFailed(RealignError):
     status = 'aligner_failed'
+
+
+class ReservationRefused(AlignerFailed):
+    """abPOA could not reserve its matrices on this machine (memory.py), which says nothing about the region."""
+    status = 'reservation_refused'
+
+
+class AlignerKilled(AlignerFailed):
+    """abPOA was killed by a signal, as by the kernel's OOM killer or a job's memory limit: a failure of the
+    machine, not of the region."""
+    status = 'aligner_killed'
 
 
 class NotHomologous(RealignError):
@@ -197,8 +209,11 @@ class Abpoa:
         except subprocess.TimeoutExpired:
             raise TimedOut('time limit reached in abPOA')
         except subprocess.CalledProcessError as e:
-            raise AlignerFailed('abPOA exited with %d: %s' % (
-                e.returncode, (e.stderr or b'').decode(errors='replace').strip()[-300:]))
+            err = (e.stderr or b'').decode(errors='replace').strip()
+            if e.returncode < 0:
+                raise AlignerKilled('abPOA was killed by signal %d: %s' % (-e.returncode, err[-300:]))
+            failed = ReservationRefused if 'posix_memalign fail' in err else AlignerFailed
+            raise failed('abPOA exited with %d: %s' % (e.returncode, err[-300:]))
         rows = read_fasta_rows(out)
         try:
             return [rows['s%d' % i].upper() for i in range(len(seqs))]
@@ -475,7 +490,7 @@ class StarMSA:
 
 def star_msa(alleles, fragments=(), align=None, centre=None, k=K, deadline=None, max_cells=None,
              min_share=None):
-    """The medoid star of a region (see the module docstring).
+    """The star alignment of a region (see the module docstring).
 
     `alleles` is a sequence of (id, sequence, weight), with distinct ids; `fragments` is a sequence of
     (id, sequence, side), side being 'left', 'right' or 'internal'. `align` is the aligner: called with
