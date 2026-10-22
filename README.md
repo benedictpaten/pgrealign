@@ -13,8 +13,8 @@ For each region, pgrealign:
 1. extracts the alleles and fragments that the walks spell there;
 2. builds one multiple alignment of them, a star: the alleles are aligned to a centre allele, the
    reference's, so that each allele's alignment to the reference is its optimal one, or, in a region
-   the reference does not span, the one closest in k-mer content to the others, each counted once
-   for every walk that spells it; the pairwise alignments are merged into one, a fragment that occurs
+   the reference does not span or where most haplotypes are much longer than the reference, the one
+   closest in k-mer content to the others, each counted once for every walk that spells it; the pairwise alignments are merged into one, a fragment that occurs
    in an allele takes that allele's row, and any other fragment is aligned to the centre with the
    alleles;
 3. replaces the nodes between the anchors with a graph built from the alignment, and rewrites each

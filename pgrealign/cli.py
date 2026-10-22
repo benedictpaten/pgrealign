@@ -109,7 +109,7 @@ def cmd_realign(a):
     if a.plan:
         _print(realign.plan(a.packages, select=a.select, shard=(i, n), max_cells=a.max_cells, centre=a.centre,
                             max_work=a.max_work, max_region_memory=a.max_region_memory,
-                            max_address_space=a.max_address_space))
+                            max_address_space=a.max_address_space, max_excess=a.max_excess or None))
         return
     if not a.out:
         sys.exit('pgrealign realign: -o/--out is required, unless with --plan')
@@ -117,13 +117,14 @@ def cmd_realign(a):
     summary = realign.run(a.packages, a.out, select=a.select, shard=(i, n), jobs=a.jobs, max_memory=a.max_memory,
                           abpoa=a.abpoa, timeout=a.timeout or None, max_cells=a.max_cells, scores=scores,
                           min_share=a.min_share, centre=a.centre, max_work=a.max_work,
-                          max_region_memory=a.max_region_memory, max_address_space=a.max_address_space)
+                          max_region_memory=a.max_region_memory, max_address_space=a.max_address_space,
+                          max_excess=a.max_excess or None)
     provenance.write_manifest(a.out, 'realign', {'packages': a.packages},
                               {'method': 'medoid_star', 'select': a.select, 'shard': a.shard, 'timeout': a.timeout,
                                'max_cells': a.max_cells, 'max_memory': a.max_memory,
                                'scores': ' '.join(scores.flags()), 'min_share': a.min_share, 'centre': a.centre,
                                'max_work': a.max_work, 'max_region_memory': a.max_region_memory,
-                               'max_address_space': a.max_address_space},
+                               'max_address_space': a.max_address_space, 'max_excess': a.max_excess},
                               tools=_tools(a, 'abpoa'), extra={'summary': summary}, started=started)
     _print(summary)
 
@@ -184,7 +185,8 @@ def cmd_run(a):
                                   scores=scores_of(a), timeout=a.timeout or None, max_cells=a.max_cells,
                                   min_share=a.min_share, centre=a.centre, max_work=a.max_work,
                                   max_region_memory=a.max_region_memory, max_address_space=a.max_address_space,
-                                  max_internal_bp=a.max_internal_bp, id_start=a.id_start,
+                                  max_excess=a.max_excess or None, max_internal_bp=a.max_internal_bp,
+                                  id_start=a.id_start,
                                   do_qc=not a.no_qc, max_memory=a.max_memory,
                                   log=lambda m: print(m, file=sys.stderr))
     _print(summary)
@@ -220,7 +222,7 @@ def cmd_project(a):
 def main(argv=None):
     from .memory import default_gb
     from .prepare import DROP_SAMPLES
-    from .realign import CENTRES, MAX_ADDRESS_SPACE, MAX_CELLS, MAX_REGION_MEMORY, MAX_WORK, MIN_SHARE
+    from .realign import CENTRES, MAX_ADDRESS_SPACE, MAX_CELLS, MAX_EXCESS, MAX_REGION_MEMORY, MAX_WORK, MIN_SHARE
     from .star import SCORES
     default_drop = ','.join(DROP_SAMPLES) or 'none'
     default_memory = default_gb()
@@ -318,8 +320,12 @@ def main(argv=None):
                         "needs more [half the machine's: %.1f]" % default_memory)
     c.add_argument('--abpoa', default='abpoa', help='abPOA binary [abpoa on PATH]')
     c.add_argument('--centre', choices=CENTRES, default='ref',
-                   help="the allele every other is aligned to: the reference allele, where the region has one, or "
-                        "the medoid [ref]")
+                   help="the allele every other is aligned to: the reference allele, where the region has one and "
+                        "--max-excess allows, or the medoid [ref]")
+    c.add_argument('--max-excess', type=float, default=MAX_EXCESS, metavar='FRACTION',
+                   help="with --centre ref, take the medoid instead where more than this share of the haplotypes' "
+                        "bases lie beyond the reference allele's length, as where most carry an expansion it lacks; "
+                        "0 takes the reference allele whatever [%g]" % MAX_EXCESS)
     c.add_argument('--max-work', type=float, default=MAX_WORK,
                    help='leave a region as it is (too_big) when its alignments would fill more than this many '
                         'dynamic-programming cells, by its package; 0 sets no limit [%.3g]' % MAX_WORK)
@@ -405,6 +411,8 @@ def main(argv=None):
     c.add_argument('--max-cells', type=int, default=MAX_CELLS, help='as for realign [%d]' % MAX_CELLS)
     c.add_argument('--min-share', type=float, default=MIN_SHARE, help='as for realign [%g]' % MIN_SHARE)
     c.add_argument('--centre', choices=CENTRES, default='ref', help='as for realign [ref]')
+    c.add_argument('--max-excess', type=float, default=MAX_EXCESS, metavar='FRACTION',
+                   help='as for realign [%g]' % MAX_EXCESS)
     c.add_argument('--max-work', type=float, default=MAX_WORK, help='as for realign [%.3g]' % MAX_WORK)
     c.add_argument('--max-region-memory', type=float, default=MAX_REGION_MEMORY, metavar='GB',
                    help='as for realign [%g]' % MAX_REGION_MEMORY)

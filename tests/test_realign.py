@@ -29,14 +29,22 @@ class TestRealignPackage(unittest.TestCase):
         self.assertEqual(r['method'], 'medoid_star')
 
     def test_reference_centre(self):
-        # the heavier a2 is the medoid; the reference allele, a1, is the centre unless the medoid is asked for
+        # the heavier a2 is the medoid. The reference allele, a1, is the centre unless the medoid is asked for,
+        # or too much of the haplotypes' bases lie beyond its length: here 42%, as a1 lacks two or three copies
+        # of the unit that the other nine haplotypes carry
         unit = 'ACGTTGCAAGT'
         alleles = [('a1', 'GATTACA' + unit * 2 + 'CCGG', 1), ('a2', 'GATTACA' + unit * 4 + 'CCGG', 5),
                    ('a3', 'GATTACA' + unit * 5 + 'CCGG', 4)]
-        r = realign.realign_package(pkg('R', alleles, ref='a1'))
+        self.assertAlmostEqual(realign.excess(pkg('R', alleles, ref='a1'), 'a1'), (5 * 22 + 4 * 33) / 572)
+        r = realign.realign_package(pkg('R', alleles, ref='a1'), max_excess=0.5)
         self.assertEqual((r['status'], r['centre']), ('ok', 'a1'))
+        self.assertEqual(realign.realign_package(pkg('R', alleles, ref='a1'), max_excess=None)['centre'], 'a1')
+        self.assertEqual(realign.realign_package(pkg('R', alleles, ref='a1'))['centre'], 'a2')       # 0.42 > 0.1
         self.assertEqual(realign.realign_package(pkg('R', alleles, ref='a1'), centre='medoid')['centre'], 'a2')
         self.assertEqual(realign.realign_package(pkg('R', alleles))['centre'], 'a2')     # no reference allele
+        # a reference allele longer than the others is the centre: none of their bases lie beyond it
+        longer = [('a1', 'GATTACA' + unit * 6 + 'CCGG', 1)] + alleles[1:]
+        self.assertEqual(realign.realign_package(pkg('R', longer, ref='a1'))['centre'], 'a1')
 
     def test_statuses(self):
         two = [('a1', 'ACGTACGT', 1), ('a2', 'ACGTTCGT', 1)]
@@ -79,12 +87,19 @@ class TestEstimates(unittest.TestCase):
     def test_work_and_memory_around_the_reference(self):
         # a 10 kb reference, and 100 kb and 30 kb alleles: around the reference, x's alignment is banded, its
         # band spanning the 90 kb the lengths differ by, y's is not, and the 90 kb and 20 kb by which x and y
-        # are longer are aligned in a slot; around a medoid, not known in advance, the longest stands in
+        # are longer are aligned in a slot; around a medoid, not known in advance, the longest stands in. With
+        # 83% of the haplotypes' bases beyond the reference's length, the medoid is the centre by default, so
+        # the estimates around the reference are asked for with max_excess None
         p = pkg('R', [('r', 'A' * 10000, 1), ('x', 'C' * 100000, 2), ('y', 'G' * 30000, 1)], ref='r')
+        self.assertAlmostEqual(realign.excess(p, 'r'), (2 * 90000 + 20000) / 240000)
+        self.assertIsNone(realign.centre_of(p))
+        self.assertEqual(realign.work(p), realign.work(p, 'medoid'))
+        ref = dict(max_excess=None)
+        self.assertEqual(realign.centre_of(p, **ref), 'r')
         self.assertEqual(realign.banded_cells(10000, 100000), 10000 * (90000 + 2 * (10 + 1000)))
         self.assertEqual(realign.banded_cells(90000, 20000), 90000 * 20000)       # the band would span the rows
         self.assertEqual(realign.banded_cells(100000), 100000 * 2 * (10 + 1000))  # equal lengths: the band alone
-        self.assertEqual(realign.work(p), realign.banded_cells(10000, 100000) + 10000 * 30000 +
+        self.assertEqual(realign.work(p, **ref), realign.banded_cells(10000, 100000) + 10000 * 30000 +
                          realign.banded_cells(90000, 20000))
         self.assertEqual(realign.work(p, 'medoid'),
                          realign.banded_cells(100000, 10000) + realign.banded_cells(100000, 30000))
@@ -94,29 +109,30 @@ class TestEstimates(unittest.TestCase):
         aligner = max(memory.abpoa_bytes(10000, 100000, True, page), memory.abpoa_bytes(10000, 30000, False, page),
                       memory.abpoa_bytes(90000, 20000, True, page))
         self.assertEqual(aligner, memory.abpoa_bytes(90000, 20000, True, page))
-        self.assertEqual(realign.peak_bytes(p), memory.BASE + realign.KMER_BYTES * 140000 +
+        self.assertEqual(realign.peak_bytes(p, **ref), memory.BASE + realign.KMER_BYTES * 140000 +
                          realign.COMPARE_BYTES * 100000 + aligner)
-        self.assertLess(realign.peak_bytes(p), realign.peak_bytes(p, centre='medoid'))
+        self.assertLess(realign.peak_bytes(p, **ref), realign.peak_bytes(p, centre='medoid'))
         # the estimates assume pages of ESTIMATE_PAGE bytes, whatever the machine's, and the page matters
         self.assertEqual(realign.ESTIMATE_PAGE, 16384)
         near = pkg('E', [('r', 'A' * 60000, 1), ('x', 'C' * 60100, 1)], ref='r')       # banded, page-bound
+        self.assertEqual(realign.centre_of(near), 'r')
         self.assertGreater(realign.peak_bytes(near), realign.peak_bytes(near, page=4096))
-        self.assertIn('max_work', realign.refusal(p, max_work=1e8))
-        self.assertIn('max_region_memory', realign.refusal(p, max_region_memory=0.5))
+        self.assertIn('max_work', realign.refusal(p, max_work=1e8, **ref))
+        self.assertIn('max_region_memory', realign.refusal(p, max_region_memory=0.5, **ref))
         # abPOA reserves its matrices whole, rounded up to a power of two: 2^35 bytes to align the 100 kb allele
         # to the reference, and 2^36 to align the 20 kb that y adds to the 90 kb that x adds, in a slot
         self.assertEqual(memory.abpoa_reservation(10000, 100000), 2 ** 35)
-        self.assertEqual(realign.reservation(p), 2 ** 36)
-        self.assertIsNone(realign.refusal(p))
+        self.assertEqual(realign.reservation(p, **ref), 2 ** 36)
+        self.assertIsNone(realign.refusal(p, **ref))
         self.assertIn('abPOA would reserve 64 GB for one alignment, more than max_address_space 32 GB',
-                      realign.refusal(p, max_address_space=32))
-        self.assertIsNone(realign.refusal(p, max_address_space=0))
+                      realign.refusal(p, max_address_space=32, **ref))
+        self.assertIsNone(realign.refusal(p, max_address_space=0, **ref))
         # around a medoid, the longest allele against one of the same length bounds the slots: 2^38 bytes
         self.assertEqual(realign.reservation(p, 'medoid'), 2 ** 38)
         # with one long allele only, no slot holds two long insertions
         q = pkg('Q', [('r', 'A' * 1000, 1), ('x', 'C' * 100000, 2), ('y', 'G' * 1200, 1)], ref='r')
-        self.assertEqual(realign.reservation(q), memory.abpoa_reservation(1000, 100000))
-        self.assertEqual(realign.peak_bytes(q), memory.BASE + realign.KMER_BYTES * 102200 +
+        self.assertEqual(realign.reservation(q, **ref), memory.abpoa_reservation(1000, 100000))
+        self.assertEqual(realign.peak_bytes(q, **ref), memory.BASE + realign.KMER_BYTES * 102200 +
                          realign.COMPARE_BYTES * 100000 + 20 * 1000 * 100000)    # x to r, unbanded
 
 

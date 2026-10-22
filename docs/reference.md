@@ -159,7 +159,7 @@ Options that control the same thing in several stages:
 | `--drop-sample`, `--keep-all-samples` | prepare, run | the samples `prepare` removes ([Dropped samples](#dropped-samples)) |
 | `--scores` | realign, qc, run | abPOA's scores |
 | `--max-cells` | realign, qc, run | the largest pairwise alignment run unbanded ([Limits](#limits), [qc](#qc)) |
-| `--centre` | realign, run | the allele each star is built around: the reference allele, or the medoid ([realign](#realign)) |
+| `--centre`, `--max-excess` | realign, run | the allele each star is built around: the reference allele, unless too much of the haplotypes' sequence lies beyond its length, or the medoid ([realign](#realign)) |
 | `--max-work`, `--max-region-memory`, `--max-address-space` | realign, run | the largest region `realign` aligns, by its work, memory estimate and abPOA's reservation, each decided from its package ([Limits](#limits)) |
 | `--timeout` | realign, run | `realign`'s time limit per region, none by default ([Limits](#limits)) |
 | `--min-share` | realign, run | the least share of an allele's 15-mers with the centre for its region to be aligned ([Limits](#limits)) |
@@ -368,8 +368,10 @@ regions `complex` for this reason (the summary's `internal_too_long`), at the co
 `realign` builds the star alignment of each region with abPOA. It reads `--packages`, the
 `packages.jsonl.gz` from `extract` (or from `union`), and writes `msas.jsonl.gz` to `-o`
 ([format](#msasjsonlgz)). Each star is built around the region's reference allele, where it has one
-of positive weight, and around the medoid of its alleles otherwise; `--centre medoid` takes the
-medoid always ([method.md](method.md#the-centre)).
+of positive weight and no more than `--max-excess` (`realign.MAX_EXCESS`, 0.1) of the haplotypes'
+bases lie beyond its length, and around the medoid of its alleles otherwise; `--max-excess 0` takes
+the reference allele whatever, and `--centre medoid` takes the medoid always
+([method.md](method.md#the-centre)).
 
 It aligns the packages whose status is `ok` and that `--select` selects; its summary lists the rest
 of its shard ([below](#parallel-runs-and-resuming)) as `skipped`, by status or as `not_selected`.
@@ -1074,7 +1076,7 @@ instead.
 | `prepare` | `<out>/<contig>.manifest.json` | `gbz` | `contig`, `ref_sample`, `drop_samples` | vg |
 | `regions` | `<out>.manifest.json` | `targets`, `snarls`, `ref` | `contig`, `pad`, `max_span` | vg |
 | `extract` | `<out>/extract.manifest.json` | `graph`, `regions` | `ref_sample`, `max_internal_bp` | vg |
-| `realign` | `<out>.manifest.json` | `packages` | `method`, `select`, `shard`, `timeout`, `max_cells`, `max_memory`, `scores`, `min_share`, `centre`, `max_work`, `max_region_memory`, `max_address_space` | abpoa |
+| `realign` | `<out>.manifest.json` | `packages` | `method`, `select`, `shard`, `timeout`, `max_cells`, `max_memory`, `scores`, `min_share`, `centre`, `max_work`, `max_region_memory`, `max_address_space`, `max_excess` | abpoa |
 | `replace` | `<gbz>.manifest.json` with `--gbz`, else `<out>.manifest.json` | `graph`, and `msas` or `msas_0`, ... | `extract`, `id_mode`, `id_start` | vg |
 | `verify` | `<out>.manifest.json`, only with `-o` | `before`, `after` | none | vg |
 | `qc` | `<out>.manifest.json` | `msas`, and `graph` with `--graph` | `extract`, `pairs`, `refs`, `sample`, `scores`, `max_cells`, `max_memory` | abpoa, and vg with `--graph` |
@@ -1329,7 +1331,8 @@ else:
 ```python
 realign_package(pkg, abpoa='abpoa', timeout=None, max_cells=..., workdir=None, scores=SCORES,
                 min_share=..., centre='ref', max_work=..., max_region_memory=..., max_address_space=...)
-centre_of(pkg, centre='ref')
+excess(pkg, aid)
+centre_of(pkg, centre='ref', max_excess=...)
 work(pkg, centre='ref', max_cells=...)
 peak_bytes(pkg, max_cells=..., page=ESTIMATE_PAGE, centre='ref')
 reservation(pkg, centre='ref')
@@ -1350,8 +1353,11 @@ for any other exception. `timeout` None sets no time limit, and `max_work`, `max
 `max_address_space` 0 or None set no such limit. `realign.write_msas(path, records)` writes records
 to a `msas.jsonl.gz`.
 
-`centre_of` is the id of the allele the star is built around, the reference allele when `centre` is
-'ref' and the package has one of positive weight, or None for the medoid. `work`, `peak_bytes` and
+`excess` is the share of the haplotypes' bases that lie beyond allele `aid`'s length, each allele
+weighted by its haplotypes. `centre_of` is the id of the allele the star is built around, the reference
+allele when `centre` is 'ref', the package has one of positive weight and its excess is no more than
+`max_excess` (None for no limit), or None for the medoid; the estimates, `refusal`, `plan`,
+`realign_package` and `run` take `max_excess` too. `work`, `peak_bytes` and
 `reservation` are a package's [work](#limits), [memory estimate](#memory) in bytes, `page` being the
 page size, and abPOA's largest reservation in bytes, and `refusal` is the message of the first
 limit the package exceeds, or None. `plan` is `realign --plan`. `run` is the `realign` stage: it

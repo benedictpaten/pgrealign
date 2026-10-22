@@ -450,9 +450,10 @@ upper-cased sequence, and all rows to have one length. The centre is chosen from
 
 ### The centre
 
-The centre is the region's reference allele, the package's `ref`, when it has a positive weight, and
-the medoid of the alleles otherwise, as when the reference does not span the region (`--centre
-medoid` takes the medoid always). Every other allele is aligned to the centre on its own, so around
+The centre is the region's reference allele, the package's `ref`, when it has a positive weight and no
+more than `--max-excess`, 0.1, of the haplotypes' bases lie beyond its length (see below); and the
+medoid of the alleles otherwise, as when the reference does not span the region (`--centre medoid`
+takes the medoid always, and `--max-excess 0` the reference allele whatever). Every other allele is aligned to the centre on its own, so around
 the reference, the alignment that a genotyper reads between the reference and any allele, the pair's
 projected alignment (see Merging into one alignment), is that allele's own pairwise alignment to the
 reference: optimal under the scores, unless banded, and left-normalised against the reference, as a
@@ -487,6 +488,27 @@ copies of the repeat, it aligns them base against base, and the region's 29 othe
 the reference in 20,391 runs of columns (16,986 of mismatches only), against 7,676 (6,588) for the
 alignments composed through the medoid, which leave more of the copies unaligned, as long indels, in
 an alignment of 64,487 columns against 39,315.
+
+Where most haplotypes are much longer than the reference allele, as where they carry an expansion it
+lacks, the cost becomes the graph's size: their extra sequence is all inserted around the reference
+and aligned only slot by slot, and much of it stays unaligned. Joined both ways, the 30-way graph's
+realigned regions held 2.8 Mb more sequence around the reference allele than around the medoid, and
+228 regions whose graph the reference made at least half as large again carried 5.5 Mb, all with a
+reference allele far shorter than most haplotypes': at chr19:8.79M, a 23 kb reference allele against
+75 kb at the median, 717,811 bases of graph against 129,260. `excess`, the share of the haplotypes'
+bases that lie beyond the reference allele's length, each allele counted once per haplotype, picks
+these regions out. Taking the medoid where it exceeds `--max-excess`:
+
+| `--max-excess` | regions on the medoid | bases of graph against the medoid everywhere | blow-ups caught |
+|---|---|---|---|
+| none | 0 | +2.81 Mb | 0 of 228 |
+| 0.25 | 980, 0.11% | -2.59 Mb | 150 |
+| 0.15 | 1,683, 0.19% | -2.86 Mb | 201 |
+| 0.1 | 2,508, 0.28% | -2.89 Mb | 220 |
+| 0.05 | 4,592, 0.51% | -2.74 Mb | 227 |
+
+At 0.1, the default, the realigned graph is smallest, and the eight blow-ups left carry 32 kb. The
+regions at chr2:232.31M and chr2:90.32M above keep the reference allele, their excess 0.095 and 0.018.
 
 ### The medoid
 
