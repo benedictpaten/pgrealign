@@ -864,8 +864,8 @@ optimal alignment would need more than `--max-cells` cells, the product of the t
 compared with abPOA's banded alignment instead, which can fall short of the optimum, and is counted
 in `banded`; `run` gives `qc` the same `--max-cells` as `realign`, so a pair through the centre that
 `realign` banded is compared with the very alignment `realign` used. A pair whose alignment's
-memory estimate alone exceeds `--max-memory` is not compared at all, and is counted in `skipped`
-([reference.md](reference.md#qc)). An aligned pair is a base of one sequence and a base of the other
+memory estimate exceeds `--max-pair-memory` is not compared at all, on any machine, and is counted
+in `skipped` ([reference.md](reference.md#qc)). An aligned pair is a base of one sequence and a base of the other
 in one column, whether they match or not.
 
 ### The graph's own alignment
@@ -893,7 +893,7 @@ induced graph. Its other fields are counts summed over the region's compared pai
 | `ref_sv`, `ref_sv_opt` | in the reference pairs' projected and optimal alignments, runs of 50 or more consecutive columns in which one row has a gap opposite a base of the other, whichever row holds the gap |
 | `forced`, `forced_opt` | columns of the projected and optimal alignments, of random and reference pairs alike, that lie in a forced-homology window |
 | `banded` | random and reference pairs compared with a banded alignment because of `--max-cells` |
-| `skipped` | random and reference pairs not compared because of `--max-memory`; every other field leaves them out |
+| `skipped` | random and reference pairs not compared because of `--max-pair-memory`; every other field leaves them out |
 | `graph_pair_msa`, `graph_pair_tp` | with `--graph`: aligned pairs in the graph's alignment of the random pairs, and in both it and the optimal alignment |
 | `graph_ref_msa`, `graph_ref_tp` | the same, for the reference pairs |
 | `graph_sequence` | with `--graph`: the bases of the nodes the region's runs visit, which `replace` removes |
@@ -969,8 +969,7 @@ theirs; an output that is not is renamed to `<output>.failed`.
 - Under the same `--max-cells`, `qc` compares a pair of the centre and an allele that `realign`
   aligned with a band with that same banded alignment, so it agrees by construction, and the region's
   pairs over `--max-cells` are measured against an alignment that may not be optimal. `qc` has no
-  limit on a region's work or time, so a region can take longer in `qc` than it did in `realign`,
-  and it skips a pair over its `--max-memory`, so its measures can differ with the budget.
+  limit on a region's work or time, so a region can take longer in `qc` than it did in `realign`.
 - `run` judges a stage done by its output alone, whatever options made it, and `merge` refuses a
   contig whose reuse numbering reached past other contigs' ids
   ([reference.md](reference.md#known-gaps)).

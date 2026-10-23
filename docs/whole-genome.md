@@ -264,8 +264,8 @@ defined in [reference.md](reference.md#memory). Most regions are estimated at ab
 budget holds back only the few long ones, and `-j` can be the number of cores. The budget decides
 only how many regions run at once: realign stops before it aligns anything if a region it admits
 needs more than the budget on its own, and leaves a region whose estimate exceeds
-`--max-region-memory`, 64 GB by default, `too_big` on any machine; qc skips each pair whose estimate
-alone exceeds its budget. Of the regions extract made `ok` on chr20 and chr6 of the HPRC graph on
+`--max-region-memory`, 64 GB by default, `too_big` on any machine; qc, likewise, skips each pair
+whose estimate exceeds `--max-pair-memory`, 64 GB by default. Of the regions extract made `ok` on chr20 and chr6 of the HPRC graph on
 CHM13, 24,408 and 64,485, these numbers have realign estimates above each size, around the
 reference allele, with 16 KB pages:
 
@@ -284,9 +284,8 @@ give `peak_estimate_gb`, the largest sum of the estimates of the regions that ra
 ### qc's limits
 
 qc bands a pair whose unbanded alignment would exceed `--max-cells` cells, which `run` passes to qc
-as well as to realign, and compares a pair only when its memory estimate alone fits in
-`--max-memory`, so unlike realign's records, its measures can differ with the budget. qc has no
-limit on a region's work or time; `--no-qc` skips qc, and `pgrealign qc --sample` measures a random
+as well as to realign, and compares a pair only when its memory estimate fits in `--max-pair-memory`,
+on any machine. qc has no limit on a region's work or time; `--no-qc` skips qc, and `pgrealign qc --sample` measures a random
 subset of the regions.
 
 ### Disk
@@ -476,7 +475,7 @@ alignments' aligned base pairs, for random pairs of alleles other than the refer
 carried by the most paths (`ref_*`); [the method](method.md#qc) defines every measure. A pair whose
 optimal alignment would exceed `--max-cells` cells, the same test by which realign bands an
 alignment with the centre, is compared with a banded alignment instead; the column `banded` counts
-them. A pair whose memory estimate alone exceeds `--max-memory` is not compared; the column
+them. A pair whose memory estimate exceeds `--max-pair-memory` is not compared; the column
 `skipped` counts them. `run` also gives qc the prepared contig, whose own alignment of the same
 pairs it measures against the same optimal alignments, in the `graph_*` columns: the region before
 replace, beside the region after it.

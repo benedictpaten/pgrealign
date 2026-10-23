@@ -24,8 +24,7 @@ measures that graph's own alignment of the same pairs too, so each region has a 
   those mismatched. Homologous tandem-repeat alleles differ mostly by gaps, so such a window shows
   unrelated sequence aligned base against base.
 - `banded`: the pairs compared with a banded alignment rather than an optimal one (below).
-- `skipped`: the pairs not compared, because aligning them alone would exceed the memory budget
-  (below).
+- `skipped`: the pairs not compared, because aligning them would exceed `max_pair_memory` (below).
 - With the graph: `graph_pair_tp` and `graph_pair_msa`, `graph_ref_tp` and `graph_ref_msa`, the same
   counts for the alignment the graph implies, against the same optimal alignments; and
   `graph_sequence`, the bases of the nodes the region's runs visit, which `replace` removes. The graph
@@ -42,10 +41,12 @@ drawn with a seed fixed per region, so a rerun measures the same pairs.
 
 **Memory.** `pair_bytes` estimates the memory that aligning one pair takes (memory.py), and with
 the graph a region also holds GRAPH_BYTES per base of its alleles, their graph positions, while it
-aligns. A pair's estimate is the two together. `run` measures regions in up to `jobs` worker
+aligns. A pair's estimate is the two together, with pages of memory.ESTIMATE_PAGE bytes whatever the
+machine's. A pair whose estimate exceeds `max_pair_memory` GB is not compared, and counts in `skipped`
+and in no other field, the same on every machine. `run` measures regions in up to `jobs` worker
 processes, starting them in order while the estimates of those running, each that of its largest
-compared pair (`peak_bytes`), stay within `max_memory` GB. A pair whose estimate alone exceeds that
-is not compared, and counts in `skipped` and in no other field.
+compared pair (`peak_bytes`), stay within `max_memory` GB. That budget decides only how many run at
+once: if a region needs more on its own, `run` stops before it measures anything.
 
 **Output.** A TSV with one row per region that realign made `ok` and that has at least two alleles,
 and a summary (written next to it as .json) with the sums and the F1 values over all regions.
@@ -61,6 +62,8 @@ from . import memory
 from .extract import flip, read_packages
 from .graph import STEP, GfaStream, parse_w, walk_key
 from .star import Abpoa, SCORES, align_pair
+
+MAX_PAIR_MEMORY = 64    # GB: a pair whose estimate exceeds it is not compared, on any machine
 
 FIELDS = ['id', 'alleles', 'longest', 'sequence', 'pair_tp', 'pair_opt', 'pair_msa', 'ref_tp', 'ref_opt',
           'ref_msa', 'ref_sv', 'ref_sv_opt', 'forced', 'forced_opt', 'banded', 'skipped']
@@ -167,10 +170,10 @@ def compared_pairs(pkg, rows, pairs=20, refs=20):
     return out
 
 
-def pair_bytes(n, m, max_cells=None):
+def pair_bytes(n, m, max_cells=None, page=memory.ESTIMATE_PAGE):
     """The memory, in bytes, that aligning an allele of m bases to one of n bases takes: memory.BASE and
-    abPOA's matrices, banded when n * m exceeds `max_cells`."""
-    return memory.BASE + memory.abpoa_bytes(n, m, max_cells is not None and n * m > max_cells)
+    abPOA's matrices, banded when n * m exceeds `max_cells`, with pages of `page` bytes."""
+    return memory.BASE + memory.abpoa_bytes(n, m, max_cells is not None and n * m > max_cells, page)
 
 
 def peak_bytes(pkg, rows, pairs=20, refs=20, max_cells=None, max_bytes=None, graph=False):
@@ -315,13 +318,16 @@ def reference_alleles(occurrences_path, ref_sample):
 
 def run(extract_dir, msas_path, out_path, pairs=20, refs=20, sample=None, jobs=1, abpoa='abpoa',
         scores=SCORES, workdir=None, ref_sample='CHM13', max_cells=450_000_000, graph=None, vg=None, threads=4,
-        max_memory=None):
+        max_memory=None, max_pair_memory=MAX_PAIR_MEMORY):
     """Measure every region realign made `ok` (or a fixed random `sample` of them) and write the TSV and
     its summary. `extract_dir` is extract's output directory, and `graph`, if given, the graph extract
-    read (GBZ or GFA), whose own alignment is then measured too. `max_memory` is the budget in GB (see
-    the module docstring; None: memory.default_gb()). Returns the summary, with `peak_estimate_gb`, the
-    largest sum of the estimates of regions measured at once."""
+    read (GBZ or GFA), whose own alignment is then measured too. A pair whose estimate exceeds
+    `max_pair_memory` GB (0 or None: no limit) is not compared; `max_memory` is the budget in GB that
+    decides how many regions run at once (see the module docstring; None: memory.default_gb()), and a
+    region that needs more alone raises RuntimeError before anything is measured. Returns the summary,
+    with `peak_estimate_gb`, the largest sum of the estimates of regions measured at once."""
     limit = memory.budget(max_memory)
+    max_bytes = int(max_pair_memory * memory.GB) if max_pair_memory else None
     packages_path = os.path.join(extract_dir, 'packages.jsonl.gz')
     msas = {}
     with gzip.open(msas_path, 'rt') as f:
@@ -339,8 +345,15 @@ def run(extract_dir, msas_path, out_path, pairs=20, refs=20, sample=None, jobs=1
             p.setdefault('ref', ref.get(p['id']))
     walks = graph_walks(extract_dir, graph, {p['id'] for p in todo}, vg, threads) if graph else {}
     kw = {'pairs': pairs, 'refs': refs, 'abpoa': abpoa, 'scores': scores, 'workdir': workdir, 'max_cells': max_cells,
-          'max_bytes': limit}
-    need = [peak_bytes(p, msas[p['id']], pairs, refs, max_cells, limit, bool(graph)) for p in todo]
+          'max_bytes': max_bytes}
+    need = [peak_bytes(p, msas[p['id']], pairs, refs, max_cells, max_bytes, bool(graph)) for p in todo]
+    over = [k for k in range(len(todo)) if need[k] > limit]
+    if over:
+        k = max(over, key=lambda k: need[k])
+        raise RuntimeError('%d regions need more memory than the budget of %.2f GB (max_memory); the largest, %s, '
+                           'needs about %.2f GB. Give qc that much, or lower max_pair_memory below it, which leaves '
+                           'such pairs uncompared.' % (len(over), limit / memory.GB, todo[k]['id'],
+                                                       need[k] / memory.GB))
     out = [None] * len(todo)
     peak = memory.run_within(_one, [(p, msas[p['id']], walks.get(p['id']), kw) for p in todo], need, jobs, limit,
                              out.__setitem__)

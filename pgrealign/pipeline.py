@@ -41,7 +41,8 @@ def run_contig(gbz, contig, targets, out_dir, jobs=1, threads=4, vg=None, abpoa=
                drop_samples=None, scores=SCORES, timeout=None, max_cells=realign.MAX_CELLS, max_internal_bp=200000,
                id_start=None, do_qc=True, max_memory=None, log=print, min_share=realign.MIN_SHARE, centre='ref',
                max_work=realign.MAX_WORK, max_region_memory=realign.MAX_REGION_MEMORY,
-               max_address_space=realign.MAX_ADDRESS_SPACE, max_excess=realign.MAX_EXCESS):
+               max_address_space=realign.MAX_ADDRESS_SPACE, max_excess=realign.MAX_EXCESS,
+               max_pair_memory=qc.MAX_PAIR_MEMORY):
     """Run every stage for `contig` (see the module docstring). `drop_samples` None means prepare's
     default, and `max_memory` None means memory.default_gb(). Returns {stage: summary} for the stages
     it ran, and the contig's node-id range."""
@@ -130,10 +131,10 @@ def run_contig(gbz, contig, targets, out_dir, jobs=1, threads=4, vg=None, abpoa=
         log('[%s] qc' % contig)
         t = time.time()
         s = qc.run(ex, msas, q, jobs=jobs, abpoa=abpoa, scores=scores, ref_sample=ref_sample, max_cells=max_cells,
-                   graph=cgbz, vg=vg, threads=threads, max_memory=max_memory)
+                   graph=cgbz, vg=vg, threads=threads, max_memory=max_memory, max_pair_memory=max_pair_memory)
         provenance.write_manifest(q, 'qc', {'msas': msas, 'graph': cgbz},
                                   {'extract': ex, 'scores': ' '.join(scores.flags()), 'max_cells': max_cells,
-                                   'max_memory': max_memory},
+                                   'max_memory': max_memory, 'max_pair_memory': max_pair_memory},
                                   tools={**abpoa_tool, **vg_tool}, extra={'summary': s}, started=t)
         out['qc'] = s
 

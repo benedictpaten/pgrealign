@@ -81,7 +81,7 @@ from .star import Abpoa, RealignError, SCORES, TooBig, star_msa
 MAX_CELLS = 450_000_000
 MAX_TOTAL_BP = 40_000_000     # choosing the centre holds every allele's k-mer counts: KMER_BYTES per base
 CENTRES = ('ref', 'medoid')
-ESTIMATE_PAGE = 16 * 1024     # the page size peak_bytes assumes: macOS on Apple silicon's, 4x Linux's
+ESTIMATE_PAGE = memory.ESTIMATE_PAGE     # the page size peak_bytes assumes: macOS on Apple silicon's, 4x Linux's
 # Of the 1.12 million regions realigned in the HPRC CHM13 graph, MIN_SHARE 0.5 refuses 2,794 (0.6% of their
 # span): every region of the chrX and chr15 loci where unrelated or inverted alleles had been threaded
 # through the centre, and few others. On chrX that takes back 410,601 non-reference sample-records that

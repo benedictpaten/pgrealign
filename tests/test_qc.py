@@ -134,15 +134,24 @@ class TestRun(unittest.TestCase):
             limit = 0.2               # GB: S's pairs fit, and B's, about 0.27 each unbanded, do not
             self.assertGreater(qc.pair_bytes(len(unit) * 215, len(unit) * 215), limit * memory.GB)
             out = os.path.join(d, 'qc.tsv')
-            s = qc.run(os.path.join(d, 'x'), os.path.join(d, 'msas.jsonl.gz'), out, jobs=2, max_memory=limit)
-            lines = [l.rstrip('\n').split('\t') for l in open(out)]
-            got = {x[0]: dict(zip(lines[0], x)) for x in lines[1:]}
-            self.assertEqual([x[0] for x in lines[1:]], ['B', 'S'])
-            self.assertEqual((got['B']['skipped'], got['B']['ref_opt'], got['B']['pair_opt']), ('3', '0', '0'))
-            self.assertEqual(got['S']['skipped'], '0')
-            self.assertGreater(int(got['S']['ref_opt']), 0)
-            self.assertEqual(s['skipped'], 3)
-            self.assertLessEqual(s['peak_estimate_gb'], limit)
+            args = (os.path.join(d, 'x'), os.path.join(d, 'msas.jsonl.gz'), out)
+            # the budget decides only how many regions run at once: B needs more than 0.2 GB, so nothing starts
+            with self.assertRaisesRegex(RuntimeError, 'the largest, B, needs about 0.2'):
+                qc.run(*args, jobs=2, max_memory=limit)
+            # max_pair_memory decides which pairs are compared, the same under any budget
+            results = []
+            for budget in (limit, 4):
+                s = qc.run(*args, jobs=2, max_memory=budget, max_pair_memory=limit)
+                lines = [l.rstrip('\n').split('\t') for l in open(out)]
+                got = {x[0]: dict(zip(lines[0], x)) for x in lines[1:]}
+                self.assertEqual([x[0] for x in lines[1:]], ['B', 'S'])
+                self.assertEqual((got['B']['skipped'], got['B']['ref_opt'], got['B']['pair_opt']), ('3', '0', '0'))
+                self.assertEqual(got['S']['skipped'], '0')
+                self.assertGreater(int(got['S']['ref_opt']), 0)
+                self.assertEqual(s['skipped'], 3)
+                self.assertLessEqual(s['peak_estimate_gb'], budget)
+                results.append(lines)
+            self.assertEqual(results[0], results[1])
         finally:
             shutil.rmtree(d, ignore_errors=True)
 

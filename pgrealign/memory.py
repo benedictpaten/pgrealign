@@ -45,6 +45,7 @@ import resource
 
 GB = 2 ** 30
 PAGE = resource.getpagesize()
+ESTIMATE_PAGE = 16 * 1024       # the page size the estimates that decide anything assume: macOS on Apple silicon's
 CELL_BYTES = 20                 # five matrices of 4-byte scores
 BASE = 100 * 2 ** 20            # per region: a worker's interpreter, about 20 MB, and abPOA's own tables
 

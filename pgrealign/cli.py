@@ -167,12 +167,13 @@ def cmd_qc(a):
     scores = scores_of(a)
     summary = qc.run(a.extract, a.msas, a.out, pairs=a.pairs, refs=a.refs, sample=a.sample, jobs=a.jobs,
                      abpoa=a.abpoa, scores=scores, ref_sample=a.ref_sample, max_cells=a.max_cells,
-                     graph=a.graph, vg=a.vg, threads=a.threads, max_memory=a.max_memory)
+                     graph=a.graph, vg=a.vg, threads=a.threads, max_memory=a.max_memory,
+                     max_pair_memory=a.max_pair_memory)
     inputs = {'msas': a.msas, **({'graph': a.graph} if a.graph else {})}
     provenance.write_manifest(a.out, 'qc', inputs,
                               {'extract': a.extract, 'pairs': a.pairs, 'refs': a.refs, 'sample': a.sample,
                                'scores': ' '.join(scores.flags()), 'max_cells': a.max_cells,
-                               'max_memory': a.max_memory},
+                               'max_memory': a.max_memory, 'max_pair_memory': a.max_pair_memory},
                               tools=_tools(a, 'abpoa', 'vg') if a.graph else _tools(a, 'abpoa'),
                               extra={'summary': summary}, started=started)
     _print(summary)
@@ -187,7 +188,7 @@ def cmd_run(a):
                                   max_region_memory=a.max_region_memory, max_address_space=a.max_address_space,
                                   max_excess=a.max_excess or None, max_internal_bp=a.max_internal_bp,
                                   id_start=a.id_start,
-                                  do_qc=not a.no_qc, max_memory=a.max_memory,
+                                  do_qc=not a.no_qc, max_memory=a.max_memory, max_pair_memory=a.max_pair_memory,
                                   log=lambda m: print(m, file=sys.stderr))
     _print(summary)
 
@@ -222,6 +223,7 @@ def cmd_project(a):
 def main(argv=None):
     from .memory import default_gb
     from .prepare import DROP_SAMPLES
+    from .qc import MAX_PAIR_MEMORY
     from .realign import CENTRES, MAX_ADDRESS_SPACE, MAX_CELLS, MAX_EXCESS, MAX_REGION_MEMORY, MAX_WORK, MIN_SHARE
     from .star import SCORES
     default_drop = ','.join(DROP_SAMPLES) or 'none'
@@ -386,9 +388,13 @@ def main(argv=None):
                    help='band a pair whose unbanded optimal alignment would exceed this many cells [%d]' % MAX_CELLS)
     c.add_argument('--graph', help="the graph extract read: measure its own alignment of each region too")
     c.add_argument('-j', '--jobs', type=int, default=1, help='the most regions measured in parallel [1]')
+    c.add_argument('--max-pair-memory', type=float, default=MAX_PAIR_MEMORY, metavar='GB',
+                   help='leave a pair uncompared (skipped) when its memory estimate exceeds this; 0 sets no limit '
+                        '[%g]' % MAX_PAIR_MEMORY)
     c.add_argument('--max-memory', type=gigabytes, default=default_memory, metavar='GB',
-                   help='the memory the regions measured at once may need in all, by their estimates; a pair that '
-                        "alone needs more is not compared (skipped) [half the machine's: %.1f]" % default_memory)
+                   help='the memory the regions measured at once may need in all, by their estimates; it decides only '
+                        'how many run at once, and qc stops before starting if a region alone needs more '
+                        "[half the machine's: %.1f]" % default_memory)
     c.add_argument('-t', '--threads', type=int, default=4, help='threads for vg convert, with --graph [4]')
     c.add_argument('--abpoa', default='abpoa', help='abPOA binary [abpoa on PATH]')
     vg_arg(c)
@@ -421,6 +427,8 @@ def main(argv=None):
     c.add_argument('--max-internal-bp', type=int, default=200000, help='as for extract [200000]')
     c.add_argument('--id-start', type=int, help="replace's first node id [the contig's smallest id]")
     c.add_argument('--no-qc', action='store_true', help='skip the qc stage')
+    c.add_argument('--max-pair-memory', type=float, default=MAX_PAIR_MEMORY, metavar='GB',
+                   help='as for qc [%g]' % MAX_PAIR_MEMORY)
     c.add_argument('--abpoa', default='abpoa', help='abPOA binary [abpoa on PATH]')
     vg_arg(c)
     c.set_defaults(func=cmd_run)

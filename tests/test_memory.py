@@ -38,7 +38,8 @@ class TestEstimate(unittest.TestCase):
         self.assertLess(abpoa_bytes(n, n, True), abpoa_bytes(n, n, False) / 4)
         self.assertLess(realign.peak_bytes(pkg([n, n]), max_cells=n * n - 1), realign.peak_bytes(pkg([n, n]), max_cells=n * n))
         self.assertEqual(qc.pair_bytes(n, n, n * n) - BASE, abpoa_bytes(n, n, False))
-        self.assertEqual(qc.pair_bytes(n, n, n * n - 1) - BASE, abpoa_bytes(n, n, True))
+        # qc's estimate, like realign's, assumes ESTIMATE_PAGE whatever the machine's page size
+        self.assertEqual(qc.pair_bytes(n, n, n * n - 1) - BASE, abpoa_bytes(n, n, True, memory.ESTIMATE_PAGE))
         # a region realign refuses before aligning takes only BASE
         self.assertEqual(realign.peak_bytes(pkg([n, n]), max_cells=1000), BASE)
         self.assertEqual(realign.peak_bytes(pkg([], [n])), BASE)

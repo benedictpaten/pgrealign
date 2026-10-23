@@ -154,7 +154,8 @@ Options that control the same thing in several stages:
 | `--abpoa` | realign, qc, run | the abPOA binary |
 | `-t`, `--threads` | prepare, extract, replace, run | threads for vg |
 | `-j`, `--jobs` | catalog, realign, qc, run | the most work done in parallel |
-| `--max-memory` | realign, qc, run | the memory, in GB, that the regions worked on at once may need in all ([Memory](#memory)) |
+| `--max-memory` | realign, qc, run | the memory, in GB, that the regions worked on at once may need in all; it decides only how many run at once ([Memory](#memory)) |
+| `--max-pair-memory` | qc, run | the largest pair `qc` compares, by its memory estimate ([qc](#qc)) |
 | `--ref-sample` | prepare, extract, qc, run | the reference sample, CHM13 unless set |
 | `--drop-sample`, `--keep-all-samples` | prepare, run | the samples `prepare` removes ([Dropped samples](#dropped-samples)) |
 | `--scores` | realign, qc, run | abPOA's scores |
@@ -656,9 +657,11 @@ with more than one row and whose package has at least two alleles.
   than `-j` run. A pair's estimate (`qc.pair_bytes`) is 100 MB and the [formula](#memory) for its
   alignment, unbanded or banded by `--max-cells`, plus, with `--graph`, 120 bytes per base of the
   region's alleles for the graph positions `qc` holds while it aligns (`qc.GRAPH_BYTES`); a
-  region's (`qc.peak_bytes`) is that of its largest compared pair. A pair whose estimate alone
-  exceeds `--max-memory` is not compared, and counts in the `skipped` column and in no other; raise
-  `--max-memory`, on a machine with the memory, to compare it.
+  region's (`qc.peak_bytes`) is that of its largest compared pair, with 16 KB pages whatever the
+  machine's. A pair whose estimate exceeds `--max-pair-memory` GB (`qc.MAX_PAIR_MEMORY`, 64; 0 sets
+  no limit) is not compared, on any machine, and counts in the `skipped` column and in no other. The
+  budget decides only how many regions run at once: if a region needs more than `--max-memory` on its
+  own, `qc` stops before it measures anything and names it.
 - With `--sample N`, `qc` draws N of the `ok` MSAs with more than one row, and measures those whose
   package has at least two alleles, so it can measure fewer than N.
 - `--ref-sample`: for a package without a `ref` field, `qc` reads the reference allele from this
@@ -1009,7 +1012,7 @@ with `--graph`.
 | `ref_sv`, `ref_sv_opt` | runs of 50 or more gap columns opposite bases, in the implied and optimal reference alignments |
 | `forced`, `forced_opt` | columns of the implied and optimal alignments (random and reference pairs) in a forced-homology window |
 | `banded` | the number of random and reference pairs compared with a banded alignment because their optimal alignment would exceed `--max-cells` |
-| `skipped` | the number of random and reference pairs not compared, because the memory estimate of their alignment alone exceeds `--max-memory` ([qc](#qc)) |
+| `skipped` | the number of random and reference pairs not compared, because the memory estimate of their alignment exceeds `--max-pair-memory` ([qc](#qc)) |
 | `graph_pair_tp`, `graph_pair_msa` | over the random pairs: the aligned base pairs that both the graph and the optimal alignment have, and that the graph has |
 | `graph_ref_tp`, `graph_ref_msa` | the same, for the reference pairs |
 | `graph_sequence` | the bases of the nodes the region's runs visit in the graph |
@@ -1079,7 +1082,7 @@ instead.
 | `realign` | `<out>.manifest.json` | `packages` | `method`, `select`, `shard`, `timeout`, `max_cells`, `max_memory`, `scores`, `min_share`, `centre`, `max_work`, `max_region_memory`, `max_address_space`, `max_excess` | abpoa |
 | `replace` | `<gbz>.manifest.json` with `--gbz`, else `<out>.manifest.json` | `graph`, and `msas` or `msas_0`, ... | `extract`, `id_mode`, `id_start` | vg |
 | `verify` | `<out>.manifest.json`, only with `-o` | `before`, `after` | none | vg |
-| `qc` | `<out>.manifest.json` | `msas`, and `graph` with `--graph` | `extract`, `pairs`, `refs`, `sample`, `scores`, `max_cells`, `max_memory` | abpoa, and vg with `--graph` |
+| `qc` | `<out>.manifest.json` | `msas`, and `graph` with `--graph` | `extract`, `pairs`, `refs`, `sample`, `scores`, `max_cells`, `max_memory`, `max_pair_memory` | abpoa, and vg with `--graph` |
 | `merge` | `<out>.manifest.json` | `gbz_0`, ... | none | vg |
 | `union` | `<out>.manifest.json` | `base`, `add` | none | none |
 | `project` | `<out>.manifest.json` | `union`, `msas` | none | none |
@@ -1415,7 +1418,8 @@ as a list of `('>' or '<', node id)` in the region's forward orientation, `lengt
 id to its length, and `interior_bp` is `graph_sequence`; the dict then has `qc.GRAPH_FIELDS` too. A
 pair whose estimate, `qc.pair_bytes(n, m, max_cells)` for alleles of n and m bases plus
 `qc.GRAPH_BYTES` per base of the alleles when `graph` is given, exceeds `max_bytes` is not compared
-and counts in `skipped`; None, the default, skips none. `qc.compared_pairs(pkg, rows, pairs, refs)`
+and counts in `skipped`; None, the default, skips none. `qc.run` takes it as `max_pair_memory`, in
+GB. `qc.compared_pairs(pkg, rows, pairs, refs)`
 lists the pairs `region_qc` compares, in order, as `(kind, a, b)`, and
 `qc.peak_bytes(pkg, rows, pairs, refs, max_cells, max_bytes, graph)` is the largest estimate among
 those it does not skip ([qc](#qc)), `graph` being true when `region_qc` is given one.
@@ -1490,8 +1494,6 @@ its check, after renaming it to `<out_gbz>.failed`.
 - On the command line, `realign` and `qc` align with abPOA only. Another aligner needs the Python
   API and an `msas.jsonl.gz` written with `realign.write_msas`.
 - `qc`'s pairwise alignments have no time limit: `realign`'s `--timeout` does not apply to them.
-  `qc` skips a pair whose estimate exceeds its `--max-memory`, so its measures, unlike `realign`'s
-  records, can differ with the budget it is given.
   `qc` measures a pair over `--max-cells` against a banded alignment, which may not be optimal, so
   in a region of long alleles its yardstick is weaker; the `banded` column shows how many pairs that
   applies to.
