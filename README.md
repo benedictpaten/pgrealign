@@ -11,10 +11,12 @@ ends inside it.
 For each region, pgrealign:
 
 1. extracts the alleles and fragments that the walks spell there;
-2. builds one multiple alignment of them, a medoid star: the alleles are aligned to a centre allele,
-   the one closest in k-mer content to the others, each counted once for every walk that spells it,
-   and the pairwise alignments are merged into one; a fragment that occurs in an allele takes that
-   allele's row, and any other fragment is aligned to the centre with the alleles;
+2. builds one multiple alignment of them, a star: the alleles are aligned to a centre allele, the
+   reference's, so that each allele's alignment to the reference is its optimal one, or, in a region
+   the reference does not span or where most haplotypes are much longer than the reference, the one
+   closest in k-mer content to the others, each counted once for every walk that spells it; the pairwise alignments are merged into one, a fragment that occurs
+   in an allele takes that allele's row, and any other fragment is aligned to the centre with the
+   alleles;
 3. replaces the nodes between the anchors with a graph built from the alignment, and rewrites each
    walk through it.
 
@@ -58,7 +60,9 @@ walk on the contig, `<sample>#0#chr20`. `--targets` is a BED of intervals on tha
 `catalogs/chm13v2.0_tr.bed.gz` lists the tandem repeats of CHM13 v2.0 on chr1-22, chrX and chrY,
 and `pgrealign catalog` builds such a catalogue for another reference. `-j` sets the most regions
 realign and qc work on at once, and can be the number of cores: they start a region only while the
-memory estimates of those running fit in `--max-memory`, half the machine's memory by default. `-t`
+memory estimates of those running fit in `--max-memory`, half the machine's memory by default.
+Which regions realign aligns does not depend on that budget or on the machine: it decides from each
+region's own size, before aligning anything, and has no time limit unless given `--timeout`. `-t`
 sets how many threads vg uses. The outputs go to `out/chr20/`:
 
 | output | stage | contents |
@@ -105,7 +109,7 @@ picks. Only a region that is `ok` at all three is replaced; every other region k
 | `prepare` | cuts one contig's component, the connected part of the graph that holds its reference walk, out of a whole-genome GBZ, with its snarls and the reference walk's node positions, and by default drops the gref_CHM13 cover ([Known gaps](#known-gaps)); with `--graph`, writes the snarls and positions of a graph that is already the contig's, such as a Minigraph-Cactus chromosome `.vg` |
 | `regions` | places each target between two anchor nodes, and merges regions that would interfere |
 | `extract` | reads the contig's walks once, and writes the alleles and fragments of each `ok` region as a package |
-| `realign` | builds the medoid-star alignment of each `ok` package, several at once with `-j` |
+| `realign` | builds the star alignment of each `ok` package, several at once with `-j`; `--plan` says, without aligning, which it would align and how much memory they need |
 | `replace` | puts each alignment's graph in place of its region's nodes, and rewrites the walks through it |
 | `verify` | checks that every path of the realigned contig spells what it did before, up to letter case |
 | `qc` | measures how well each alignment, and the original graph's, agrees with optimal pairwise alignments |
@@ -175,9 +179,10 @@ for name, row in msa.rows.items():                      # one gapped row per all
   rebuild it once verify has passed.
 - run takes a stage as done when its output exists, whatever options made it: after changing an
   option, delete the outputs of that stage and of every stage after it.
-- abPOA reserves address space for the whole matrix of every alignment, even a banded one: over
-  100 GB for two 100 kb alleles. macOS grants it; on Linux, a reservation larger than RAM and swap
-  should be refused, and the region left as it was (`aligner_failed`). This is untested on Linux
+- abPOA reserves address space for the whole matrix of every alignment, even a banded one: 256 GB
+  for two 100 kb alleles. macOS grants it; Linux refuses a reservation larger than its memory and
+  swap. realign leaves a region that would need more than `--max-address-space`, 128 GB, as it is
+  on every machine, and stops, to be resumed elsewhere, if a machine refuses one within it
   ([docs/reference.md](docs/reference.md#limits)).
 
 ## Documentation
@@ -204,7 +209,7 @@ end-to-end test takes a two-contig genome through run and merge, and needs both 
 ```
 pyproject.toml    the package's build settings and the pgrealign command
 pgrealign/        the package: one module per stage, except run (pipeline.py) and project (union.py)
-  star.py         the medoid-star alignment, which reads no graph and no file
+  star.py         the star alignment, which reads no graph and no file
   induce.py       the graph of an alignment, used by replace
   graph.py        reading a graph as a stream of GFA lines
   memory.py       abPOA's memory, and running regions in parallel within a memory budget

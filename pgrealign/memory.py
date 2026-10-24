@@ -29,6 +29,14 @@ The band can reach further than |n - m|, as where indels in opposite directions 
 an upper bound in practice, not a guarantee. The memory abPOA takes beyond its matrices, up to about
 50 MB in these runs, and the worker's own are in BASE. With 4 KB pages, as on most Linux systems, the
 per-page part is a quarter as large; that has not been measured.
+
+**abPOA's reservation.** The matrices are reserved whole, 20 bytes a cell, rounded up to a power of two
+(`abpoa_reservation`): two 62,146 bp sequences reserve 2^37 bytes, banded or not. macOS grants any
+reservation. Linux, under its default overcommit policy, refuses one larger than the machine's memory
+and swap, and abPOA then fails ("posix_memalign fail"), so whether such a region can be aligned at all
+depends on the machine. realign therefore refuses, from the package, a region that would need a larger
+reservation than a fixed limit, and treats a refused reservation as a failure of the run, not of the
+region.
 """
 import collections
 import concurrent.futures
@@ -37,6 +45,7 @@ import resource
 
 GB = 2 ** 30
 PAGE = resource.getpagesize()
+ESTIMATE_PAGE = 16 * 1024       # the page size the estimates that decide anything assume: macOS on Apple silicon's
 CELL_BYTES = 20                 # five matrices of 4-byte scores
 BASE = 100 * 2 ** 20            # per region: a worker's interpreter, about 20 MB, and abPOA's own tables
 
@@ -48,6 +57,35 @@ def abpoa_bytes(n, m, banded, page=PAGE):
     if not banded:
         return full
     return min(full, 5 * n * (page + 4 * (abs(n - m) + 2 * (10 + m // 100))))
+
+
+def abpoa_reservation(n, m):
+    """The address space, in bytes, that abPOA reserves to align a sequence of m bases to one of n: its
+    five matrices whole, CELL_BYTES a cell, rounded up to a power of two."""
+    full = CELL_BYTES * (n + 1) * (m + 1)
+    return 1 << (full - 1).bit_length()
+
+
+def granted_bytes():
+    """The largest reservation this machine grants one process, in bytes, as far as can be told, or None for
+    no limit: under Linux's default overcommit policy its memory and swap (MemTotal and SwapTotal in
+    /proc/meminfo), under its strict policy its commit limit, and under 'always overcommit', or elsewhere,
+    none. It decides nothing about a region, only whether realign can align here what it admits."""
+    try:
+        with open('/proc/sys/vm/overcommit_memory') as f:
+            mode = int(f.read())
+        info = {}
+        with open('/proc/meminfo') as f:
+            for line in f:
+                key, value = line.split(':', 1)
+                info[key] = int(value.split()[0]) * 1024
+    except (OSError, ValueError, IndexError):
+        return None
+    if mode == 1:
+        return None
+    if mode == 2:
+        return info.get('CommitLimit')
+    return info.get('MemTotal', 0) + info.get('SwapTotal', 0)
 
 
 def any_pair_bytes(lengths, max_cells, page=PAGE):

@@ -103,7 +103,7 @@ This section and those that follow it, up to
 
 | term | meaning |
 |---|---|
-| medoid star, centre | the way `realign` builds an MSA ([method.md](method.md#realign-the-medoid-star)): every other allele, and every fragment found in no allele (an unplaced fragment), is aligned to one allele, the centre, and the pairwise alignments are merged; a fragment found in an allele takes that allele's row |
+| star, centre | the way `realign` builds an MSA ([method.md](method.md#realign-the-star)): every other allele, and every fragment found in no allele (an unplaced fragment), is aligned to one allele, the centre, and the pairwise alignments are merged; a fragment found in an allele takes that allele's row |
 | medoid | the centre `realign` chooses: the allele of positive weight whose weighted sum of k-mer distances to the other alleles is least, a k-mer being a substring of length k |
 
 ### The stages and their files
@@ -154,12 +154,15 @@ Options that control the same thing in several stages:
 | `--abpoa` | realign, qc, run | the abPOA binary |
 | `-t`, `--threads` | prepare, extract, replace, run | threads for vg |
 | `-j`, `--jobs` | catalog, realign, qc, run | the most work done in parallel |
-| `--max-memory` | realign, qc, run | the memory, in GB, that the regions worked on at once may need in all ([Memory](#memory)) |
+| `--max-memory` | realign, qc, run | the memory, in GB, that the regions worked on at once may need in all; it decides only how many run at once ([Memory](#memory)) |
+| `--max-pair-memory` | qc, run | the largest pair `qc` compares, by its memory estimate ([qc](#qc)) |
 | `--ref-sample` | prepare, extract, qc, run | the reference sample, CHM13 unless set |
 | `--drop-sample`, `--keep-all-samples` | prepare, run | the samples `prepare` removes ([Dropped samples](#dropped-samples)) |
 | `--scores` | realign, qc, run | abPOA's scores |
 | `--max-cells` | realign, qc, run | the largest pairwise alignment run unbanded ([Limits](#limits), [qc](#qc)) |
-| `--timeout` | realign, run | `realign`'s time limit per region ([Limits](#limits)) |
+| `--centre`, `--max-excess` | realign, run | the allele each star is built around: the reference allele, unless too much of the haplotypes' sequence lies beyond its length, or the medoid ([realign](#realign)) |
+| `--max-work`, `--max-region-memory`, `--max-address-space` | realign, run | the largest region `realign` aligns, by its work, memory estimate and abPOA's reservation, each decided from its package ([Limits](#limits)) |
+| `--timeout` | realign, run | `realign`'s time limit per region, none by default ([Limits](#limits)) |
 | `--min-share` | realign, run | the least share of an allele's 15-mers with the centre for its region to be aligned ([Limits](#limits)) |
 | `--max-internal-bp` | extract, run | the longest anchor-free walk `extract` records ([Statuses](#statuses)) |
 | `--id-start` | replace, run | the first node id `replace` gives ([Node ids](#node-ids)) |
@@ -363,9 +366,13 @@ regions `complex` for this reason (the summary's `internal_too_long`), at the co
 
 ### realign
 
-`realign` builds the medoid-star alignment of each region with abPOA. It reads `--packages`, the
+`realign` builds the star alignment of each region with abPOA. It reads `--packages`, the
 `packages.jsonl.gz` from `extract` (or from `union`), and writes `msas.jsonl.gz` to `-o`
-([format](#msasjsonlgz)).
+([format](#msasjsonlgz)). Each star is built around the region's reference allele, where it has one
+of positive weight and no more than `--max-excess` (`realign.MAX_EXCESS`, 0.1) of the haplotypes'
+bases lie beyond its length, and around the medoid of its alleles otherwise; `--max-excess 0` takes
+the reference allele whatever, and `--centre medoid` takes the medoid always
+([method.md](method.md#the-centre)).
 
 It aligns the packages whose status is `ok` and that `--select` selects; its summary lists the rest
 of its shard ([below](#parallel-runs-and-resuming)) as `skipped`, by status or as `not_selected`.
@@ -377,7 +384,10 @@ It always realigns a region that has fragments.
 #### Limits
 
 `replace` leaves a region that `realign` cannot align as it is, and the region's record names the
-reason in its status ([statuses](#msasjsonlgz)).
+reason in its status ([statuses](#msasjsonlgz)). Whether a region is aligned is decided from its
+package alone, before anything is aligned, so it does not depend on the machine, on the memory
+budget or on how long anything takes: the same packages give the same records anywhere. Each limit
+on a region's size below leaves a region that exceeds it `too_big`, with a message that says which.
 
 - `--max-cells` bounds the cells of one unbanded pairwise alignment, and so its memory: abPOA
   touches 20 bytes per cell, so the default allows about 8 GB. An alignment to the centre whose
@@ -394,14 +404,34 @@ reason in its status ([statuses](#msasjsonlgz)).
   with the memory to match, to align such regions.
 - A region whose alleles hold more than `realign.MAX_TOTAL_BP` (40,000,000) bases in all is also
   `too_big`, because choosing the centre holds every allele's k-mer counts in memory.
-- A region whose memory estimate alone exceeds `--max-memory` is also `too_big`, and is not started
-  ([Memory](#memory)).
+- `--max-work` bounds the region's work, about the cells of dynamic-programming matrices that its
+  alignments fill (`realign.work`): for each allele and fragment aligned to the centre, the product
+  of the two lengths, or, where that exceeds `--max-cells` and the alignment is banded, the centre's
+  length times the band, which spans the two lengths' difference and 10 cells plus 1% of the
+  other's length either side (`realign.banded_cells(n, m)`); and for the insertion slots, the bases
+  by which each member is longer than the centre, its excess, taken to fall in one slot, each
+  member's excess aligned, banded, to the longest. Around a medoid, which is not known before the
+  region runs, the longest allele stands in for the centre, and the slots are not counted. Run time follows the work
+  ([method.md](method.md#limits-and-regions-that-keep-their-old-subgraph)). The default is
+  `realign.MAX_WORK`, 2 × 10^11 cells, and 0 sets no limit.
+- `--max-region-memory` bounds the region's memory estimate, in GB ([Memory](#memory)). The default
+  is `realign.MAX_REGION_MEMORY`, 64, and 0 sets no limit.
+- `--max-address-space` bounds the address space, in GB, that abPOA reserves for one of the
+  region's alignments (`realign.reservation`): the alignments to the centre, and the slots' as the
+  work takes them, of which the second longest excess aligned to the longest reserves the most;
+  around a medoid, the longest allele stands in for the centre, and the longest sequence against
+  one of the same length bounds the slots ([Memory](#memory)). Linux refuses a reservation larger
+  than the machine's memory and swap, so without this limit a region that needs one would be
+  aligned on a large machine and fail on a small one. The default is `realign.MAX_ADDRESS_SPACE`,
+  128, which admits alignments of two sequences of up to 82,896 bp, or of 62 kb to 110 kb, and 0
+  sets no limit.
 - `--timeout` sets a time limit, in seconds, for one region; a region stopped by it is `timeout`.
-  `realign` checks the limit while choosing the centre, once per allele, and at each abPOA call,
-  which it does not start past the limit and stops when the limit is reached. The work before the
-  first check (counting k-mers) and after the last abPOA call is not limited, so a region can run
-  past the limit and still be `ok`. Raise it to align regions left `timeout`.
-- `--min-share` refuses a region, as `not_homologous`, once its centre is chosen and before anything
+  There is none unless one is given, since a time limit makes a region's outcome depend on the
+  machine and on what else runs there. `realign` checks the limit while choosing a medoid, once per
+  allele, and at each abPOA call, which it does not start past the limit and stops when the limit is
+  reached. The work before the first check (counting k-mers) and after the last abPOA call is not
+  limited, so a region can run past the limit and still be `ok`.
+- `--min-share` refuses a region, as `not_homologous`, once its centre is known and before anything
   is aligned, when an allele of positive weight shares less than that fraction of its distinct
   15-mers with the centre, over those of whichever of the two has fewer. An allele shorter than
   `star.HOMOLOGY_BP` (100) bases is not judged, nor is any allele when the centre is that short, nor
@@ -411,15 +441,25 @@ reason in its status ([statuses](#msasjsonlgz)).
 
 `--scores` sets abPOA's scores for every alignment ([Scores](#scores-and-scores)).
 
+`--plan` aligns nothing and writes nothing, but prints what `realign` would do with the packages
+under the same options: the regions it would align (`admitted`), those it would leave `too_big`,
+counted by the limit each exceeds (`too_big`), the rest (`skipped`), the admitted regions' `work` in
+all, and `need_gb`, the largest admitted region's memory estimate in GB, which is the least
+`--max-memory` that aligns them, with that region's id (`largest`); and `reservation_gb`, the largest
+reservation abPOA would make for them, against `granted_gb`, the largest this machine grants (null for
+no limit), which must be at least as large ([Memory](#memory)).
+
 #### Memory
 
-Before it starts a region, `realign` estimates from the region's package the most memory the region
-can take. It starts regions in package order while the estimates of the regions running, the next
+Before it starts, `realign` estimates from each region's package the most memory the region can
+take. It starts regions in package order while the estimates of the regions running, the next
 one's included, add up to no more than `--max-memory` GB, and while fewer than `-j` run. The
-default is half the machine's physical memory. A region whose estimate alone exceeds `--max-memory`
-is not started: `realign` records it as `too_big`, with a message that gives the estimate and the
-budget. Raise `--max-memory`, on a machine with the memory, to align such regions. Since the budget
-bounds the total, `-j` can be the number of cores.
+default is half the machine's physical memory. The budget decides only how many regions run at
+once, never which are aligned: a region whose estimate exceeds `--max-region-memory` is `too_big`
+under any budget, and if one within it needs more than `--max-memory` on its own, `realign` stops
+before it aligns anything, with an error that names the region and its estimate. Give `realign` that
+much (`--plan`'s `need_gb`), or lower `--max-region-memory` below it, which leaves such regions
+`too_big`. Since the budget bounds the total, `-j` can be the number of cores.
 
 abPOA aligns a sequence of m bases to one of n bases given before it (the centre, when `realign`
 aligns an allele to the centre) in five matrices of 4-byte scores, with one row per base of the
@@ -441,19 +481,35 @@ The last two are only 10.1 and 11.4 GB resident: an alignment's resident size un
 needs. With 4 KB pages, as on most Linux systems, the per-page part is a quarter as large; that has
 not been measured.
 
+abPOA reserves its five matrices whole, 20 bytes for each of (n + 1)(m + 1) cells, rounded up to a
+power of two, banded or not (`memory.abpoa_reservation`): two sequences of 62,146 bp reserve 2^37
+bytes, 128 GB, though banded they touch about 6 GB. macOS grants such a reservation; Linux grants
+one only up to the machine's memory and swap, and abPOA then exits with `posix_memalign fail`.
+`--max-address-space` leaves such regions `too_big` on every machine alike ([Limits](#limits)). A
+machine must also grant the reservations of the regions within it: `realign` stops before it aligns
+anything, naming the largest, if one would need more than this machine's memory and swap (its commit
+limit under Linux's strict overcommit policy, and nothing under its 'always' policy or elsewhere). A
+region the machine fails all the same, by refusing abPOA's reservation, killing abPOA (as the OOM killer
+does) or running the worker out of memory, is not recorded: `realign` aligns the others, then stops
+with an error that names it, and run again where it can be aligned, or with lower limits, it resumes
+from the regions it finished ([below](#parallel-runs-and-resuming)).
+
 A region's estimate, `realign.peak_bytes`, is the sum of:
 - 100 MB for the worker and abPOA's own tables (`memory.BASE`);
 - the k-mer counts that choose the centre, 80 bytes per base of the alleles, and 50 more per base of
   the longest allele for comparing two alleles or sketching one (`realign.KMER_BYTES` and
   `realign.COMPARE_BYTES`);
-- abPOA's matrices for the worst alignment the region can need: the largest value of the formula
-  over every two of its alleles and fragments, in either order, since the centre is not known before
-  the region runs, banded when the product of their lengths exceeds `--max-cells`; and at least its
-  value for the longest sequence banded against one of the same length, the bound taken for the
-  alignments of insertions to one another.
+- abPOA's matrices for the worst alignment the region can need, the largest value of the formula:
+  around the reference allele, over its alignments to the reference, banded when the product of the
+  two lengths exceeds `--max-cells`, and over the slots' as the work takes them, each member's excess
+  aligned, banded, to the longest excess; around a medoid, which is not known before the region
+  runs, over every two of its alleles and fragments, in either order, banded under the same rule,
+  and the longest sequence banded against one of the same length, the bound taken for the slots.
 
-A region that the checks on cells and on total bases make `too_big`, or that has no allele, is
-estimated at 100 MB, since it is refused before any alignment. The estimate is an upper bound in
+The page size P in the formula is `realign.ESTIMATE_PAGE`, 16 KB, whatever the machine's, so that the
+estimate, and with it which regions are `too_big`, is the same on every machine; with Linux's 4 KB
+pages it overstates a banded alignment. A region that the checks on cells and on total bases make
+`too_big`, or that has no allele, is estimated at 100 MB, since it is refused before any alignment. The estimate is an upper bound in
 practice, not a guarantee: a band can reach further than |n − m| from the diagonal. It leaves out
 the parent process, which holds every package to align and every finished record.
 [whole-genome.md](whole-genome.md#memory) gives the estimates of two contigs' regions.
@@ -485,9 +541,10 @@ is left and run `realign` again.
 
 The summary holds the number of regions `realigned`, by status, and `skipped`, by reason, the total
 `aligner_seconds`, the number of regions `resumed` from a partial file, and `peak_estimate_gb`, the
-largest sum of the estimates of the regions running at once ([Memory](#memory)). A region recorded
-as `too_big` for memory is in the partial file like any other, so a resumed run keeps it whatever
-`--max-memory` it is given.
+largest sum of the estimates of the regions running at once ([Memory](#memory)). The limits on a
+region's size apply afresh to a resumed run: a region the partial file holds is `too_big` if the
+limits given now make it so, whatever its record, and aligned if its record is `too_big` but they no
+longer make it so, so that the run ends as a fresh one would.
 
 ### replace
 
@@ -600,9 +657,11 @@ with more than one row and whose package has at least two alleles.
   than `-j` run. A pair's estimate (`qc.pair_bytes`) is 100 MB and the [formula](#memory) for its
   alignment, unbanded or banded by `--max-cells`, plus, with `--graph`, 120 bytes per base of the
   region's alleles for the graph positions `qc` holds while it aligns (`qc.GRAPH_BYTES`); a
-  region's (`qc.peak_bytes`) is that of its largest compared pair. A pair whose estimate alone
-  exceeds `--max-memory` is not compared, and counts in the `skipped` column and in no other; raise
-  `--max-memory`, on a machine with the memory, to compare it.
+  region's (`qc.peak_bytes`) is that of its largest compared pair, with 16 KB pages whatever the
+  machine's. A pair whose estimate exceeds `--max-pair-memory` GB (`qc.MAX_PAIR_MEMORY`, 64; 0 sets
+  no limit) is not compared, on any machine, and counts in the `skipped` column and in no other. The
+  budget decides only how many regions run at once: if a region needs more than `--max-memory` on its
+  own, `qc` stops before it measures anything and names it.
 - With `--sample N`, `qc` draws N of the `ok` MSAs with more than one row, and measures those whose
   package has at least two alleles, so it can measure fewer than N.
 - `--ref-sample`: for a package without a `ref` field, `qc` reads the reference allele from this
@@ -884,9 +943,9 @@ file, including gzip files concatenated with `cat`.
 | status | meaning |
 |---|---|
 | `ok` | the MSA was built |
-| `too_big` | even a banded alignment of the longest allele or fragment would exceed `--max-cells`, or the alleles hold more than `realign.MAX_TOTAL_BP` bases in all, or the region's memory estimate alone exceeds `--max-memory` ([limits](#limits)) |
-| `timeout` | over `--timeout` |
-| `aligner_failed` | abPOA exited with an error, or returned rows that do not match its input |
+| `too_big` | even a banded alignment of the longest allele or fragment would exceed `--max-cells`, or the alleles hold more than `realign.MAX_TOTAL_BP` bases in all, or the region's work, memory estimate or abPOA's reservation exceeds `--max-work`, `--max-region-memory` or `--max-address-space`; the message says which ([limits](#limits)) |
+| `timeout` | over `--timeout`, which is unset unless given |
+| `aligner_failed` | abPOA exited with an error, or returned rows that do not match its input. A failure of the machine (abPOA's reservation refused, abPOA killed by a signal, the worker out of memory) is not recorded at all ([Memory](#memory)) |
 | `no_alleles` | the package has fragments but no allele |
 | `not_homologous` | an allele shares less than `--min-share` of its 15-mers with the centre; the message names the allele that shares least, its weight, and what it shares reverse-complemented ([limits](#limits)) |
 | `error` | any other failure, as the exception's type and message; it means a bug |
@@ -953,7 +1012,7 @@ with `--graph`.
 | `ref_sv`, `ref_sv_opt` | runs of 50 or more gap columns opposite bases, in the implied and optimal reference alignments |
 | `forced`, `forced_opt` | columns of the implied and optimal alignments (random and reference pairs) in a forced-homology window |
 | `banded` | the number of random and reference pairs compared with a banded alignment because their optimal alignment would exceed `--max-cells` |
-| `skipped` | the number of random and reference pairs not compared, because the memory estimate of their alignment alone exceeds `--max-memory` ([qc](#qc)) |
+| `skipped` | the number of random and reference pairs not compared, because the memory estimate of their alignment exceeds `--max-pair-memory` ([qc](#qc)) |
 | `graph_pair_tp`, `graph_pair_msa` | over the random pairs: the aligned base pairs that both the graph and the optimal alignment have, and that the graph has |
 | `graph_ref_tp`, `graph_ref_msa` | the same, for the reference pairs |
 | `graph_sequence` | the bases of the nodes the region's runs visit in the graph |
@@ -1020,10 +1079,10 @@ instead.
 | `prepare` | `<out>/<contig>.manifest.json` | `gbz` | `contig`, `ref_sample`, `drop_samples` | vg |
 | `regions` | `<out>.manifest.json` | `targets`, `snarls`, `ref` | `contig`, `pad`, `max_span` | vg |
 | `extract` | `<out>/extract.manifest.json` | `graph`, `regions` | `ref_sample`, `max_internal_bp` | vg |
-| `realign` | `<out>.manifest.json` | `packages` | `method`, `select`, `shard`, `timeout`, `max_cells`, `max_memory`, `scores` | abpoa |
+| `realign` | `<out>.manifest.json` | `packages` | `method`, `select`, `shard`, `timeout`, `max_cells`, `max_memory`, `scores`, `min_share`, `centre`, `max_work`, `max_region_memory`, `max_address_space`, `max_excess` | abpoa |
 | `replace` | `<gbz>.manifest.json` with `--gbz`, else `<out>.manifest.json` | `graph`, and `msas` or `msas_0`, ... | `extract`, `id_mode`, `id_start` | vg |
 | `verify` | `<out>.manifest.json`, only with `-o` | `before`, `after` | none | vg |
-| `qc` | `<out>.manifest.json` | `msas`, and `graph` with `--graph` | `extract`, `pairs`, `refs`, `sample`, `scores`, `max_cells`, `max_memory` | abpoa, and vg with `--graph` |
+| `qc` | `<out>.manifest.json` | `msas`, and `graph` with `--graph` | `extract`, `pairs`, `refs`, `sample`, `scores`, `max_cells`, `max_memory`, `max_pair_memory` | abpoa, and vg with `--graph` |
 | `merge` | `<out>.manifest.json` | `gbz_0`, ... | none | vg |
 | `union` | `<out>.manifest.json` | `base`, `add` | none | none |
 | `project` | `<out>.manifest.json` | `union`, `msas` | none | none |
@@ -1071,7 +1130,7 @@ star_msa(alleles, fragments=(), align=None, centre=None, k=K, deadline=None, max
 It returns a [`StarMSA`](#starmsa). Its rows spell the inputs upper-cased. The aligner sees only A,
 C, G, T and N: `star_msa` gives it any other character as N and restores the character in the rows.
 
-`star_msa` builds the medoid star that [method.md](method.md#realign-the-medoid-star) describes. The
+`star_msa` builds the star that [method.md](method.md#realign-the-star) describes. The
 centre's distances, one minus the Jaccard index of two alleles' k-mer multisets, are exact unless
 comparing every pair would take more than `star.MEDOID_WORK` (10^9) steps; they are then estimated
 from `star.sketch`, each multiset's `star.SKETCH` (1,000) smallest hashes. `star_msa` drops the
@@ -1167,8 +1226,10 @@ except the long-gap extension, which stays 1 ([method.md](method.md#scores) give
 |---|---|---|
 | `RealignError` | `error` | `star_msa` is given no allele |
 | `TooBig` | `too_big` | `realign.realign_package`'s size checks fail ([limits](#limits)); `star_msa` does not raise it |
-| `TimedOut` | `timeout` | choosing the centre runs past `deadline`, or `Abpoa` runs past its own |
+| `TimedOut` | `timeout` | choosing the medoid runs past `deadline`, or `Abpoa` runs past its own |
 | `AlignerFailed` | `aligner_failed` | abPOA fails, or a pairwise alignment does not spell its inputs |
+| `ReservationRefused` | `reservation_refused` | abPOA fails because the system refused its reservation (`posix_memalign fail`); a subclass of `AlignerFailed`, which `realign.run` does not record but stops on ([Memory](#memory)) |
+| `AlignerKilled` | `aligner_killed` | abPOA is killed by a signal, as by the OOM killer; a subclass of `AlignerFailed`, which `realign.run` does not record but stops on |
 | `NotHomologous` | `not_homologous` | `star_msa` is given `min_share`, and an allele shares less than that with the centre (`star.check_homology`) |
 
 `realign` never passes `star_msa` a package without alleles: it records `no_alleles` for one itself.
@@ -1271,26 +1332,47 @@ else:
 ### `realign.realign_package`
 
 ```python
-realign_package(pkg, abpoa='abpoa', timeout=..., max_cells=..., workdir=None, scores=SCORES,
-                min_share=...)
-peak_bytes(pkg, max_cells=..., page=...)
+realign_package(pkg, abpoa='abpoa', timeout=None, max_cells=..., workdir=None, scores=SCORES,
+                min_share=..., centre='ref', max_work=..., max_region_memory=..., max_address_space=...)
+excess(pkg, aid)
+centre_of(pkg, centre='ref', max_excess=...)
+work(pkg, centre='ref', max_cells=...)
+peak_bytes(pkg, max_cells=..., page=ESTIMATE_PAGE, centre='ref')
+reservation(pkg, centre='ref')
+refusal(pkg, max_cells=..., centre='ref', max_work=..., max_region_memory=..., max_address_space=...)
+plan(packages_path, select='any', shard=(0, 1), max_cells=..., centre='ref', max_work=...,
+     max_region_memory=..., max_address_space=...)
 run(packages_path, out_path, select='any', shard=(0, 1), jobs=1, max_memory=None, **kw)
 ```
 
 `realign_package` aligns one package with `star_msa` and `Abpoa`, and returns its record in the
 [`msas.jsonl.gz` format](#msasjsonlgz). The package is a dict in the [package
-format](#packagesjsonlgz), of which it reads `id`, `alleles` and `fragments`. It applies `realign`'s
-[limits](#limits) on cells and total bases, passing `max_cells` and `min_share` to `star_msa`, and records a failure
-to align in the record's status rather than raising it: `no_alleles` for a package without alleles,
-`too_big` for its own size checks, the status of any `RealignError` that `star_msa` or `Abpoa`
-raises, and `error` for any other exception. `realign.write_msas(path, records)` writes records to
-a `msas.jsonl.gz`.
+format](#packagesjsonlgz), of which it reads `id`, `ref`, `alleles` and `fragments`. It applies
+`realign`'s [limits](#limits), passing `max_cells` and `min_share` to `star_msa` and the centre that
+`centre_of` names, and records a failure to align in the record's status rather than raising it:
+`no_alleles` for a package without alleles, `too_big` when `refusal` gives a reason, the status of
+any `RealignError` that `star_msa` or `Abpoa` raises, `reservation_refused` among them, and `error`
+for any other exception. `timeout` None sets no time limit, and `max_work`, `max_region_memory` and
+`max_address_space` 0 or None set no such limit. `realign.write_msas(path, records)` writes records
+to a `msas.jsonl.gz`.
 
-`peak_bytes` is a package's [memory estimate](#memory) in bytes, `page` being the page size, the
-machine's by default. `run` is the `realign` stage: it passes `kw` (`abpoa`, `timeout`, `max_cells`,
-`workdir`, `scores`, `min_share`) to `realign_package`, runs within `max_memory` GB, None meaning half the
-machine's physical memory, records a package whose estimate alone exceeds that as `too_big` itself,
-and returns the summary.
+`excess` is the share of the haplotypes' bases that lie beyond allele `aid`'s length, each allele
+weighted by its haplotypes. `centre_of` is the id of the allele the star is built around, the reference
+allele when `centre` is 'ref', the package has one of positive weight and its excess is no more than
+`max_excess` (None for no limit), or None for the medoid; the estimates, `refusal`, `plan`,
+`realign_package` and `run` take `max_excess` too. `work`, `peak_bytes` and
+`reservation` are a package's [work](#limits), [memory estimate](#memory) in bytes, `page` being the
+page size, and abPOA's largest reservation in bytes, and `refusal` is the message of the first
+limit the package exceeds, or None. `plan` is `realign --plan`. `run` is the `realign` stage: it
+passes `kw` (`abpoa`, `timeout`, `max_cells`, `workdir`, `scores`, `min_share`, `centre` and the
+three limits) to `realign_package`, records the packages `refusal` gives a reason for as `too_big`
+itself, runs the others within `max_memory` GB, None meaning half the machine's physical memory,
+raises `RuntimeError` before aligning anything when one of them alone needs more, and returns the
+summary. It also raises `RuntimeError` before aligning anything when a region it admits would need a
+larger reservation than `memory.granted_bytes()`; a region whose status is one of
+`realign.MACHINE_FAILURES` is left out of the partial file, and `run` raises `RuntimeError` once the
+others are done. `refusal` and the estimates count only the fragments that occur in no allele, since
+`star_msa` places the others without aligning them.
 
 `realign_package` always uses abPOA. To put another aligner into the pipeline, call `star_msa` with
 it for each `ok` package and write records with `realign.write_msas`, each with `id`, `status` set
@@ -1336,7 +1418,8 @@ as a list of `('>' or '<', node id)` in the region's forward orientation, `lengt
 id to its length, and `interior_bp` is `graph_sequence`; the dict then has `qc.GRAPH_FIELDS` too. A
 pair whose estimate, `qc.pair_bytes(n, m, max_cells)` for alleles of n and m bases plus
 `qc.GRAPH_BYTES` per base of the alleles when `graph` is given, exceeds `max_bytes` is not compared
-and counts in `skipped`; None, the default, skips none. `qc.compared_pairs(pkg, rows, pairs, refs)`
+and counts in `skipped`; None, the default, skips none. `qc.run` takes it as `max_pair_memory`, in
+GB. `qc.compared_pairs(pkg, rows, pairs, refs)`
 lists the pairs `region_qc` compares, in order, as `(kind, a, b)`, and
 `qc.peak_bytes(pkg, rows, pairs, refs, max_cells, max_bytes, graph)` is the largest estimate among
 those it does not skip ([qc](#qc)), `graph` being true when `region_qc` is given one.
@@ -1350,8 +1433,9 @@ memory), `graph`, `vg` and `threads` included, and `workdir` for its temporary f
 
 ```python
 run_contig(gbz, contig, targets, out_dir, jobs=..., threads=..., vg=None, abpoa='abpoa',
-           ref_sample='CHM13', drop_samples=None, scores=SCORES, timeout=..., max_cells=...,
-           max_internal_bp=..., id_start=None, do_qc=True, max_memory=None, log=print, min_share=...)
+           ref_sample='CHM13', drop_samples=None, scores=SCORES, timeout=None, max_cells=...,
+           max_internal_bp=..., id_start=None, do_qc=True, max_memory=None, log=print, min_share=...,
+           centre='ref', max_work=..., max_region_memory=..., max_address_space=...)
 merge(gbzs, out_gbz, vg=None, workdir=None)
 ```
 
@@ -1390,17 +1474,21 @@ its check, after renaming it to `<out_gbz>.failed`.
   vg gbwt -G g.gref.gfa --gbz-format -g chr1.realigned.gref.gbz
   ```
 
-- abPOA reserves address space for the whole matrix of each alignment, banded or not: about 120 GB
-  for a 58.7 kb centre and a 103.2 kb allele. macOS grants it and only the pages touched take
-  memory. Linux's default overcommit policy refuses a single reservation larger than its RAM and
-  swap, which should make abPOA fail and the region `aligner_failed`, so on a smaller Linux machine
-  the regions that need a band may not realign. This follows from abPOA's allocation code, and has
-  not been tested on Linux. `realign`'s summary counts the `aligner_failed` regions, and each one's
-  `message` says what abPOA reported.
-- `realign`'s memory estimate takes the worst centre, since the centre is chosen only once the
-  region runs. For a region whose alleles differ in length by tens of kb it can be twice what the
-  region's own centre needs, as for the 58.7 kb centre and 103.2 kb allele of [Memory](#memory), so
-  such a region can be left `too_big` though it would fit.
+- abPOA reserves address space for the whole matrix of each alignment, banded or not, rounded up
+  to a power of two: 2^37 bytes, 128 GB, for two sequences of 62,146 bp. macOS grants it and only
+  the pages touched take memory; Linux refuses a reservation larger than its memory and swap.
+  `--max-address-space` keeps the outcome the same on every machine by refusing, on all of them, the
+  regions whose reservation would exceed it, but a machine with less than that limit in memory and
+  swap stops `realign` at the first such region it admits ([Memory](#memory)).
+- The work, memory and address-space estimates take every member's excess over the reference to
+  fall in one slot and be aligned to the longest excess. A member shorter than the reference can
+  insert bases too, and abPOA aligns each of a slot's insertions to the graph it has grown from the
+  ones before, which can be longer than the longest alone, so a slot can take more than the
+  estimates say: they are judgements, not guarantees.
+- `realign`'s memory estimate around a medoid takes the worst centre, since the medoid is chosen
+  only once the region runs. For a region whose alleles differ in length by tens of kb it can be
+  twice what the region's own centre needs, as for the 58.7 kb centre and 103.2 kb allele of
+  [Memory](#memory), so such a region can be left `too_big` though it would fit.
 - Each `realign` or `qc` process keeps to its own `--max-memory`. Several on one machine at once,
   such as the contigs or shards of a genome, each need `--max-memory` set to their share.
 - On the command line, `realign` and `qc` align with abPOA only. Another aligner needs the Python
@@ -1422,6 +1510,7 @@ its check, after renaming it to `<out_gbz>.failed`.
   `--id-start` above other contigs' ids has a range that spans theirs, so `merge` refuses it.
 - `run` decides what to skip only by whether files exist, so it does not notice changed inputs or
   options; delete the outputs of the stage that changed and of every stage after it.
-- `realign` reuses the records in `<out>.partial` without checking the options that made them, so a
-  run with changed `--scores`, `--max-cells`, `--timeout` or `--max-memory` mixes old and new
-  results. Delete `<out>.partial` after changing `realign`'s options.
+- `realign` reuses the records in `<out>.partial` without checking the options that made them, except
+  the limits on a region's size, which it applies afresh, so a run with changed `--scores`,
+  `--centre`, `--max-cells`, `--min-share` or `--timeout` mixes old and new results. Delete
+  `<out>.partial` after changing those.
