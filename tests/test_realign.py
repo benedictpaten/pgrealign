@@ -2,6 +2,7 @@ import contextlib
 import gzip
 import io
 import json
+import math
 import os
 import random
 import shutil
@@ -99,15 +100,20 @@ class TestEstimates(unittest.TestCase):
         self.assertEqual(realign.banded_cells(10000, 100000), 10000 * (90000 + 2 * (10 + 1000)))
         self.assertEqual(realign.banded_cells(90000, 20000), 90000 * 20000)       # the band would span the rows
         self.assertEqual(realign.banded_cells(100000), 100000 * 2 * (10 + 1000))  # equal lengths: the band alone
-        self.assertEqual(realign.work(p, **ref), realign.banded_cells(10000, 100000) + 10000 * 30000 +
+        self.assertEqual(realign.work(p, **ref), realign.long_pair_cells(10000, 100000) + 10000 * 30000 +
                          realign.banded_cells(90000, 20000))
         self.assertEqual(realign.work(p, 'medoid'),
-                         realign.banded_cells(100000, 10000) + realign.banded_cells(100000, 30000))
+                         realign.long_pair_cells(100000, 10000) + realign.long_pair_cells(100000, 30000))
+        # x's: the band, abPOA's own since the lengths differ by more than a wider one allows within MAX_CELLS,
+        # seeding's, taken as the same, and refinement's windows, about sqrt(n m MAX_CELLS)
+        self.assertEqual(star.band_width(10000, 100000, realign.MAX_CELLS), star.default_band(100000))
+        self.assertEqual(realign.long_pair_cells(10000, 100000), 2 * realign.banded_cells(10000, 100000) +
+                         math.isqrt(10000 * 100000 * realign.MAX_CELLS))
         # its memory: the worst of x's and y's alignments to the reference and the slot's, the 20 kb that y
         # adds aligned, banded, to the 90 kb that x adds, whose band spans the 70 kb they differ by
         page = realign.ESTIMATE_PAGE
-        aligner = max(memory.abpoa_bytes(10000, 100000, True, page), memory.abpoa_bytes(10000, 30000, False, page),
-                      memory.abpoa_bytes(90000, 20000, True, page))
+        aligner = max(memory.pair_bytes(10000, 100000, realign.MAX_CELLS, page),
+                      memory.abpoa_bytes(10000, 30000, False, page), memory.abpoa_bytes(90000, 20000, True, page))
         self.assertEqual(aligner, memory.abpoa_bytes(90000, 20000, True, page))
         self.assertEqual(realign.peak_bytes(p, **ref), memory.BASE + realign.KMER_BYTES * 140000 +
                          realign.COMPARE_BYTES * 100000 + aligner)

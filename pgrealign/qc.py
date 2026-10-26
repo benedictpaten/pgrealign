@@ -23,7 +23,7 @@ measures that graph's own alignment of the same pairs too, so each region has a 
   forced-homology window: 40 columns, of which at least 20 have both bases, with more than 30% of
   those mismatched. Homologous tandem-repeat alleles differ mostly by gaps, so such a window shows
   unrelated sequence aligned base against base.
-- `banded`: the pairs compared with a banded alignment rather than an optimal one (below).
+- `banded`: the pairs compared with star.long_pair's alignment rather than an optimal one (below).
 - `skipped`: the pairs not compared, because aligning them would exceed `max_pair_memory` (below).
 - With the graph: `graph_pair_tp` and `graph_pair_msa`, `graph_ref_tp` and `graph_ref_msa`, the same
   counts for the alignment the graph implies, against the same optimal alignments; and
@@ -35,9 +35,9 @@ measures that graph's own alignment of the same pairs too, so each region has a 
 
 The optimal alignment of a pair is global, unbanded and left-normalised, under the scores given, which
 should be those the alignment was built with. A pair whose unbanded alignment would exceed `max_cells`
-cells is compared with abPOA's banded alignment instead, which may fall short of the optimum. For a
-pair through the centre that `realign` also banded, that is the alignment `realign` used. Pairs are
-drawn with a seed fixed per region, so a rerun measures the same pairs.
+cells is compared with the alignment star.long_pair makes of it instead, which may fall short of the
+optimum. For a pair through the centre that is too large for `realign` too, that is the alignment
+`realign` used. Pairs are drawn with a seed fixed per region, so a rerun measures the same pairs.
 
 **Memory.** `pair_bytes` estimates the memory that aligning one pair takes (memory.py), and with
 the graph a region also holds GRAPH_BYTES per base of its alleles, their graph positions, while it
@@ -172,8 +172,8 @@ def compared_pairs(pkg, rows, pairs=20, refs=20):
 
 def pair_bytes(n, m, max_cells=None, page=memory.ESTIMATE_PAGE):
     """The memory, in bytes, that aligning an allele of m bases to one of n bases takes: memory.BASE and
-    abPOA's matrices, banded when n * m exceeds `max_cells`, with pages of `page` bytes."""
-    return memory.BASE + memory.abpoa_bytes(n, m, max_cells is not None and n * m > max_cells, page)
+    abPOA's matrices (memory.pair_bytes), with pages of `page` bytes."""
+    return memory.BASE + memory.pair_bytes(n, m, max_cells, page)
 
 
 def peak_bytes(pkg, rows, pairs=20, refs=20, max_cells=None, max_bytes=None, graph=False):
@@ -187,11 +187,11 @@ def peak_bytes(pkg, rows, pairs=20, refs=20, max_cells=None, max_bytes=None, gra
     return max([b for b in need if max_bytes is None or b <= max_bytes], default=held + memory.BASE)
 
 
-def region_qc(pkg, rows, align, pairs=20, refs=20, max_cells=None, graph=None, max_bytes=None):
+def region_qc(pkg, rows, align, pairs=20, refs=20, max_cells=None, graph=None, max_bytes=None, scores=SCORES):
     """The metrics of one region (see the module docstring), as a dict keyed by FIELDS, and by
     GRAPH_FIELDS too when `graph` is given: ({allele: [(orient, node)]}, {node: length}, interior bp).
     A pair whose pair_bytes, with GRAPH_BYTES per base of the alleles when `graph` is given, exceeds
-    `max_bytes` is not compared, and counts in `skipped`."""
+    `max_bytes` is not compared, and counts in `skipped`. `scores` are the aligner's."""
     alleles = [(a['id'], a['seq'].upper(), a['weight']) for a in pkg['alleles']]
     seqs = {a: s for a, s, _ in alleles}
     out = dict.fromkeys(FIELDS + (GRAPH_FIELDS if graph else []), 0)
@@ -212,7 +212,7 @@ def region_qc(pkg, rows, align, pairs=20, refs=20, max_cells=None, graph=None, m
             return
         banded = max_cells is not None and len(seqs[a]) * len(seqs[b]) > max_cells
         out['banded'] += banded
-        opt = align_pair(seqs[a], seqs[b], align, banded=banded)
+        opt = align_pair(seqs[a], seqs[b], align, max_cells, scores)
         ind = induced(rows[a], rows[b])
         o, m = aligned_pairs(*opt), aligned_pairs(*ind)
         out[kind + '_tp'] += len(o & m)
@@ -256,7 +256,8 @@ def summarise(rows):
 def _one(args):
     pkg, rows, graph, kw = args
     with Abpoa(kw['abpoa'], kw['scores'], workdir=kw['workdir']) as align:
-        return region_qc(pkg, rows, align, kw['pairs'], kw['refs'], kw['max_cells'], graph, kw['max_bytes'])
+        return region_qc(pkg, rows, align, kw['pairs'], kw['refs'], kw['max_cells'], graph, kw['max_bytes'],
+                         kw['scores'])
 
 
 def graph_walks(extract_dir, graph, regions, vg=None, threads=4):

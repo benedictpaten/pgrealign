@@ -156,11 +156,12 @@ for name, row in msa.rows.items():                      # one gapped row per all
   right end, and `internal` when it touches neither.
 - Every row has the same length and, once its `-` gaps are removed, spells its input upper-cased.
 - `align` is an `Abpoa` inside its `with` block, which runs abpoa with the method's scores, or any
-  callable `align(seqs, banded=False)` that returns a global alignment of `seqs`, one row per
-  sequence in order.
+  callable `align(seqs, banded=False, seeded=False)` that returns a global alignment of `seqs`, one
+  row per sequence in order. Pass the aligner's scores as `scores`.
 - `star_msa` asks for `banded=True` when it aligns to each other the distinct insertions that fall
-  between the same two centre bases and, with `max_cells`, for an alignment to the centre whose
-  dynamic-programming matrix, the product of the two lengths, would exceed it.
+  between the same two centre bases. With `max_cells`, it aligns a pair whose dynamic-programming
+  matrix, the product of the two lengths, would exceed it twice, with `banded` the band's margin in
+  cells and with `banded=True, seeded=True`, and keeps the one that scores higher under `scores`.
 
 [docs/reference.md](docs/reference.md#the-python-api) describes the arguments and the aligner contract.
 

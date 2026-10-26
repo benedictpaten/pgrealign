@@ -11,10 +11,11 @@ before it, in five matrices of 4-byte scores, with one row per base of the graph
 base of the sequence. It reserves all of them, banded or not, and only the pages it touches take
 memory. Unbanded, it touches every cell: 20 bytes a cell. Banded, it touches in each row of each
 matrix a run of cells from the alignment's best position so far to the diagonal that ends at the
-matrix's corner, widened by abPOA's adaptive band, 10 cells plus 1% of m, on either side. The run is
-about |n - m| cells long where the two lengths differ, and it starts at an arbitrary offset in a
-page, so a row of a matrix touches about one page plus 4 bytes for each of its cells, and never
-more than the whole matrix. `abpoa_bytes` computes this, with the machine's page size. Measured as
+matrix's corner, widened by the adaptive band on either side: abPOA's own, 10 cells plus 1% of m
+(star.default_band), or as many cells as it is given. The run is about |n - m| cells long where the
+two lengths differ, and it starts at an arbitrary offset in a page, so a row of a matrix touches about
+one page plus 4 bytes for each of its cells, and never more than the whole matrix. `abpoa_bytes`
+computes this, with the machine's page size. Measured as
 macOS's peak memory footprint, which counts memory compressed or swapped out as well as resident
 (abPOA 1.5.7, 16 KB pages, scores -M 8 -X 16 -O 16,96 -E 8,1), against `abpoa_bytes` in parentheses:
 
@@ -30,6 +31,12 @@ an upper bound in practice, not a guarantee. The memory abPOA takes beyond its m
 50 MB in these runs, and the worker's own are in BASE. With 4 KB pages, as on most Linux systems, the
 per-page part is a quarter as large; that has not been measured.
 
+**A pair too large to align unbanded** (star.long_pair) takes the most of its alignments (`pair_bytes`):
+the band of star.band_width, about `max_cells` cells, or more where the two lengths differ by more than
+that allows; and refinement's windows, unbanded, at most `max_cells` cells each. Seeding's alignment,
+window by window under abPOA's own band, is not counted: it took at most 1.3 GB resident in pairs of up to
+71 kb (Linux, abPOA 1.5.7), against the band's 8 GB.
+
 **abPOA's reservation.** The matrices are reserved whole, 20 bytes a cell, rounded up to a power of two
 (`abpoa_reservation`): two 62,146 bp sequences reserve 2^37 bytes, banded or not. macOS grants any
 reservation. Linux, under its default overcommit policy, refuses one larger than the machine's memory
@@ -43,6 +50,8 @@ import concurrent.futures
 import os
 import resource
 
+from .star import band_width, default_band
+
 GB = 2 ** 30
 PAGE = resource.getpagesize()
 ESTIMATE_PAGE = 16 * 1024       # the page size the estimates that decide anything assume: macOS on Apple silicon's
@@ -52,11 +61,22 @@ BASE = 100 * 2 ** 20            # per region: a worker's interpreter, about 20 M
 
 def abpoa_bytes(n, m, banded, page=PAGE):
     """The memory, in bytes, that abPOA touches aligning a sequence of m bases to one of n bases given
-    before it, with its adaptive band if `banded` (see the module docstring)."""
+    before it, with its adaptive band if `banded`: abPOA's own if it is True, `banded` cells either side if
+    it is a number (see the module docstring)."""
     full = CELL_BYTES * n * m
     if not banded:
         return full
-    return min(full, 5 * n * (page + 4 * (abs(n - m) + 2 * (10 + m // 100))))
+    band = default_band(m) if banded is True else banded
+    return min(full, 5 * n * (page + 4 * (abs(n - m) + 2 * band)))
+
+
+def pair_bytes(n, m, max_cells, page=PAGE):
+    """The memory, in bytes, that abPOA touches when star.align_pair aligns a sequence of m bases to one of
+    n: unbanded if n * m is at most `max_cells`, or max_cells is None, and otherwise the most of
+    star.long_pair's alignments (see the module docstring)."""
+    if max_cells is None or n * m <= max_cells:
+        return abpoa_bytes(n, m, False)
+    return max(abpoa_bytes(n, m, band_width(n, m, max_cells), page), CELL_BYTES * max_cells)
 
 
 def abpoa_reservation(n, m):
@@ -89,8 +109,8 @@ def granted_bytes():
 
 
 def any_pair_bytes(lengths, max_cells, page=PAGE):
-    """The most abpoa_bytes can be for two of the sequences whose lengths are `lengths`, given in either
-    order, banded when the product of their lengths exceeds `max_cells`."""
+    """The most pair_bytes can be for two of the sequences whose lengths are `lengths`, given in either
+    order."""
     count = collections.Counter(lengths)
     distinct = sorted(count)
     worst = 0
@@ -101,7 +121,7 @@ def any_pair_bytes(lengths, max_cells, page=PAGE):
             if n * m <= max_cells:          # the longest sequence aligned to this one unbanded
                 worst = max(worst, abpoa_bytes(n, m, False))
                 break
-            worst = max(worst, abpoa_bytes(n, m, True, page))
+            worst = max(worst, pair_bytes(n, m, max_cells, page))
     return worst
 
 

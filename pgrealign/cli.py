@@ -342,8 +342,9 @@ def main(argv=None):
                    help='seconds per region, after which it is left as it is (timeout); a time limit makes the '
                         'outcome depend on the machine. 0 sets none [0]')
     c.add_argument('--max-cells', type=int, default=MAX_CELLS,
-                   help='band a pairwise alignment that would exceed this many cells unbanded, and leave a region as '
-                        'it is when even a banded one would [%d]' % MAX_CELLS)
+                   help='align a pair that would exceed this many cells unbanded with a band and with seeding, in '
+                        'about as many cells, and leave a region as it is when even abPOA\'s own band would exceed '
+                        'them for its longest sequence [%d]' % MAX_CELLS)
     c.add_argument('--min-share', type=float, default=MIN_SHARE,
                    help="leave a region as it is (not_homologous) when an allele shares less than this fraction of "
                         "its 15-mers with the centre, counted against whichever of the two has fewer, as an "
@@ -385,7 +386,8 @@ def main(argv=None):
     c.add_argument('--scores', metavar='FLAGS', help="abPOA's scores for the optimal pairwise alignments; use the "
                    "scores the alignment was built with [%s]" % ' '.join(SCORES.flags()))
     c.add_argument('--max-cells', type=int, default=MAX_CELLS,
-                   help='band a pair whose unbanded optimal alignment would exceed this many cells [%d]' % MAX_CELLS)
+                   help='align a pair whose unbanded optimal alignment would exceed this many cells as realign does '
+                        '[%d]' % MAX_CELLS)
     c.add_argument('--graph', help="the graph extract read: measure its own alignment of each region too")
     c.add_argument('-j', '--jobs', type=int, default=1, help='the most regions measured in parallel [1]')
     c.add_argument('--max-pair-memory', type=float, default=MAX_PAIR_MEMORY, metavar='GB',

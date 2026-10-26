@@ -27,9 +27,17 @@ applies it to the region packages that extract.py writes.
      not judged, nor is any allele when the centre is: one variant can remove most of a short allele's
      k-mers, and a short allele cannot be threaded into many variants. Fragments are not judged.
 2. **Pairwise alignment.** Every other allele is aligned to the centre with a global alignment,
-   unbanded unless its dynamic-programming matrix would be too large (`max_cells`), in which case it
-   is banded. An allele identical to the centre takes the centre's row; an empty allele, or an empty
-   centre, is aligned as one deletion or insertion.
+   unbanded unless its dynamic-programming matrix would be too large (`max_cells`). An allele
+   identical to the centre takes the centre's row; an empty allele, or an empty centre, is aligned as
+   one deletion or insertion. A pair too large to align unbanded is aligned twice (`long_pair`): with
+   the widest band that keeps within `max_cells` cells (`band_width`), and with abPOA's minimizer
+   seeding, which aligns the two between shared minimizers. The one that scores higher under the
+   scores is kept, the band's on a tie. A band reaches only so far from the diagonals that start and
+   end the matrix, so it misses an alignment that strays further, as one that inserts several
+   copies of a repeat in one place and deletes others elsewhere does; seeding has no such limit, but
+   can chain the wrong copies of a repeat. Where seeding's is kept, it is then realigned window by
+   window (`refine_pair`), each window between two runs of ANCHOR matched columns and at most
+   `max_cells` cells, and each window's new alignment kept where it scores higher.
 3. **Normalisation.** Each pair's indels are shifted left wherever the alignment's score stays the
    same.
 4. **Merge.** The alignment has one column per centre base, and an insertion slot between each two
@@ -53,6 +61,7 @@ import time
 
 K = 15
 HOMOLOGY_BP = 100       # the shortest allele, and centre, that check_homology judges
+ANCHOR = 32             # the matched columns in a row at which refine_pair may cut an alignment
 _CODE = {'A': 0, 'C': 1, 'G': 2, 'T': 3}
 _ALIGNABLE = frozenset('ACGTN')
 _COMPLEMENT = str.maketrans('ACGTN', 'TGCAN')
@@ -109,6 +118,30 @@ class Scores:
         """abPOA's command-line flags for these scores."""
         return ['-M', str(self.match), '-X', str(self.mismatch),
                 '-O', '%d,%d' % self.gap_open, '-E', '%d,%d' % self.gap_ext]
+
+    def gap(self, n):
+        """The cost of a gap of n columns, 0 for none."""
+        return min(self.gap_open[0] + n * self.gap_ext[0], self.gap_open[1] + n * self.gap_ext[1]) if n else 0
+
+    def score(self, a, b):
+        """The score of the two-row alignment (a, b), as abPOA scores one: a match or a mismatch for each
+        column with two bases, nothing where either is N, and the cost of a gap (`gap`) for each run of
+        columns with a base in the same one row only. A column with no base counts for nothing."""
+        total, run, side = 0, 0, None
+        for x, y in zip(a, b):
+            if x == '-' or y == '-':
+                if x == y:
+                    continue
+                if (x == '-') != side:
+                    total -= self.gap(run)
+                    run, side = 0, x == '-'
+                run += 1
+                continue
+            total -= self.gap(run)
+            run, side = 0, None
+            if x != 'N' and y != 'N':
+                total += self.match if x == y else -self.mismatch
+        return total - self.gap(run)
 
     @classmethod
     def parse(cls, text):
@@ -171,8 +204,11 @@ class Abpoa:
 
     Use it as a context manager, which owns a temporary directory. Calling it with a list of sequences
     returns their global multiple alignment, one upper-case row per sequence in input order:
-    `abpoa -m 0 -r 1 <scores>`, with `-b -1` (no band) unless `banded` is true, in which case abPOA's
-    adaptive band applies. Past `deadline` (a time.time() value), a call raises TimedOut."""
+    `abpoa -m 0 -r 1 <scores>`, with `-b -1` (no band) unless `banded` is true. abPOA's adaptive band
+    then applies, 10 cells plus 1% of the sequence's length either side (`default_band`) if `banded` is
+    True, and `banded` cells either side if it is a number (`-b <banded> -f 0`). With `seeded` too,
+    abPOA aligns between the minimizers the sequences share (`-S`), its own band within each window.
+    Past `deadline` (a time.time() value), a call raises TimedOut."""
 
     def __init__(self, exe='abpoa', scores=SCORES, deadline=None, workdir=None):
         self.exe, self.scores, self.deadline, self.workdir = exe, scores, deadline, workdir
@@ -187,11 +223,17 @@ class Abpoa:
         self.dir = None
         return False
 
-    def flags(self, seqs, banded):
+    def flags(self, seqs, banded, seeded=False):
         """abPOA's flags for aligning `seqs`, after `-m 0 -r 1`."""
-        return self.scores.flags() + ([] if banded else ['-b', '-1'])
+        if not banded:
+            return self.scores.flags() + ['-b', '-1']
+        if seeded:
+            return self.scores.flags() + ['-S']
+        if banded is True:
+            return self.scores.flags()
+        return self.scores.flags() + ['-b', str(int(banded)), '-f', '0']
 
-    def __call__(self, seqs, banded=False):
+    def __call__(self, seqs, banded=False, seeded=False):
         timeout = None
         if self.deadline is not None:
             timeout = self.deadline - time.time()
@@ -201,7 +243,7 @@ class Abpoa:
         with open(fa, 'w') as f:
             for i, s in enumerate(seqs):
                 f.write('>s%d\n%s\n' % (i, s))
-        flags = self.flags(seqs, banded)
+        flags = self.flags(seqs, banded, seeded)
         try:
             with open(out, 'w') as o:
                 subprocess.run([self.exe, '-m', '0', '-r', '1', *flags, fa], stdout=o,
@@ -372,18 +414,91 @@ def left_normalise_pair(a, b):
     return ''.join(a), ''.join(b)
 
 
-def align_pair(centre, seq, align, banded=False):
-    """The left-normalised global alignment of `seq` to `centre`, as (centre row, row)."""
-    if seq == centre:
-        return centre, seq
-    if not centre or not seq:
-        return centre + '-' * len(seq), '-' * len(centre) + seq
-    ca, sa = align([centre, seq], banded=banded)
+def default_band(m):
+    """abPOA's own adaptive band, in cells either side, aligning a sequence of m bases: 10 cells plus 1% of m
+    (its -b 10 -f 0.01)."""
+    return 10 + m // 100
+
+
+def band_width(n, m, max_cells):
+    """The band, in cells either side, with which long_pair aligns a sequence of m bases to one of n: the
+    widest whose cells, |n - m| + 2w in each of the n rows, keep within `max_cells`, and never narrower
+    than abPOA's own (default_band)."""
+    return max(default_band(m), (max_cells // n - abs(n - m)) // 2)
+
+
+def _pair(centre, seq, rows):
+    """The aligner's rows for `centre` and `seq` without their all-gap columns, checked to spell their
+    inputs, and left-normalised."""
+    ca, sa = rows
     keep = [i for i in range(len(ca)) if ca[i] != '-' or sa[i] != '-']
     ca, sa = ''.join(ca[i] for i in keep), ''.join(sa[i] for i in keep)
     if ca.replace('-', '') != centre or sa.replace('-', '') != seq:
         raise AlignerFailed('the aligner\'s rows do not spell their inputs')
     return left_normalise_pair(ca, sa)
+
+
+def align_pair(centre, seq, align, max_cells=None, scores=SCORES):
+    """The left-normalised global alignment of `seq` to `centre`, as (centre row, row): unbanded, unless its
+    matrix would exceed `max_cells` cells, and then long_pair's."""
+    if seq == centre:
+        return centre, seq
+    if not centre or not seq:
+        return centre + '-' * len(seq), '-' * len(centre) + seq
+    if max_cells is not None and len(centre) * len(seq) > max_cells:
+        return long_pair(centre, seq, align, max_cells, scores)[0]
+    return _pair(centre, seq, align([centre, seq]))
+
+
+def long_pair(centre, seq, align, max_cells, scores=SCORES):
+    """The alignment of `seq` to `centre`, two sequences whose matrix exceeds `max_cells` cells (see the
+    module docstring): (centre row, row), whether seeding's alignment was kept, and the number of windows
+    refine_pair then improved."""
+    banded = _pair(centre, seq, align([centre, seq], banded=band_width(len(centre), len(seq), max_cells)))
+    seeded = _pair(centre, seq, align([centre, seq], banded=True, seeded=True))
+    if scores.score(*seeded) <= scores.score(*banded):
+        return banded, False, 0
+    rows, better = refine_pair(*seeded, align, max_cells, scores)
+    return rows, True, better
+
+
+def refine_pair(ca, sa, align, max_cells, scores=SCORES, anchor=ANCHOR):
+    """The two-row alignment (ca, sa) realigned window by window. It is cut at each run of `anchor` or more
+    matched columns, the stretches between the runs are joined, in order, into windows of as many as keep
+    within `max_cells` cells, the product of a window's bases in the two rows, and each window is aligned
+    unbanded and kept where that scores higher. A stretch that alone exceeds max_cells is left as it is.
+    The score can only rise, since no gap crosses a matched column. Returns the alignment,
+    left-normalised, and the number of windows that changed."""
+    n = len(ca)
+    runs, i = [(0, 0)], 0             # [start, end) of each run of `anchor` matched columns, and both ends
+    while i < n:
+        j = i
+        while j < n and ca[j] == sa[j] != '-':
+            j += 1
+        if j - i >= anchor:
+            runs.append((i, j))
+        i = max(j, i + 1)
+    runs.append((n, n))
+    cpos, spos = [0], [0]             # each row's bases before each column
+    for x, y in zip(ca, sa):
+        cpos.append(cpos[-1] + (x != '-'))
+        spos.append(spos[-1] + (y != '-'))
+    out, better, k = [], 0, 0
+    while k < len(runs) - 1:
+        lo, j = runs[k][1], k + 1
+        while j + 1 < len(runs) and \
+                (cpos[runs[j + 1][0]] - cpos[lo]) * (spos[runs[j + 1][0]] - spos[lo]) <= max_cells:
+            j += 1
+        hi = runs[j][0]
+        wc, ws = ca[lo:hi], sa[lo:hi]
+        c, s = wc.replace('-', ''), ws.replace('-', '')
+        if wc != ws and c and s and len(c) * len(s) <= max_cells:
+            rc, rs = _pair(c, s, align([c, s])) if c != s else (c, s)
+            if scores.score(rc, rs) > scores.score(wc, ws):
+                wc, ws, better = rc, rs, better + 1
+        out.append((wc + ca[hi:runs[j][1]], ws + sa[hi:runs[j][1]]))
+        k = j
+    return left_normalise_pair(''.join(x for x, _ in out), ''.join(y for _, y in out)), better
 
 
 def star_merge(centre, pairs, align):
@@ -477,28 +592,33 @@ def respell(row, seq):
 class StarMSA:
     """The result of star_msa: `rows` {id: row}, every row the same length; `centre`, the centre allele's
     id; `slot_alignments`, the number of insertion slots that needed an alignment; `fragments_exact`
-    and `fragments_aligned`, the fragments placed in an allele and aligned to the centre; and
-    `banded_pairs`, the alignments to the centre that were banded because of `max_cells`."""
-    __slots__ = ('rows', 'centre', 'slot_alignments', 'fragments_exact', 'fragments_aligned', 'banded_pairs')
+    and `fragments_aligned`, the fragments placed in an allele and aligned to the centre;
+    `banded_pairs`, the alignments to the centre too large to align unbanded (`max_cells`), which
+    long_pair aligned; `seeded_pairs`, those of them for which it kept seeding's alignment; and
+    `refined_windows`, the windows in which refine_pair then improved one."""
+    __slots__ = ('rows', 'centre', 'slot_alignments', 'fragments_exact', 'fragments_aligned', 'banded_pairs',
+                 'seeded_pairs', 'refined_windows')
 
-    def __init__(self, rows, centre, slot_alignments, fragments_exact, fragments_aligned, banded_pairs=0):
+    def __init__(self, rows, centre, slot_alignments, fragments_exact, fragments_aligned, banded_pairs=0,
+                 seeded_pairs=0, refined_windows=0):
         self.rows, self.centre = rows, centre
         self.slot_alignments = slot_alignments
         self.fragments_exact, self.fragments_aligned = fragments_exact, fragments_aligned
-        self.banded_pairs = banded_pairs
+        self.banded_pairs, self.seeded_pairs, self.refined_windows = banded_pairs, seeded_pairs, refined_windows
 
 
 def star_msa(alleles, fragments=(), align=None, centre=None, k=K, deadline=None, max_cells=None,
-             min_share=None):
+             min_share=None, scores=SCORES):
     """The star alignment of a region (see the module docstring).
 
     `alleles` is a sequence of (id, sequence, weight), with distinct ids; `fragments` is a sequence of
     (id, sequence, side), side being 'left', 'right' or 'internal'. `align` is the aligner: called with
-    a list of sequences and `banded`, it returns their global alignment, one row per sequence in order.
-    Pass an Abpoa inside its `with` block. `centre` names the centre allele instead of the medoid.
-    Past `deadline` (a time.time() value), raises TimedOut. An alignment to the centre whose
-    dynamic-programming matrix, the product of the two lengths, would exceed `max_cells` is asked for
-    banded; every other one is unbanded. With `min_share`, raises NotHomologous, before aligning
+    a list of sequences, `banded` and `seeded` as Abpoa takes them, it returns their global alignment,
+    one row per sequence in order. Pass an Abpoa inside its `with` block, and its scores as `scores`,
+    by which long_pair chooses between alignments. `centre` names the centre allele instead of the
+    medoid. Past `deadline` (a time.time() value), raises TimedOut. An alignment to the centre whose
+    dynamic-programming matrix, the product of the two lengths, would exceed `max_cells` is made by
+    long_pair; every other one is unbanded. With `min_share`, raises NotHomologous, before aligning
     anything, if an allele of positive weight shares less than that fraction of its k-mers with the
     centre (check_homology). Returns a StarMSA.
     """
@@ -536,8 +656,13 @@ def star_msa(alleles, fragments=(), align=None, centre=None, k=K, deadline=None,
             unplaced.append(fid)
     big = set() if max_cells is None else {m for m in names + unplaced if seq[m] != cseq and seq[m] and cseq
                                            and len(cseq) * len(seq[m]) > max_cells}
-    pairs = collections.OrderedDict((m, align_pair(cseq, seq[m], align, banded=m in big))
-                                    for m in names + unplaced)
+    pairs, seeded, refined = collections.OrderedDict(), 0, 0
+    for m in names + unplaced:
+        if m in big:
+            pairs[m], kept, better = long_pair(cseq, seq[m], align, max_cells, scores)
+            seeded, refined = seeded + kept, refined + better
+        else:
+            pairs[m] = align_pair(cseq, seq[m], align)
     rows, slot_alignments = star_merge(cseq, pairs, align)
     for fid, side in exact:
         rows[fid] = place_fragment(orig[fid], side, found, rows)
@@ -549,4 +674,4 @@ def star_msa(alleles, fragments=(), align=None, centre=None, k=K, deadline=None,
     for m, r in rows.items():
         if r.replace('-', '') != orig[m]:
             raise ValueError('row %s does not spell its sequence' % m)
-    return StarMSA(rows, cid, slot_alignments, len(exact), len(unplaced), len(big))
+    return StarMSA(rows, cid, slot_alignments, len(exact), len(unplaced), len(big), seeded, refined)

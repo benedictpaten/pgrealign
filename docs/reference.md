@@ -391,27 +391,36 @@ on a region's size below leaves a region that exceeds it `too_big`, with a messa
 
 - `--max-cells` bounds the cells of one unbanded pairwise alignment, and so its memory: abPOA
   touches 20 bytes per cell, so the default allows about 8 GB. An alignment to the centre whose
-  matrix, the product of the two sequences' lengths, would exceed the cap is run with abPOA's
-  adaptive band instead; every other one is unbanded. The record's `banded_pairs` counts the banded
-  ones.
-- A banded alignment's memory is set by the centre's length rather than by the band's cells, because
-  abPOA reserves 20 bytes of address space per cell of the whole matrix, banded or not, and a band
-  touches at least one page of each of its five score matrices per base of the centre, and more
-  where the two lengths differ ([Memory](#memory)).
-- A region is `too_big` when even a banded alignment of its longest allele or fragment would exceed
-  the cap: when `realign.banded_cells(n)`, min(n², 2n(10 + ⌊n / 100⌋)) for a sequence of n bases,
-  is larger than `--max-cells`, so the cap sets the longest sequence a region can hold. Raise it,
-  with the memory to match, to align such regions.
+  matrix, the product of the two sequences' lengths, would exceed the cap is made by
+  `star.long_pair` instead ([method.md](method.md#pairs-too-large-to-align-unbanded)): with the
+  widest adaptive band that keeps within the cap (`star.band_width`), and seeded, the one that
+  scores higher kept, and a kept seeded one refined in windows of at most the cap, each aligned
+  unbanded. Every other alignment to the centre is unbanded. The record's `banded_pairs` counts
+  the pairs over the cap, `seeded_pairs` those whose seeded alignment was kept, and
+  `refined_windows` the windows refinement improved.
+- Such a pair's memory is about that of an unbanded alignment of the cap's cells, and more where the
+  two lengths differ by more than a band within the cap allows, since its band then spans their
+  difference: abPOA reserves 20 bytes of address space per cell of the whole matrix, banded or not,
+  and a band touches at least one page of each of its five score matrices per base of the centre,
+  and more where the two lengths differ ([Memory](#memory)).
+- A region is `too_big` when even abPOA's own band would exceed the cap aligning its longest allele
+  or fragment to one of the same length: when `realign.banded_cells(n)`, min(n², 2n(10 + ⌊n / 100⌋))
+  for a sequence of n bases, is larger than `--max-cells`, so the cap sets the longest sequence a
+  region can hold. Raise it, with the memory to match, to align such regions.
 - A region whose alleles hold more than `realign.MAX_TOTAL_BP` (40,000,000) bases in all is also
   `too_big`, because choosing the centre holds every allele's k-mer counts in memory.
 - `--max-work` bounds the region's work, about the cells of dynamic-programming matrices that its
   alignments fill (`realign.work`): for each allele and fragment aligned to the centre, the product
-  of the two lengths, or, where that exceeds `--max-cells` and the alignment is banded, the centre's
-  length times the band, which spans the two lengths' difference and 10 cells plus 1% of the
-  other's length either side (`realign.banded_cells(n, m)`); and for the insertion slots, the bases
-  by which each member is longer than the centre, its excess, taken to fall in one slot, each
-  member's excess aligned, banded, to the longest. Around a medoid, which is not known before the
-  region runs, the longest allele stands in for the centre, and the slots are not counted. Run time follows the work
+  of the two lengths, or, where that exceeds `--max-cells`, `realign.long_pair_cells(n, m)`: the
+  centre's length times the band, which spans the two lengths' difference and `star.band_width`
+  cells either side, about `--max-cells` in all; the same with abPOA's own band, 10 cells plus 1% of
+  the other's length either side, for seeding (`realign.banded_cells(n, m)`); and √(nm
+  `--max-cells`) for refinement, whose windows of at most `--max-cells` cells lie along the matrix's
+  diagonal, counted though it runs only where the seeded alignment is kept; and for the insertion
+  slots, the bases by which each member is longer than the centre, its excess, taken to fall in one
+  slot, each member's excess aligned, banded, to the longest. Around a medoid, which is not known
+  before the region runs, the longest allele stands in for the centre, and the slots are not
+  counted. Run time follows the work
   ([method.md](method.md#limits-and-regions-that-keep-their-old-subgraph)). The default is
   `realign.MAX_WORK`, 2 × 10^11 cells, and 0 sets no limit.
 - `--max-region-memory` bounds the region's memory estimate, in GB ([Memory](#memory)). The default
@@ -464,12 +473,12 @@ much (`--plan`'s `need_gb`), or lower `--max-region-memory` below it, which leav
 abPOA aligns a sequence of m bases to one of n bases given before it (the centre, when `realign`
 aligns an allele to the centre) in five matrices of 4-byte scores, with one row per base of the
 first sequence. It reserves them whole, and only the pages it touches take memory. Unbanded, it
-touches every cell: 20nm bytes. Banded, each row of each matrix touches a run of about
-|n − m| + 2(10 + ⌊m / 100⌋) cells that starts anywhere in a page, so the alignment touches about
-5n(P + 4(|n − m| + 2(10 + ⌊m / 100⌋))) bytes, P being the page size, and never more than unbanded
-(`memory.abpoa_bytes`). Measured as macOS's peak memory footprint, which counts memory compressed or
-swapped out as well as resident (abPOA 1.5.7, 16 KB pages, the default `--scores`), against this
-formula, in GB of 2^30 bytes:
+touches every cell: 20nm bytes. Banded, with a margin of w cells either side, by default abPOA's own,
+10 + ⌊m / 100⌋, each row of each matrix touches a run of about |n − m| + 2w cells that starts
+anywhere in a page, so the alignment touches about 5n(P + 4(|n − m| + 2w)) bytes, P being the page
+size, and never more than unbanded (`memory.abpoa_bytes`). Measured as macOS's peak memory
+footprint, which counts memory compressed or swapped out as well as resident (abPOA 1.5.7, 16 KB
+pages, the default `--scores`), against this formula, in GB of 2^30 bytes:
 
 | alignment | footprint | formula |
 |---|---|---|
@@ -478,8 +487,12 @@ formula, in GB of 2^30 bytes:
 | banded, a 58.7 kb centre with a 40.1 kb or a 103.2 kb allele | 19.2, 47.1 | 25.7, 55.4 |
 
 The last two are only 10.1 and 11.4 GB resident: an alignment's resident size understates what it
-needs. With 4 KB pages, as on most Linux systems, the per-page part is a quarter as large; that has
-not been measured.
+needs. With 4 KB pages, as on most Linux systems, the per-page part is a quarter as large. There,
+the band `star.long_pair` gives a pair over the default `--max-cells` peaked at 7.6, 6.9 and 8.1 GB
+resident for alleles of 27.8, 37.2 and 34.4 kb aligned to centres of 27.7, 27.7 and 32.3 kb (Linux,
+abPOA 1.5.7), against 8.9, 8.9 and 9.0 GB by the formula, and abPOA's own band, the margin it gives
+where the lengths differ too much for a wider one, 10.2 GB for a 48.8 kb allele to a 27.7 kb
+centre, against 11.9 GB.
 
 abPOA reserves its five matrices whole, 20 bytes for each of (n + 1)(m + 1) cells, rounded up to a
 power of two, banded or not (`memory.abpoa_reservation`): two sequences of 62,146 bp reserve 2^37
@@ -500,11 +513,15 @@ A region's estimate, `realign.peak_bytes`, is the sum of:
   the longest allele for comparing two alleles or sketching one (`realign.KMER_BYTES` and
   `realign.COMPARE_BYTES`);
 - abPOA's matrices for the worst alignment the region can need, the largest value of the formula:
-  around the reference allele, over its alignments to the reference, banded when the product of the
-  two lengths exceeds `--max-cells`, and over the slots' as the work takes them, each member's excess
-  aligned, banded, to the longest excess; around a medoid, which is not known before the region
-  runs, over every two of its alleles and fragments, in either order, banded under the same rule,
-  and the longest sequence banded against one of the same length, the bound taken for the slots.
+  around the reference allele, over its alignments to the reference (`memory.pair_bytes`), and over
+  the slots' as the work takes them, each member's excess aligned, banded, to the longest excess;
+  around a medoid, which is not known before the region runs, over every two of its alleles and
+  fragments, in either order, and the longest sequence banded against one of the same length, the
+  bound taken for the slots. A pair whose product of lengths exceeds `--max-cells` is taken at the
+  larger of its band's, with the margin `star.band_width`, and refinement's windows, 20 bytes for
+  each of `--max-cells` cells. Seeding's alignment is not counted: it took at most 1.3 GB resident
+  on the pairs of up to 71 kb measured (Linux, abPOA 1.5.7), aligning window by window under abPOA's
+  own band, against about 8 GB for the band's.
 
 The page size P in the formula is `realign.ESTIMATE_PAGE`, 16 KB, whatever the machine's, so that the
 estimate, and with it which regions are `too_big`, is the same on every machine; with Linux's 4 KB
@@ -936,7 +953,9 @@ file, including gzip files concatenated with `cat`.
 | `slot_alignments` | `ok` | the number of insertion slots that needed an alignment: an insertion slot is a place before, between or after the centre's bases where other rows insert bases, and the distinct insertions of one slot, when there are two or more, are aligned to each other |
 | `fragments_exact` | `ok` | the number of fragments placed in an allele's row |
 | `fragments_aligned` | `ok` | the number of unplaced fragments, aligned to the centre |
-| `banded_pairs` | `ok` | the number of alignments to the centre that were banded because they would exceed `--max-cells` unbanded ([limits](#limits)) |
+| `banded_pairs` | `ok` | the number of alignments to the centre that would exceed `--max-cells` unbanded, aligned instead with a band and seeded ([limits](#limits)) |
+| `seeded_pairs` | `ok` | the number of those for which the seeded alignment scored higher and was kept |
+| `refined_windows` | `ok` | the number of windows in which refinement improved a kept seeded alignment |
 | `message` | not `ok` | why the region was not aligned |
 | `projected_from` | after `project` | the number of rows in the union's MSA |
 
@@ -1113,7 +1132,7 @@ The other functions below run whole stages or parts of them. In the signatures, 
 
 ```python
 star_msa(alleles, fragments=(), align=None, centre=None, k=K, deadline=None, max_cells=None,
-         min_share=None)
+         min_share=None, scores=SCORES)
 ```
 
 | argument | meaning |
@@ -1124,7 +1143,7 @@ star_msa(alleles, fragments=(), align=None, centre=None, k=K, deadline=None, max
 | `centre` | an allele id to use as the centre instead of the medoid |
 | `k` | the k-mer size for choosing the centre; `star.K` is 15 |
 | `deadline` | a `time.time()` value; choosing the centre past it raises `TimedOut` |
-| `max_cells` | an alignment to the centre whose matrix, the product of the two sequences' lengths, would exceed this is asked for banded, and every other one unbanded; None, the default, bands none |
+| `max_cells` | an alignment to the centre whose matrix, the product of the two sequences' lengths, would exceed this is made by `star.long_pair`, with a band and seeded, and every other one unbanded; None, the default, aligns every one unbanded |
 | `min_share` | once the centre is chosen, raise `NotHomologous` if an allele of positive weight and at least `star.HOMOLOGY_BP` bases shares less than this fraction of its k-mers with the centre (`star.share`), the centre having that many bases too; None, the default, or 0 checks nothing |
 
 It returns a [`StarMSA`](#starmsa). Its rows spell the inputs upper-cased. The aligner sees only A,
@@ -1146,12 +1165,14 @@ have the same length.
 | `slot_alignments` | the number of insertion slots that needed a call to the aligner |
 | `fragments_exact` | the number of fragments placed in an allele's row |
 | `fragments_aligned` | the number of unplaced fragments, aligned to the centre |
-| `banded_pairs` | the number of alignments to the centre asked for banded because of `max_cells` |
+| `banded_pairs` | the number of alignments to the centre made by `star.long_pair` because of `max_cells` |
+| `seeded_pairs` | the number of those whose seeded alignment scored higher and was kept |
+| `refined_windows` | the number of windows in which refinement improved a kept seeded alignment |
 
 ### The aligner contract
 
-`star_msa` calls its aligner as `align(seqs, banded=...)`, and so does `qc.region_qc`. The aligner
-returns a global alignment of `seqs`.
+`star_msa` calls its aligner as `align(seqs)`, `align(seqs, banded=...)` or `align(seqs, banded=True,
+seeded=True)`, and so does `qc.region_qc`. The aligner returns a global alignment of `seqs`.
 
 - `seqs` is a list of two or more distinct, non-empty, upper-case strings. From `star_msa` they hold
   only A, C, G, T and N; `qc.region_qc` passes alleles as they are, upper-cased.
@@ -1159,19 +1180,24 @@ returns a global alignment of `seqs`.
   an unplaced fragment, the centre first, or the insertions of one slot, two or more, longest
   first. `star_msa` aligns an allele equal to the centre, or an empty allele or centre, without
   calling the aligner.
-- `banded=True` marks a slot's insertions, and an alignment to the centre whose matrix would exceed
-  `max_cells`; `banded=False` marks every other alignment to the centre.
-- From `qc.region_qc`, a call is the two alleles of a measured pair, with `banded=True` when their
-  lengths multiply to more than `max_cells` and `banded=False` otherwise: the reference allele first
+- `banded=True` marks a slot's insertions. An alignment to the centre whose matrix would exceed
+  `max_cells` is asked for twice (`star.long_pair`): with `banded` a number, the band's margin
+  either side (`star.band_width`), and with `banded=True, seeded=True`; where the seeded one scores
+  higher under `scores`, the windows that refine it are asked for unbanded. Every other alignment to
+  the centre is unbanded.
+- From `qc.region_qc`, a call is the two alleles of a measured pair, asked for in the same ways when
+  their lengths multiply to more than `max_cells`, and unbanded otherwise: the reference allele first
   when the pair holds it, and otherwise the allele that comes first in the package.
 - The aligner returns a list of strings, one row per sequence in order, all the same length, with
   `-` for a gap; each row without its gaps is its sequence. Columns that are gaps in every row are
   allowed.
 
-`banded` is a hint that the aligner may ignore; `Abpoa` uses it to choose between an unbanded and a
-banded alignment. The aligner owns its scoring, since `star_msa` passes it none. `deadline` bounds
-only the choice of the centre, so an aligner that must stop in time checks the clock itself and
-raises `TimedOut`, as `Abpoa` does.
+`banded` and `seeded` are hints that the aligner may ignore; `Abpoa` uses them to choose abPOA's
+band and seeding. The aligner owns its scoring, since `star_msa` passes it none, but `star_msa`
+scores the two alignments of a long pair, and a refined window, with its `scores`, which should be
+the aligner's; an aligner that ignores the hints returns the same alignment twice, and the band's,
+the first, is kept. `deadline` bounds only the choice of the centre, so an aligner that must stop in
+time checks the clock itself and raises `TimedOut`, as `Abpoa` does.
 
 A pairwise alignment whose rows do not spell their inputs makes `star_msa` raise `AlignerFailed`;
 one that is not two rows raises `ValueError`, and two rows of unequal length `IndexError` or
@@ -1188,12 +1214,15 @@ Abpoa(exe='abpoa', scores=SCORES, deadline=None, workdir=None)
 `Abpoa` is the aligner `realign` and `qc` use: it runs the abPOA program once per call. Use it as a
 context manager, which owns a temporary directory, created in `workdir` or else in the system's
 temporary directory. Each call runs `abpoa -m 0 -r 1` (global alignment, MSA output) followed by
-`flags(seqs, banded)`, and returns abPOA's rows upper-cased.
+`flags(seqs, banded, seeded)`, and returns abPOA's rows upper-cased.
 
-- `flags(seqs, banded)` returns every flag after `-m 0 -r 1`: `scores.flags()`, plus `-b -1` (no
-  band) unless `banded` is true, when abPOA's adaptive band applies. A subclass can override it to
-  choose flags per call; its flags replace these, so it must include the score flags and `-b -1`
-  where it wants them.
+- `flags(seqs, banded, seeded=False)` returns every flag after `-m 0 -r 1`: `scores.flags()`, plus
+  `-b -1` (no band) unless `banded` is true. abPOA's adaptive band then applies: its own, 10 cells
+  plus 1% of the second sequence's length either side, if `banded` is True, and `banded` cells
+  either side, `-b <banded> -f 0`, if it is a number. With `seeded` and `banded` true, the flag is
+  `-S` instead, abPOA's own band within each window. A subclass can override it to choose flags per
+  call; its flags replace these, so it must include the score flags and `-b -1` where it wants
+  them.
 - Past `deadline`, a `time.time()` value, a call raises `TimedOut`, before starting abPOA or by
   stopping it. When abPOA exits with an error, or returns no row for some input, a call raises
   `AlignerFailed`.

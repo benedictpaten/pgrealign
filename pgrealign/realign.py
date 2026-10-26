@@ -18,11 +18,11 @@ unaligned and the graph several times the size it is around the medoid; there th
 **Limits.** abPOA's alignment of two sequences works in a matrix of cells, one per pair of their bases.
 It reserves 20 bytes of address space per cell, five matrices of 4-byte scores, banded or not, and an
 unbanded alignment touches all of it, so `max_cells` cells take about 8 GB. An alignment to the
-centre whose matrix would exceed `max_cells` cells is banded instead: abPOA then fills only a band
-around its best path, adaptive in width (about 10 cells plus 1% of the sequence's length on either
-side). Its memory is then set by the centre's length, not by the band: each base of the centre
-touches at least one page of each of the five matrices, about 80 KB per base with 16 KB pages (macOS
-on Apple silicon), and more where the two lengths differ by tens of kb (memory.py).
+centre whose matrix would exceed `max_cells` cells is made by star.long_pair instead: banded, with the
+widest band that keeps within about `max_cells` cells, and seeded, the better kept, and seeding's
+refined in windows of at most `max_cells` cells. It then takes about as much memory as an unbanded
+alignment of `max_cells` cells, more where the two lengths differ by more than that band allows
+(memory.py), and about `long_pair_cells` cells of work.
 
 Whether a region is aligned is decided from its package alone, before anything runs, so the same input
 gives the same graph on any machine, under any memory budget. A region the star is not built for keeps
@@ -63,8 +63,8 @@ alone exceeds the budget stops `run` before it starts anything, rather than bein
 **Output.** msas.jsonl.gz holds one JSON object per region, in package order:
 - `id`, `method` ('medoid_star'), `status`, `seconds`;
 - for `ok`: `centre` (the centre allele's id), `rows` {member id: row}, one per allele and fragment,
-  all the same length, `columns`, `slot_alignments`, `fragments_exact`, `fragments_aligned` and
-  `banded_pairs`;
+  all the same length, `columns`, `slot_alignments`, `fragments_exact`, `fragments_aligned`,
+  `banded_pairs`, `seeded_pairs` and `refined_windows` (star.StarMSA);
 - otherwise `message`.
 """
 import collections
@@ -76,7 +76,7 @@ import os
 import time
 
 from . import memory
-from .star import Abpoa, RealignError, SCORES, TooBig, star_msa
+from .star import Abpoa, RealignError, SCORES, TooBig, band_width, star_msa
 
 MAX_CELLS = 450_000_000
 MAX_TOTAL_BP = 40_000_000     # choosing the centre holds every allele's k-mer counts: KMER_BYTES per base
@@ -107,13 +107,26 @@ MACHINE_FAILURES = ('reservation_refused', 'aligner_killed', 'out_of_memory')
 KMER_BYTES, COMPARE_BYTES = 80, 50
 
 
-def banded_cells(n, m=None):
+def banded_cells(n, m=None, band=None):
     """About how many cells abPOA fills aligning a sequence of `m` bases (by default `n`) to one of `n` given
-    before it, with its adaptive band: in each of the first's rows, the two lengths' difference and 10 cells
-    plus 1% of m either side, and never more than the whole row, as for its memory (memory.abpoa_bytes)."""
+    before it, with its adaptive band: in each of the first's rows, the two lengths' difference and `band`
+    cells either side, by default abPOA's own, 10 cells plus 1% of m, and never more than the whole row, as
+    for its memory (memory.abpoa_bytes)."""
     if m is None:
         m = n
-    return n * min(m, abs(n - m) + 2 * (10 + m // 100))
+    if band is None:
+        band = 10 + m // 100
+    return n * min(m, abs(n - m) + 2 * band)
+
+
+def long_pair_cells(n, m, max_cells=MAX_CELLS):
+    """About how many cells star.long_pair fills aligning a sequence of `m` bases to one of `n`, two whose
+    matrix exceeds `max_cells`: its band's (star.band_width), about max_cells; seeding's, taken as abPOA's
+    own band's; and refinement's, windows of at most max_cells cells along the matrix's diagonal, about
+    sqrt(n m max_cells) in all and never more than n m. Refinement runs only where seeding's alignment
+    scores higher, which is not known in advance, so it is always counted."""
+    return (banded_cells(n, m, band_width(n, m, max_cells)) + banded_cells(n, m) +
+            min(n * m, math.isqrt(n * m * max_cells)))
 
 
 def excess(pkg, aid):
@@ -176,12 +189,11 @@ def _slots(c, others):
 def work(pkg, centre='ref', max_cells=MAX_CELLS, max_excess=MAX_EXCESS):
     """About how many cells of dynamic-programming matrices aligning `pkg` fills, the measure of its run time
     (docs/method.md): each allele and fragment aligned to the centre, the product of the two lengths, or
-    banded_cells where that exceeds `max_cells` and the alignment is banded; and the insertion slots, each
-    member's excess over the centre aligned, banded, to the longest such (_slots). Around a medoid, which is
-    not known in advance, the longest allele stands in for it, and the slots, like choosing the medoid, are
-    not counted."""
+    long_pair_cells where that exceeds `max_cells`; and the insertion slots, each member's excess over the
+    centre aligned, banded, to the longest such (_slots). Around a medoid, which is not known in advance,
+    the longest allele stands in for it, and the slots, like choosing the medoid, are not counted."""
     c, others, cid = _centre_and_others(pkg, centre, max_excess)
-    total = sum(c * n if c * n <= max_cells else banded_cells(c, n) for n in others if c and n)
+    total = sum(c * n if c * n <= max_cells else long_pair_cells(c, n, max_cells) for n in others if c and n)
     if cid is not None:
         slots = _slots(c, others)
         total += sum(banded_cells(slots[0], e) for e in slots[1:])
@@ -208,7 +220,7 @@ def peak_bytes(pkg, max_cells=MAX_CELLS, page=ESTIMATE_PAGE, centre='ref', max_e
         aligner = max(memory.any_pair_bytes(aligned, max_cells, page), memory.abpoa_bytes(longest, longest, True, page))
     else:
         slots = _slots(c, others)
-        aligner = max([memory.abpoa_bytes(c, n, c * n > max_cells, page) for n in others if c and n] +
+        aligner = max([memory.pair_bytes(c, n, max_cells, page) for n in others if c and n] +
                       [memory.abpoa_bytes(slots[0], e, True, page) for e in slots[1:]], default=0)
     return memory.BASE + KMER_BYTES * sum(alleles) + COMPARE_BYTES * max(alleles) + aligner
 
@@ -278,11 +290,12 @@ def realign_package(pkg, abpoa='abpoa', timeout=None, max_cells=MAX_CELLS, workd
             raise TooBig(why)
         with Abpoa(abpoa, scores, deadline, workdir) as align:
             msa = star_msa(alleles, fragments, align=align, centre=centre_of(pkg, centre, max_excess), deadline=deadline,
-                           max_cells=max_cells, min_share=min_share)
+                           max_cells=max_cells, min_share=min_share, scores=scores)
         rows = msa.rows
         res.update(status='ok', centre=msa.centre, rows=rows, columns=len(next(iter(rows.values()), '')),
                    slot_alignments=msa.slot_alignments, fragments_exact=msa.fragments_exact,
-                   fragments_aligned=msa.fragments_aligned, banded_pairs=msa.banded_pairs)
+                   fragments_aligned=msa.fragments_aligned, banded_pairs=msa.banded_pairs,
+                   seeded_pairs=msa.seeded_pairs, refined_windows=msa.refined_windows)
     except RealignError as e:
         res.update(status=e.status, message=str(e))
     except MemoryError:

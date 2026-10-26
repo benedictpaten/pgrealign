@@ -3,8 +3,8 @@ import random
 import time
 import unittest
 
-from pgrealign import cli, memory, qc, realign
-from pgrealign.memory import BASE, GB, abpoa_bytes, any_pair_bytes
+from pgrealign import cli, memory, qc, realign, star
+from pgrealign.memory import BASE, GB, abpoa_bytes, any_pair_bytes, pair_bytes
 
 
 def pkg(alleles, fragments=()):
@@ -20,6 +20,10 @@ class TestEstimate(unittest.TestCase):
                                  (7500, 7500, True, 0.60), (15000, 15000, True, 1.24), (30000, 30000, True, 2.65),
                                  (58700, 58700, True, 5.85), (58700, 40100, True, 19.2), (58700, 103200, True, 47.1)]:
             self.assertGreaterEqual(BASE + abpoa_bytes(n, m, banded, page=16384), gb * GB, (n, m, banded))
+        # star.long_pair's band, the widest within MAX_CELLS (or abPOA's own where the lengths differ too much for
+        # that): peak resident memory on Linux, 4 KB pages, abPOA 1.5.7
+        for n, m, gb in [(27709, 27752, 7.64), (27709, 37174, 6.91), (32286, 34412, 8.13), (27709, 48811, 10.19)]:
+            self.assertGreaterEqual(BASE + pair_bytes(n, m, realign.MAX_CELLS, page=4096), gb * GB, (n, m))
 
     def test_monotone_in_length(self):
         # unbanded, then banded: every pair's matrix is under 450,000,000 cells in the first, over it in the second
@@ -31,15 +35,21 @@ class TestEstimate(unittest.TestCase):
         self.assertLessEqual(realign.peak_bytes(pkg([30000, 20000])), realign.peak_bytes(pkg([30000, 20000, 8000])))
         self.assertLessEqual(realign.peak_bytes(pkg([30000, 20000])), realign.peak_bytes(pkg([30000, 20000], [9000])))
 
-    def test_banded_over_max_cells(self):
+    def test_over_max_cells(self):
         n = 20000
         self.assertEqual(any_pair_bytes([n, n], n * n), abpoa_bytes(n, n, False))
-        self.assertEqual(any_pair_bytes([n, n], n * n - 1), abpoa_bytes(n, n, True))
-        self.assertLess(abpoa_bytes(n, n, True), abpoa_bytes(n, n, False) / 4)
-        self.assertLess(realign.peak_bytes(pkg([n, n]), max_cells=n * n - 1), realign.peak_bytes(pkg([n, n]), max_cells=n * n))
+        self.assertEqual(any_pair_bytes([n, n], n * n - 1), pair_bytes(n, n, n * n - 1))
+        # just over max_cells, a pair takes about what max_cells cells unbanded do; far over it, much less than
+        # its own matrix unbanded, and never less than refinement's windows
+        self.assertLess(abs(pair_bytes(n, n, n * n - 1, 0) - abpoa_bytes(n, n, False)), abpoa_bytes(n, n, False) / 20)
+        big = 100000
+        self.assertLess(pair_bytes(big, big, realign.MAX_CELLS), abpoa_bytes(big, big, False) / 10)
+        self.assertGreaterEqual(pair_bytes(big, big, realign.MAX_CELLS), 20 * realign.MAX_CELLS)
+        self.assertEqual(pair_bytes(big, big, realign.MAX_CELLS, 0),
+                         abpoa_bytes(big, big, star.band_width(big, big, realign.MAX_CELLS), 0))
         self.assertEqual(qc.pair_bytes(n, n, n * n) - BASE, abpoa_bytes(n, n, False))
         # qc's estimate, like realign's, assumes ESTIMATE_PAGE whatever the machine's page size
-        self.assertEqual(qc.pair_bytes(n, n, n * n - 1) - BASE, abpoa_bytes(n, n, True, memory.ESTIMATE_PAGE))
+        self.assertEqual(qc.pair_bytes(n, n, n * n - 1) - BASE, pair_bytes(n, n, n * n - 1, memory.ESTIMATE_PAGE))
         # a region realign refuses before aligning takes only BASE
         self.assertEqual(realign.peak_bytes(pkg([n, n]), max_cells=1000), BASE)
         self.assertEqual(realign.peak_bytes(pkg([], [n])), BASE)
@@ -57,7 +67,7 @@ class TestEstimate(unittest.TestCase):
         for _ in range(300):
             lengths = [rng.choice([0, 50, 3000, 9000, 20000, 41000, 90000]) for _ in range(rng.randint(2, 6))]
             max_cells = rng.choice([10 ** 6, 10 ** 8, 450_000_000])
-            worst = max(abpoa_bytes(lengths[i], lengths[j], lengths[i] * lengths[j] > max_cells)
+            worst = max(pair_bytes(lengths[i], lengths[j], max_cells)
                         for i in range(len(lengths)) for j in range(len(lengths)) if i != j)
             self.assertEqual(any_pair_bytes(lengths, max_cells), worst, (lengths, max_cells))
 

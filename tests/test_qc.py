@@ -56,14 +56,15 @@ class TestPieces(unittest.TestCase):
             k += len(x)
         calls = []
 
-        def align(seqs, banded=False):                # no base aligned either: one deletion, one insertion
-            calls.append((len(seqs[0]), len(seqs[1]), banded))
+        def align(seqs, banded=False, seeded=False):  # no base aligned either: one deletion, one insertion
+            calls.append((len(seqs[0]), len(seqs[1]), banded, seeded))
             return [seqs[0] + '-' * len(seqs[1]), '-' * len(seqs[0]) + seqs[1]]
         self.assertEqual(qc.compared_pairs(pkg, rows), [('pair', 'a2', 'a3'), ('ref', 'a1', 'a2'), ('ref', 'a1', 'a3')])
         limit = qc.pair_bytes(10, 10) + 1000                  # the pairs with a3 need more
         r = qc.region_qc(pkg, rows, align, max_cells=50, max_bytes=limit)
-        # a1 and a2 are compared, banded since 100 cells exceed 50; the pairs with a3, over max_cells too, are not
-        self.assertEqual((r['skipped'], r['banded'], calls), (2, 1, [(10, 10, True)]))
+        # a1 and a2 are compared, as star.long_pair aligns them since 100 cells exceed 50: banded, with abPOA's own
+        # band, 10 cells, and seeded; the pairs with a3, over max_cells too, are not compared
+        self.assertEqual((r['skipped'], r['banded'], calls), (2, 1, [(10, 10, 10, False), (10, 10, True, True)]))
         self.assertEqual(qc.peak_bytes(pkg, rows, max_cells=50, max_bytes=limit), qc.pair_bytes(10, 10, 50))
         self.assertEqual(qc.peak_bytes(pkg, rows, max_cells=50), qc.pair_bytes(10, 2800, 50))
         self.assertEqual(qc.peak_bytes(pkg, rows, max_bytes=1), memory.BASE)
