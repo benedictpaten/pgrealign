@@ -413,14 +413,13 @@ on a region's size below leaves a region that exceeds it `too_big`, with a messa
   alignments fill (`realign.work`): for each allele and fragment aligned to the centre, the product
   of the two lengths, or, where that exceeds `--max-cells`, `realign.long_pair_cells(n, m)`: the
   centre's length times the band, which spans the two lengths' difference and `star.band_width`
-  cells either side, about `--max-cells` in all; the same with abPOA's own band, 10 cells plus 1% of
-  the other's length either side, for seeding (`realign.banded_cells(n, m)`); and √(nm
-  `--max-cells`) for refinement, whose windows of at most `--max-cells` cells lie along the matrix's
-  diagonal, counted though it runs only where the seeded alignment is kept; and for the insertion
-  slots, the bases by which each member is longer than the centre, its excess, taken to fall in one
-  slot, each member's excess aligned, banded, to the longest. Around a medoid, which is not known
-  before the region runs, the longest allele stands in for the centre, and the slots are not
-  counted. Run time follows the work
+  cells either side (`realign.banded_cells(n, m, w)`), about `--max-cells` in all where the lengths
+  allow a band wider than abPOA's own. Seeding, which takes a small fraction of the band's time, and
+  refinement, which runs only where the seeded alignment is kept, are not counted. And for the
+  insertion slots, the bases by which each member is longer than the centre, its excess, taken to
+  fall in one slot, each member's excess aligned, banded, to the longest. Around a medoid, which is
+  not known before the region runs, the longest allele stands in for the centre, and the slots are
+  not counted. Run time follows the work
   ([method.md](method.md#limits-and-regions-that-keep-their-old-subgraph)). The default is
   `realign.MAX_WORK`, 2 × 10^11 cells, and 0 sets no limit.
 - `--max-region-memory` bounds the region's memory estimate, in GB ([Memory](#memory)). The default

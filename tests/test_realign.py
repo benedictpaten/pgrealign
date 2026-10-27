@@ -2,7 +2,6 @@ import contextlib
 import gzip
 import io
 import json
-import math
 import os
 import random
 import shutil
@@ -104,11 +103,12 @@ class TestEstimates(unittest.TestCase):
                          realign.banded_cells(90000, 20000))
         self.assertEqual(realign.work(p, 'medoid'),
                          realign.long_pair_cells(100000, 10000) + realign.long_pair_cells(100000, 30000))
-        # x's: the band, abPOA's own since the lengths differ by more than a wider one allows within MAX_CELLS,
-        # seeding's, taken as the same, and refinement's windows, about sqrt(n m MAX_CELLS)
+        # x's: the band, abPOA's own since the lengths differ by more than a wider one allows within MAX_CELLS
         self.assertEqual(star.band_width(10000, 100000, realign.MAX_CELLS), star.default_band(100000))
-        self.assertEqual(realign.long_pair_cells(10000, 100000), 2 * realign.banded_cells(10000, 100000) +
-                         math.isqrt(10000 * 100000 * realign.MAX_CELLS))
+        self.assertEqual(realign.long_pair_cells(10000, 100000), realign.banded_cells(10000, 100000))
+        # where the lengths allow a wider band, about MAX_CELLS
+        self.assertLessEqual(realign.long_pair_cells(30000, 31000), realign.MAX_CELLS)
+        self.assertGreater(realign.long_pair_cells(30000, 31000), 0.99 * realign.MAX_CELLS)
         # its memory: the worst of x's and y's alignments to the reference and the slot's, the 20 kb that y
         # adds aligned, banded, to the 90 kb that x adds, whose band spans the 70 kb they differ by
         page = realign.ESTIMATE_PAGE

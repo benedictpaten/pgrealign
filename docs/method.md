@@ -666,8 +666,11 @@ s rather than 0.3 s; the most memory a pair took, 10.9 GB resident, was the same
 pair whose lengths differ too much for a band wider than abPOA's own. On chrX, whose 35,839
 regions realign in 14.6 hours of one core, its 681 pairs over `--max-cells` add about an hour.
 `realign` admits the same chrX regions as before, and the largest one's memory estimate is the
-same; the estimated work rises by 36%, mostly for refinement, which is counted though it rarely
-runs.
+same; the estimated work rises by 11%. The work counts a long pair's band only: seeding took a
+median of 0.1 s a pair against the band's 5 s, and refinement runs only where the seeded alignment
+is kept. Counting both at their worst would more than double the work of regions whose long pairs
+differ in length by more than a wider band allows, such as regions of alleles of 100 kb and more,
+which `realign` aligns in a few minutes.
 
 ### Left normalisation
 
@@ -772,8 +775,8 @@ and fragments ([reference.md](reference.md#limits)):
 - its alleles hold more than 40,000,000 bases in all, since choosing the centre holds every allele's
   k-mer counts at once;
 - its work exceeds `--max-work`: the cells of dynamic-programming matrices its alignments to the
-  centre fill, a pair too large to align unbanded its band's, about `--max-cells`, seeding's, taken
-  as abPOA's own band's, and refinement's, about √(nm `--max-cells`), and its slots', taking each
+  centre fill, for a pair too large to align unbanded its band's, about `--max-cells` (seeding and
+  refinement add little; see Pairs too large to align unbanded), and its slots', taking each
   member's excess over the centre to fall in one slot and be aligned to the longest;
 - its memory estimate exceeds `--max-region-memory` GB ([reference.md](reference.md#memory));
 - abPOA would reserve more than `--max-address-space` GB for one of its alignments, which abPOA does

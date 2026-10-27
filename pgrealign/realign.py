@@ -121,12 +121,12 @@ def banded_cells(n, m=None, band=None):
 
 def long_pair_cells(n, m, max_cells=MAX_CELLS):
     """About how many cells star.long_pair fills aligning a sequence of `m` bases to one of `n`, two whose
-    matrix exceeds `max_cells`: its band's (star.band_width), about max_cells; seeding's, taken as abPOA's
-    own band's; and refinement's, windows of at most max_cells cells along the matrix's diagonal, about
-    sqrt(n m max_cells) in all and never more than n m. Refinement runs only where seeding's alignment
-    scores higher, which is not known in advance, so it is always counted."""
-    return (banded_cells(n, m, band_width(n, m, max_cells)) + banded_cells(n, m) +
-            min(n * m, math.isqrt(n * m * max_cells)))
+    matrix exceeds `max_cells`: its band's (star.band_width), about max_cells where the two lengths allow a
+    band wider than abPOA's own, and abPOA's own band's where they do not. That is most of its time.
+    Seeding's alignment, window by window under abPOA's own band, took a median of 0.1 s a pair against the
+    band's 5 s, and refinement runs only where seeding's alignment scores higher, rarely, so neither is
+    counted; counted, they would refuse regions of 100 kb alleles that realign aligns in minutes."""
+    return banded_cells(n, m, band_width(n, m, max_cells))
 
 
 def excess(pkg, aid):
