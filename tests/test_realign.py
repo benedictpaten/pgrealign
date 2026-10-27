@@ -2,6 +2,7 @@ import contextlib
 import gzip
 import io
 import json
+import math
 import os
 import random
 import shutil
@@ -50,15 +51,17 @@ class TestRealignPackage(unittest.TestCase):
 
     def test_statuses(self):
         two = [('a1', 'ACGTACGT', 1), ('a2', 'ACGTTCGT', 1)]
-        self.assertEqual(realign.realign_package(pkg('R', two), max_cells=10)['status'], 'too_big')
+        # 64 cells unbanded, over max_cells, and banded too (the band spans the whole row), over 7 x 5
+        self.assertEqual(realign.realign_package(pkg('R', two), max_cells=5)['status'], 'too_big')
         # 400 bp: 160,000 cells unbanded. One substitution, so that they share their 15-mers (min_share)
         long_two = [('a1', 'ACGTACGTAC' * 40, 2), ('a2', 'ACGTACGTAC' * 20 + 'ACGTTCGTAC' + 'ACGTACGTAC' * 19, 1)]
-        self.assertEqual(realign.realign_package(pkg('R', long_two), max_cells=5000)['status'], 'too_big')
-        r = realign.realign_package(pkg('R', long_two), max_cells=50000)   # banded: about 11,200 cells
+        r = realign.realign_package(pkg('R', long_two), max_cells=1000)     # abPOA's own band: 14,400 cells
+        self.assertEqual(r['status'], 'too_big')
+        self.assertIn('more than 7 times max_cells 1000', r['message'])
+        r = realign.realign_package(pkg('R', long_two), max_cells=50000)   # banded: about 49,600 cells
         self.assertEqual((r['status'], r['banded_pairs']), ('ok', 1))
         self.assertEqual(realign.realign_package(pkg('R', long_two))['banded_pairs'], 0)
         self.assertEqual(realign.realign_package(pkg('R', []))['status'], 'no_alleles')
-        self.assertEqual(realign.realign_package(pkg('R', two), timeout=1e-9)['status'], 'timeout')
         r = realign.realign_package(pkg('R', long_two), max_work=1000)
         self.assertEqual(r['status'], 'too_big')
         self.assertIn('more than max_work', r['message'])
@@ -125,20 +128,17 @@ class TestEstimates(unittest.TestCase):
         self.assertEqual(realign.centre_of(near), 'r')
         self.assertGreater(realign.peak_bytes(near), realign.peak_bytes(near, page=4096))
         self.assertIn('max_work', realign.refusal(p, max_work=1e8, **ref))
-        self.assertIn('max_region_memory', realign.refusal(p, max_region_memory=0.5, **ref))
-        # abPOA reserves its matrices whole, rounded up to a power of two: 2^35 bytes to align the 100 kb allele
-        # to the reference, and 2^36 to align the 20 kb that y adds to the 90 kb that x adds, in a slot
-        self.assertEqual(memory.abpoa_reservation(10000, 100000), 2 ** 35)
-        self.assertEqual(realign.reservation(p, **ref), 2 ** 36)
+        # its largest alignment: the 20 kb that y adds aligned to the 90 kb that x adds, in a slot, whose band
+        # spans the 70 kb they differ by; under 7 x MAX_CELLS, and over 7 x 2 x 10^8
+        self.assertEqual(realign.largest_alignment(p, **ref), realign.banded_cells(90000, 20000))
         self.assertIsNone(realign.refusal(p, **ref))
-        self.assertIn('abPOA would reserve 64 GB for one alignment, more than max_address_space 32 GB',
-                      realign.refusal(p, max_address_space=32, **ref))
-        self.assertIsNone(realign.refusal(p, max_address_space=0, **ref))
-        # around a medoid, the longest allele against one of the same length bounds the slots: 2^38 bytes
-        self.assertEqual(realign.reservation(p, 'medoid'), 2 ** 38)
+        self.assertIn('more than 7 times max_cells 200000000', realign.refusal(p, max_cells=200_000_000, **ref))
+        # around a medoid, not known in advance, any two alleles in either order: the 100 kb allele as the centre,
+        # the 30 kb one banded against it with abPOA's own band, which spans the whole row
+        self.assertEqual(realign.largest_alignment(p, 'medoid'), 100000 * 30000)
         # with one long allele only, no slot holds two long insertions
         q = pkg('Q', [('r', 'A' * 1000, 1), ('x', 'C' * 100000, 2), ('y', 'G' * 1200, 1)], ref='r')
-        self.assertEqual(realign.reservation(q, **ref), memory.abpoa_reservation(1000, 100000))
+        self.assertEqual(realign.largest_alignment(q, **ref), 1000 * 100000)   # x to r, unbanded
         self.assertEqual(realign.peak_bytes(q, **ref), memory.BASE + realign.KMER_BYTES * 102200 +
                          realign.COMPARE_BYTES * 100000 + 20 * 1000 * 100000)    # x to r, unbanded
 
@@ -250,25 +250,7 @@ class TestRun(unittest.TestCase):
         self.assertEqual(r['status'], 'out_of_memory')
         self.assertIn('out_of_memory', realign.MACHINE_FAILURES)
 
-    def test_reservation_beyond_the_machine(self):
-        # a region whose reservation this machine would refuse stops the run before anything is aligned; plan
-        # gives the reservation, and what the machine grants
-        d = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
-        pk, out = os.path.join(d, 'packages.jsonl.gz'), os.path.join(d, 'msas.jsonl.gz')
-        unit = 'ACGTTGCAAGTCAT'
-        big = pkg('BIG', [('a1', unit * 200, 1), ('a2', unit * 100 + 'G' + unit * 99, 1)], ref='a1')
-        with gzip.open(pk, 'wt') as f:
-            f.write(json.dumps(big) + '\n')
-        space = realign.reservation(big)
-        self.assertEqual(space, memory.abpoa_reservation(2800, 2800))
-        with mock.patch.object(memory, 'granted_bytes', return_value=space // 2):
-            with self.assertRaisesRegex(RuntimeError, 'more address space than this machine grants.*the largest, BIG'):
-                realign.run(pk, out, abpoa='false')
-            pl = realign.plan(pk)
-        self.assertEqual((pl['reservation_gb'], pl['granted_gb']), (space / memory.GB, round(space / 2 / memory.GB, 2)))
-        self.assertFalse(os.path.exists(out))
-
+    @unittest.skipUnless(shutil.which('abpoa'), 'abpoa not on PATH')
     def test_resume_applies_the_limits_afresh(self):
         # a record in the partial file is kept only if the limits given now admit its region, and a region left
         # too_big then is aligned now if they do, so a resumed run gives what a fresh one would
@@ -276,14 +258,16 @@ class TestRun(unittest.TestCase):
         self.addCleanup(shutil.rmtree, d, ignore_errors=True)
         pk = os.path.join(d, 'packages.jsonl.gz')
         unit = 'ACGTTGCAAGTCAT'
-        small = pkg('SMALL', [('a1', unit * 3, 1), ('a2', '', 1)], ref='a1')        # no abPOA needed
-        large = pkg('LARGE', [('a1', unit * 300, 1), ('a2', '', 1)], ref='a1')
+        small = pkg('SMALL', [('a1', unit * 3, 1), ('a2', unit * 4, 1)], ref='a1')
+        large = pkg('LARGE', [('a1', unit * 300, 1), ('a2', unit * 150 + 'G' + unit * 150, 1)], ref='a1')
         with gzip.open(pk, 'wt') as f:
             for p in (small, large):
                 f.write(json.dumps(p) + '\n')
-        low = (realign.peak_bytes(small) + realign.peak_bytes(large)) / 2 / memory.GB     # admits SMALL only
-        pl = realign.plan(pk, max_region_memory=low)
-        self.assertEqual((pl['admitted'], pl['too_big'], pl['largest']), (1, {'max_region_memory': 1}, 'SMALL'))
+        # under max_cells 50,000, LARGE's pair is banded, abPOA's own band filling 4,200 rows of 104 cells,
+        # more than 7 x 50,000: SMALL only is admitted
+        low = dict(max_cells=50000)
+        pl = realign.plan(pk, **low)
+        self.assertEqual((pl['admitted'], pl['too_big'], pl['largest']), (1, {'max_cells': 1}, 'SMALL'))
 
         def records(path):
             return [{k: v for k, v in r.items() if k != 'seconds'} for r in map(json.loads, gzip.open(path, 'rt'))]
@@ -293,15 +277,15 @@ class TestRun(unittest.TestCase):
             with open(out + '.partial', 'wb') as f:
                 for r in held:
                     f.write(gzip.compress((json.dumps(r) + '\n').encode()))
-            return realign.run(pk, out, abpoa='false', **kw), records(out)
+            return realign.run(pk, out, **kw), records(out)
 
         fresh = os.path.join(d, 'fresh.jsonl.gz')
-        realign.run(pk, fresh, abpoa='false')
+        realign.run(pk, fresh)
         both_ok = list(map(json.loads, gzip.open(fresh, 'rt')))
         self.assertEqual([r['status'] for r in both_ok], ['ok', 'ok'])
         lowered = os.path.join(d, 'lowered.jsonl.gz')
-        realign.run(pk, lowered, abpoa='false', max_region_memory=low)
-        s, got = resume('a.jsonl.gz', both_ok, max_region_memory=low)
+        realign.run(pk, lowered, **low)
+        s, got = resume('a.jsonl.gz', both_ok, **low)
         self.assertEqual((s['resumed'], s['realigned']), (1, {'ok': 1, 'too_big': 1}))
         self.assertEqual(got, records(lowered))
         s, got = resume('b.jsonl.gz', list(map(json.loads, gzip.open(lowered, 'rt'))))
@@ -322,8 +306,8 @@ class TestRun(unittest.TestCase):
             cli.main(['realign', '--packages', pk])                                    # no -o and no --plan
 
     def test_memory_decides_nothing(self):
-        # whether a region is aligned is decided by max_region_memory, from the package; the budget,
-        # max_memory, decides only how many regions run at once
+        # whether a region is aligned is decided by the size of its alignments (max_cells), from the package;
+        # the budget, max_memory, decides only how many regions run at once
         d = tempfile.mkdtemp()
         try:
             pk = os.path.join(d, 'packages.jsonl.gz')
@@ -346,17 +330,28 @@ class TestRun(unittest.TestCase):
             # which plan says beforehand, from the packages alone; its need_gb is enough
             pl = realign.plan(pk)
             self.assertEqual((pl['admitted'], pl['too_big'], pl['largest']), (4, {}, 'BIG'))
+            # and how long it would take: each region's estimate in all, and run's order with one worker
+            each = [realign.seconds(p) for p in pkgs]
+            self.assertEqual(pl['cpu_seconds'], math.ceil(sum(each)))
+            self.assertEqual(pl['seconds'], math.ceil(sum(each)))
+            # with two workers and room for both, R0 and R1 together, then BIG and R2
+            pl2 = realign.plan(pk, jobs=2, max_memory=4)
+            self.assertEqual(pl2['seconds'], math.ceil(memory.schedule_seconds([realign.peak_bytes(p) for p in pkgs],
+                                                                                each, 2, 4 * memory.GB)))
+            self.assertLess(pl2['seconds'], pl['seconds'])
             self.assertGreaterEqual(pl['need_gb'] * memory.GB, realign.peak_bytes(big))
             self.assertEqual(realign.run(pk, out, jobs=2, max_memory=pl['need_gb'])['realigned'], {'ok': 4})
-            pl = realign.plan(pk, max_region_memory=0.25)
-            self.assertEqual((pl['admitted'], pl['too_big']), (3, {'max_region_memory': 1}))
+            # with max_cells 30,000, BIG's pair is banded, and even abPOA's own band, 3,010 rows of 81 cells,
+            # would fill more than 7 x 30,000 cells
+            pl = realign.plan(pk, max_cells=30000)
+            self.assertEqual((pl['admitted'], pl['too_big']), (3, {'max_cells': 1}))
             self.assertNotEqual(pl['largest'], 'BIG')
             self.assertLess(pl['need_gb'] * memory.GB, realign.peak_bytes(big))
-            # under a max_region_memory BIG exceeds, it is too_big whatever the budget, and the rest align
+            # BIG is then too_big whatever the budget, and the rest align
             outs = []
             for budget in (limit, 4):
                 o = os.path.join(d, 'msas.%s.jsonl.gz' % budget)
-                s = realign.run(pk, o, jobs=2, max_memory=budget, max_region_memory=0.25)
+                s = realign.run(pk, o, jobs=2, max_memory=budget, max_cells=30000)
                 self.assertEqual(s['realigned'], {'ok': 3, 'too_big': 1})
                 self.assertLessEqual(s['peak_estimate_gb'], budget)
                 outs.append([json.loads(l) for l in gzip.open(o, 'rt')])
@@ -364,7 +359,7 @@ class TestRun(unittest.TestCase):
             self.assertEqual([r['id'] for r in first], ['R0', 'R1', 'BIG', 'R2'])
             r = first[2]
             self.assertEqual((r['status'], r['seconds']), ('too_big', 0.0))
-            self.assertIn('more than max_region_memory 0.25 GB', r['message'])
+            self.assertIn('more than 7 times max_cells 30000', r['message'])
             self.assertEqual([(r['id'], r['status'], r.get('rows')) for r in outs[1]],
                              [(r['id'], r['status'], r.get('rows')) for r in first])
             # a resumed run keeps the aligned records in its partial file, and decides too_big afresh
@@ -373,7 +368,7 @@ class TestRun(unittest.TestCase):
                 for r in first[1:3]:
                     f.write(gzip.compress((json.dumps(r) + '\n').encode()))
             os.remove(o)
-            s = realign.run(pk, o, jobs=2, max_memory=4, max_region_memory=0.25)
+            s = realign.run(pk, o, jobs=2, max_memory=4, max_cells=30000)
             self.assertEqual((s['resumed'], s['realigned']), (1, {'ok': 3, 'too_big': 1}))
             again = [json.loads(l) for l in gzip.open(o, 'rt')]
             self.assertEqual(again[2], first[2])

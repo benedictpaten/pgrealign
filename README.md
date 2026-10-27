@@ -61,8 +61,8 @@ walk on the contig, `<sample>#0#chr20`. `--targets` is a BED of intervals on tha
 and `pgrealign catalog` builds such a catalogue for another reference. `-j` sets the most regions
 realign and qc work on at once, and can be the number of cores: they start a region only while the
 memory estimates of those running fit in `--max-memory`, half the machine's memory by default.
-Which regions realign aligns does not depend on that budget or on the machine: it decides from each
-region's own size, before aligning anything, and has no time limit unless given `--timeout`. `-t`
+Which regions realign aligns does not depend on that budget or on the machine: it decides from the
+size of each region's alignments, in cells, before aligning anything, and has no time limit. `-t`
 sets how many threads vg uses. The outputs go to `out/chr20/`:
 
 | output | stage | contents |
@@ -181,10 +181,10 @@ for name, row in msa.rows.items():                      # one gapped row per all
 - run takes a stage as done when its output exists, whatever options made it: after changing an
   option, delete the outputs of that stage and of every stage after it.
 - abPOA reserves address space for the whole matrix of every alignment, even a banded one: 256 GB
-  for two 100 kb alleles. macOS grants it; Linux refuses a reservation larger than its memory and
-  swap. realign leaves a region that would need more than `--max-address-space`, 128 GB, as it is
-  on every machine, and stops, to be resumed elsewhere, if a machine refuses one within it
-  ([docs/reference.md](docs/reference.md#limits)).
+  for two 100 kb alleles, of which a band writes a few GB. The abPOA that cactus builds maps it so
+  that Linux does not count it; with another abPOA, Linux refuses a reservation larger than its
+  memory and swap, and realign stops on such a region, to be resumed elsewhere
+  ([docs/reference.md](docs/reference.md#memory)).
 
 ## Documentation
 

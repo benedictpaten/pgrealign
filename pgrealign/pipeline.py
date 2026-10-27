@@ -38,11 +38,9 @@ def _write_json(path, obj):
 
 
 def run_contig(gbz, contig, targets, out_dir, jobs=1, threads=4, vg=None, abpoa='abpoa', ref_sample='CHM13',
-               drop_samples=None, scores=SCORES, timeout=None, max_cells=realign.MAX_CELLS, max_internal_bp=200000,
+               drop_samples=None, scores=SCORES, max_cells=realign.MAX_CELLS, max_internal_bp=200000,
                id_start=None, do_qc=True, max_memory=None, log=print, min_share=realign.MIN_SHARE, centre='ref',
-               max_work=realign.MAX_WORK, max_region_memory=realign.MAX_REGION_MEMORY,
-               max_address_space=realign.MAX_ADDRESS_SPACE, max_excess=realign.MAX_EXCESS,
-               max_pair_memory=qc.MAX_PAIR_MEMORY):
+               max_work=realign.MAX_WORK, max_excess=realign.MAX_EXCESS):
     """Run every stage for `contig` (see the module docstring). `drop_samples` None means prepare's
     default, and `max_memory` None means memory.default_gb(). Returns {stage: summary} for the stages
     it ran, and the contig's node-id range."""
@@ -89,15 +87,12 @@ def run_contig(gbz, contig, targets, out_dir, jobs=1, threads=4, vg=None, abpoa=
         log('[%s] realign' % contig)
         t = time.time()
         s = realign.run(os.path.join(ex, 'packages.jsonl.gz'), msas, jobs=jobs, max_memory=max_memory, abpoa=abpoa,
-                        timeout=timeout, max_cells=max_cells, scores=scores, min_share=min_share, centre=centre,
-                        max_work=max_work, max_region_memory=max_region_memory,
-                        max_address_space=max_address_space, max_excess=max_excess)
+                        max_cells=max_cells, scores=scores, min_share=min_share, centre=centre, max_work=max_work,
+                        max_excess=max_excess)
         provenance.write_manifest(msas, 'realign', {'packages': os.path.join(ex, 'packages.jsonl.gz')},
                                   {'method': 'medoid_star', 'scores': ' '.join(scores.flags()),
-                                   'timeout': timeout, 'max_cells': max_cells, 'max_memory': max_memory,
-                                   'min_share': min_share, 'centre': centre, 'max_work': max_work,
-                                   'max_region_memory': max_region_memory, 'max_address_space': max_address_space,
-                                   'max_excess': max_excess},
+                                   'max_cells': max_cells, 'max_memory': max_memory, 'min_share': min_share,
+                                   'centre': centre, 'max_work': max_work, 'max_excess': max_excess},
                                   tools=abpoa_tool, extra={'summary': s}, started=t)
         out['realign'] = s
 
@@ -131,10 +126,10 @@ def run_contig(gbz, contig, targets, out_dir, jobs=1, threads=4, vg=None, abpoa=
         log('[%s] qc' % contig)
         t = time.time()
         s = qc.run(ex, msas, q, jobs=jobs, abpoa=abpoa, scores=scores, ref_sample=ref_sample, max_cells=max_cells,
-                   graph=cgbz, vg=vg, threads=threads, max_memory=max_memory, max_pair_memory=max_pair_memory)
+                   graph=cgbz, vg=vg, threads=threads, max_memory=max_memory)
         provenance.write_manifest(q, 'qc', {'msas': msas, 'graph': cgbz},
                                   {'extract': ex, 'scores': ' '.join(scores.flags()), 'max_cells': max_cells,
-                                   'max_memory': max_memory, 'max_pair_memory': max_pair_memory},
+                                   'max_memory': max_memory},
                                   tools={**abpoa_tool, **vg_tool}, extra={'summary': s}, started=t)
         out['qc'] = s
 

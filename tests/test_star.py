@@ -219,12 +219,6 @@ class TestStarMSA(unittest.TestCase):
         for aid, s, _ in alleles:
             self.assertEqual(m.rows[aid].replace('-', ''), s)
 
-    def test_deadline(self):
-        alleles = [('a1', 'ACGTACGTAC', 1), ('a2', 'ACGTTCGTAC', 1)]
-        with star.Abpoa(deadline=0) as align:
-            with self.assertRaises(star.TimedOut):
-                star.star_msa(alleles, align=align)
-
     def guide(self):
         """A centre, an allele that is the centre with 12 bases inserted in its middle stretch, and an alignment
         of the two that matches their flanks but puts the insertion at the stretch's end, so that 15 of the

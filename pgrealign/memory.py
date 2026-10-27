@@ -37,16 +37,22 @@ that allows; and refinement's windows, unbanded, at most `max_cells` cells each.
 window by window under abPOA's own band, is not counted: it took at most 1.3 GB resident in pairs of up to
 71 kb (Linux, abPOA 1.5.7), against the band's 8 GB.
 
-**abPOA's reservation.** The matrices are reserved whole, 20 bytes a cell, rounded up to a power of two
-(`abpoa_reservation`): two 62,146 bp sequences reserve 2^37 bytes, banded or not. macOS grants any
-reservation. Linux, under its default overcommit policy, refuses one larger than the machine's memory
-and swap, and abPOA then fails ("posix_memalign fail"), so whether such a region can be aligned at all
-depends on the machine. realign therefore refuses, from the package, a region that would need a larger
-reservation than a fixed limit, and treats a refused reservation as a failure of the run, not of the
-region.
+**abPOA's reservation.** abPOA reserves its matrices whole, 20 bytes a cell rounded up to a power of
+two, banded or not: two 62,146 bp sequences reserve 2^37 bytes, of which a band writes a few GB. Linux,
+under its default overcommit policy, refuses a reservation larger than the machine's memory and swap
+however little of it is written, so the abPOA that cactus builds maps the matrices with MAP_NORESERVE,
+which Linux does not count: only what is written takes memory. Another abPOA can fail on a smaller
+machine ("posix_memalign fail"); realign then stops with an error (star.ReservationRefused), and is run
+again with that abPOA or on a larger machine. Nothing about the reservation decides what is aligned.
+
+**Time.** `schedule_seconds` replays `run_within`'s order of starts with an estimate of each item's
+seconds, so that realign --plan can say how long a run would take with a given budget and number of
+workers: where many items need a large share of the budget, they run a few at a time, and the run takes
+far longer than the sum of the items' seconds over the number of workers suggests.
 """
 import collections
 import concurrent.futures
+import heapq
 import os
 import resource
 
@@ -77,35 +83,6 @@ def pair_bytes(n, m, max_cells, page=PAGE):
     if max_cells is None or n * m <= max_cells:
         return abpoa_bytes(n, m, False)
     return max(abpoa_bytes(n, m, band_width(n, m, max_cells), page), CELL_BYTES * max_cells)
-
-
-def abpoa_reservation(n, m):
-    """The address space, in bytes, that abPOA reserves to align a sequence of m bases to one of n: its
-    five matrices whole, CELL_BYTES a cell, rounded up to a power of two."""
-    full = CELL_BYTES * (n + 1) * (m + 1)
-    return 1 << (full - 1).bit_length()
-
-
-def granted_bytes():
-    """The largest reservation this machine grants one process, in bytes, as far as can be told, or None for
-    no limit: under Linux's default overcommit policy its memory and swap (MemTotal and SwapTotal in
-    /proc/meminfo), under its strict policy its commit limit, and under 'always overcommit', or elsewhere,
-    none. It decides nothing about a region, only whether realign can align here what it admits."""
-    try:
-        with open('/proc/sys/vm/overcommit_memory') as f:
-            mode = int(f.read())
-        info = {}
-        with open('/proc/meminfo') as f:
-            for line in f:
-                key, value = line.split(':', 1)
-                info[key] = int(value.split()[0]) * 1024
-    except (OSError, ValueError, IndexError):
-        return None
-    if mode == 1:
-        return None
-    if mode == 2:
-        return info.get('CommitLimit')
-    return info.get('MemTotal', 0) + info.get('SwapTotal', 0)
 
 
 def any_pair_bytes(lengths, max_cells, page=PAGE):
@@ -161,3 +138,19 @@ def run_within(fn, items, costs, jobs, limit, take):
                 used -= costs[i]
                 take(i, fut.result())
     return peak
+
+
+def schedule_seconds(costs, seconds, jobs, limit):
+    """How long run_within takes for items of these `costs` and `seconds`, started as it starts them: in order,
+    each once the costs of those running, its own included, are at most `limit`, one whose cost alone
+    exceeds `limit` when nothing else runs, and at most `jobs` at once."""
+    jobs = max(1, jobs)
+    running, used, now, nxt = [], 0, 0.0, 0
+    while nxt < len(costs) or running:
+        while nxt < len(costs) and len(running) < jobs and (not running or used + costs[nxt] <= limit):
+            heapq.heappush(running, (now + seconds[nxt], nxt))
+            used += costs[nxt]
+            nxt += 1
+        now, i = heapq.heappop(running)
+        used -= costs[i]
+    return now

@@ -438,9 +438,10 @@ align two sequences abPOA fills a dynamic-programming matrix of one cell per pai
 from each sequence, at 20 bytes per cell. A band limits it to the cells near the alignment's
 path. abPOA's own band is adaptive, reaching about 10 cells plus 1% of the sequence's length either
 side of the path; `-b w -f 0` makes it w cells, and `-b -1` turns it off. A band saves time, but less
-memory than its cells suggest: abPOA reserves the whole matrix either way, rounded up to a power of
-two, and a banded alignment still touches at least one page per base of the centre in each of its
-five score matrices ([limits](reference.md#limits)). abPOA can also seed an alignment (`-S`): it
+memory than its cells suggest: a banded alignment still touches at least one page per base of the
+centre in each of its five score matrices, and abPOA reserves the whole matrix either way, rounded up
+to a power of two, which the abPOA that cactus builds maps so that only what it writes takes memory
+([memory](reference.md#memory)). abPOA can also seed an alignment (`-S`): it
 chains the minimizers the sequences share and aligns between them, window by window. The aligner is
 told, for each alignment, whether a band is wanted, how wide, and whether to seed: alignments to the
 centre are unbanded unless too large, when they are aligned both with a band and seeded, and
@@ -763,7 +764,6 @@ as it is:
 | status | when |
 |---|---|
 | `too_big` | the region exceeds one of the limits on its size below |
-| `timeout` | only with `--timeout`: the region ran longer than that many seconds |
 | `aligner_failed` | abPOA exited with an error, left out a row, or returned pairwise rows that do not spell their inputs |
 | `no_alleles` | the region has fragments but no allele: no walk spans it |
 | `not_homologous` | an allele shares less than `--min-share` of its 15-mers with the centre (see Homology) |
@@ -772,49 +772,50 @@ as it is:
 Whether a region is aligned is decided from its package alone, before anything is aligned, so the
 same packages give the same alignments, and the same graph, on any machine. Nothing that depends on
 the machine decides it: not the time a region takes, which depends on the machine's speed and on
-what else runs there, nor the memory `realign` is given, nor the machine's page size. The limits on
-a region's size, each of which makes it `too_big`, are all computed from the lengths of its alleles
-and fragments ([reference.md](reference.md#limits)):
-- even abPOA's own band would exceed `--max-cells` cells aligning the region's longest allele or
-  fragment to one of the same length: the smaller of n² and 2n (10 + ⌊n / 100⌋) cells for n bases.
-  For long sequences this is about n² / 50, so the limit admits sequences about seven times as long
-  as an unbanded alignment of two equal lengths would;
+what else runs there, nor the memory `realign` is given, nor the machine's page size. Every limit is
+a size of the alignment, as a window and a band are in cactus's own alignments, never a size of the
+machine, and the memory and time a region needs follow from them. Each of these makes a region
+`too_big`, computed from the lengths of its alleles and fragments ([reference.md](reference.md#limits)):
+- one of its alignments would fill more than 7 times `--max-cells` cells (`realign.largest_alignment`),
+  about 3.2 × 10^9 cells, or 63 GB, with the default. An alignment to the centre fills the product of
+  the two lengths, or, for a pair too large to align unbanded, its band's cells: about `--max-cells`,
+  and more where the two lengths differ by more than that band allows, as the band then spans their
+  difference. A slot's alignment fills abPOA's own band across each member's excess and the longest.
+  This bounds the region's memory, about 20 bytes a cell;
 - its alleles hold more than 40,000,000 bases in all, since choosing the centre holds every allele's
   k-mer counts at once;
 - its work exceeds `--max-work`: the cells of dynamic-programming matrices its alignments to the
-  centre fill, for a pair too large to align unbanded its band's, about `--max-cells` (seeding and
-  refinement add little; see Pairs too large to align unbanded), and its slots', taking each
-  member's excess over the centre to fall in one slot and be aligned to the longest;
-- its memory estimate exceeds `--max-region-memory` GB ([reference.md](reference.md#memory));
-- abPOA would reserve more than `--max-address-space` GB for one of its alignments, which abPOA does
-  for the whole matrix, rounded up to a power of two, banded or not. Linux refuses a reservation
-  larger than the machine's memory and swap, so without this limit such a region would be aligned
-  on a large machine and fail on a small one.
+  centre fill, for a pair too large to align unbanded its band's (seeding and refinement add little;
+  see Pairs too large to align unbanded), and its slots', taking each member's excess over the centre
+  to fall in one slot and be aligned to the longest. This bounds its time.
 
 Run time follows the work. On the 7,288 regions of chrX in the HPRC graph realigned on CHM13 that
 took a second or more, the logarithms of the two correlate at 0.90, and the 160 that took a minute
 or more ran at 3, 6 and 9 × 10^7 cells a second (the 10th, 50th and 90th percentiles), so the
-default `--max-work`, 2 × 10^11 cells, is about an hour of one core.
+default `--max-work`, 2 × 10^11 cells, is about an hour of one core. `--plan` estimates a region's
+time as a quarter of a second plus its work at 5 × 10^7 cells a second (`realign.seconds`): chrY and
+chr21 of the 30-way graph ran in 63% and 84% of their regions' estimates in all, and no region
+estimated at 10 s or more in more than 1.75 times its own.
 
-On that graph's 1,123,110 regions, the defaults leave 346 `too_big`: 155 for `--max-cells` or their
-total bases, as before, 40 for their work, 88 for their memory estimate and 63 for abPOA's
-reservation. They admit 298 of the 344 regions that the earlier time limit, 900 s, left as they were,
-and leave out 106 that it aligned, on machines of hundreds of GB. For such machines,
-`--max-region-memory 128 --max-address-space 256` leaves out 24 of those and admits 320 of the 344.
-The largest region the defaults admit on any chromosome needs 62.5 GB, by its estimate.
+Of the 1,123,110 regions extract made `ok` in the HPRC graph on CHM13, the defaults leave 340
+`too_big`: 206 for an alignment over 7 times `--max-cells` cells, 117 for their work and 17 for their
+bases. The largest region they admit needs 68.5 GB (`need_gb`), and their estimates add up to 947
+core-hours. Of the 897,485 of a 30-way graph of HPRC v2.1 assemblies, they leave 69, all for an
+alignment over that size; the largest admitted needs 69.3 GB, and the estimates add up to 246
+core-hours, where a run of nearly the same regions took 195.
 
 `--max-memory` decides only how many regions run at once: `realign` starts them in order while the
-estimates of those running fit within it. If a region within `--max-region-memory` needs more than
-`--max-memory` on its own, `realign` stops before it aligns anything, with an error that names the
-region and how much it needs, rather than leave it out; `--plan` gives that figure, and the regions
-each limit leaves `too_big`, without aligning anything. Nor does the machine decide: `realign` stops
-before it aligns anything if a region it admits would need a larger reservation than the machine
-grants, and a region the machine fails all the same (abPOA's reservation refused, abPOA killed, the
-worker out of memory) is not recorded: `realign` aligns the others and then stops, and run again where
-the region can be aligned, it resumes with it. A time limit, `--timeout`, applies
-only when given: it is checked while choosing a medoid and before each call to abPOA, and abPOA
-itself is stopped at the deadline. Every other failure is recorded in the region's own result, so
-one region cannot stop a contig.
+estimates of those running fit within it. If a region needs more than `--max-memory` on its own,
+`realign` stops before it aligns anything, with an error that names the region and how much it
+needs, rather than leave it out. `--plan` gives, without aligning anything, the regions each limit
+leaves `too_big`, the memory the largest region needs (`need_gb`), and an estimate of how long the
+run would take with a given `-j` and `--max-memory` (`seconds`), which replays `realign`'s order of
+starts, since where many regions each need a large share of the budget they run a few at a time.
+Nor does the machine decide: a region the machine fails (abPOA's reservation refused, as an abPOA
+that reserves its matrices whole can be on a small Linux machine; abPOA killed; the worker out of
+memory) is not recorded: `realign` aligns the others and then stops, and run again where the region
+can be aligned, it resumes with it. There is no time limit. Every other failure is recorded in the
+region's own result, so one region cannot stop a contig.
 
 ### Which regions are realigned
 
@@ -938,12 +939,13 @@ those whose package has more than one allele. Within a region it compares two se
 Each pair's projected alignment is compared with its optimal alignment: the pair's global,
 unbanded, left-normalised abPOA alignment under the scores given with `--scores`. A pair whose
 optimal alignment would need more than `--max-cells` cells, the product of the two lengths, is
-compared with abPOA's banded alignment instead, which can fall short of the optimum, and is counted
-in `banded`; `run` gives `qc` the same `--max-cells` as `realign`, so a pair through the centre that
-`realign` banded is compared with the very alignment `realign` used. A pair whose alignment's
-memory estimate exceeds `--max-pair-memory` is not compared at all, on any machine, and is counted
-in `skipped` ([reference.md](reference.md#qc)). An aligned pair is a base of one sequence and a base of the other
-in one column, whether they match or not.
+compared with the alignment `realign` makes of such a pair (Pairs too large to align unbanded), which
+can fall short of the optimum, and is counted in `banded`; `run` gives `qc` the same `--max-cells` as
+`realign`, so a pair through the centre that is too large for `realign` too is compared with the very
+alignment `realign` used. A pair whose alignment would fill more than 7 times `--max-cells` cells,
+the size at which `realign` leaves a region `too_big`, is not compared at all, on any machine, and is
+counted in `skipped` ([reference.md](reference.md#qc)). An aligned pair is a base of one sequence and
+a base of the other in one column, whether they match or not.
 
 ### The graph's own alignment
 
@@ -970,7 +972,7 @@ induced graph. Its other fields are counts summed over the region's compared pai
 | `ref_sv`, `ref_sv_opt` | in the reference pairs' projected and optimal alignments, runs of 50 or more consecutive columns in which one row has a gap opposite a base of the other, whichever row holds the gap |
 | `forced`, `forced_opt` | columns of the projected and optimal alignments, of random and reference pairs alike, that lie in a forced-homology window |
 | `banded` | random and reference pairs compared with a banded alignment because of `--max-cells` |
-| `skipped` | random and reference pairs not compared because of `--max-pair-memory`; every other field leaves them out |
+| `skipped` | random and reference pairs not compared, their alignment over 7 times `--max-cells` cells; every other field leaves them out |
 | `graph_pair_msa`, `graph_pair_tp` | with `--graph`: aligned pairs in the graph's alignment of the random pairs, and in both it and the optimal alignment |
 | `graph_ref_msa`, `graph_ref_tp` | the same, for the reference pairs |
 | `graph_sequence` | with `--graph`: the bases of the nodes the region's runs visit, which `replace` removes |

@@ -27,7 +27,7 @@ class TestEstimate(unittest.TestCase):
 
     def test_monotone_in_length(self):
         # unbanded, then banded: every pair's matrix is under 450,000,000 cells in the first, over it in the second
-        for lengths in ([100, 1000, 5000, 10000, 20000], [25000, 40000, 60000, 100000, 140000]):
+        for lengths in ([100, 1000, 5000, 10000, 20000], [25000, 40000, 60000, 80000, 100000]):
             est = [realign.peak_bytes(pkg([n, n - 7, 3 * n // 4])) for n in lengths]
             self.assertEqual(est, sorted(est))
             self.assertLess(est[0], est[-1])
@@ -128,6 +128,16 @@ class TestRunWithin(unittest.TestCase):
     def test_jobs(self):
         self.assertLessEqual(self.check([0] * 8, 2, 10), 0)
         self.check([1] * 7, 1, 100)
+
+    def test_schedule_seconds(self):
+        # in order, at most `jobs` at once, while the costs of those running fit the limit
+        self.assertEqual(memory.schedule_seconds([1, 1, 1], [5, 3, 4], 3, 10), 5)       # all at once
+        self.assertEqual(memory.schedule_seconds([1, 1, 1], [5, 3, 4], 1, 10), 12)      # one at a time
+        self.assertEqual(memory.schedule_seconds([10, 10, 10], [10, 10, 10], 8, 20), 20)  # two fit the limit
+        # the second waits for the first, which leaves room, and the third, small, waits behind it: in order
+        self.assertEqual(memory.schedule_seconds([15, 10, 1], [4, 6, 1], 8, 20), 10)
+        self.assertEqual(memory.schedule_seconds([30, 1], [2, 2], 8, 20), 4)           # one over the limit, alone
+        self.assertEqual(memory.schedule_seconds([], [], 4, 20), 0)
 
     def test_exception(self):
         got = []

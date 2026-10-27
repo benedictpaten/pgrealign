@@ -57,7 +57,6 @@ import os
 import shutil
 import subprocess
 import tempfile
-import time
 
 K = 15
 HOMOLOGY_BP = 100       # the shortest allele, and centre, that check_homology judges
@@ -77,10 +76,6 @@ class RealignError(Exception):
 
 class TooBig(RealignError):
     status = 'too_big'
-
-
-class TimedOut(RealignError):
-    status = 'timeout'
 
 
 class AlignerFailed(RealignError):
@@ -207,11 +202,10 @@ class Abpoa:
     `abpoa -m 0 -r 1 <scores>`, with `-b -1` (no band) unless `banded` is true. abPOA's adaptive band
     then applies, 10 cells plus 1% of the sequence's length either side (`default_band`) if `banded` is
     True, and `banded` cells either side if it is a number (`-b <banded> -f 0`). With `seeded` too,
-    abPOA aligns between the minimizers the sequences share (`-S`), its own band within each window.
-    Past `deadline` (a time.time() value), a call raises TimedOut."""
+    abPOA aligns between the minimizers the sequences share (`-S`), its own band within each window."""
 
-    def __init__(self, exe='abpoa', scores=SCORES, deadline=None, workdir=None):
-        self.exe, self.scores, self.deadline, self.workdir = exe, scores, deadline, workdir
+    def __init__(self, exe='abpoa', scores=SCORES, workdir=None):
+        self.exe, self.scores, self.workdir = exe, scores, workdir
         self.dir = None
 
     def __enter__(self):
@@ -234,11 +228,6 @@ class Abpoa:
         return self.scores.flags() + ['-b', str(int(banded)), '-f', '0']
 
     def __call__(self, seqs, banded=False, seeded=False):
-        timeout = None
-        if self.deadline is not None:
-            timeout = self.deadline - time.time()
-            if timeout <= 0:
-                raise TimedOut('time limit reached')
         fa, out = os.path.join(self.dir, 'in.fa'), os.path.join(self.dir, 'out.fa')
         with open(fa, 'w') as f:
             for i, s in enumerate(seqs):
@@ -247,14 +236,12 @@ class Abpoa:
         try:
             with open(out, 'w') as o:
                 subprocess.run([self.exe, '-m', '0', '-r', '1', *flags, fa], stdout=o,
-                               stderr=subprocess.PIPE, check=True, timeout=timeout)
-        except subprocess.TimeoutExpired:
-            raise TimedOut('time limit reached in abPOA')
+                               stderr=subprocess.PIPE, check=True)
         except subprocess.CalledProcessError as e:
             err = (e.stderr or b'').decode(errors='replace').strip()
             if e.returncode < 0:
                 raise AlignerKilled('abPOA was killed by signal %d: %s' % (-e.returncode, err[-300:]))
-            failed = ReservationRefused if 'posix_memalign fail' in err else AlignerFailed
+            failed = ReservationRefused if 'posix_memalign fail' in err or 'mmap fail' in err else AlignerFailed
             raise failed('abPOA exited with %d: %s' % (e.returncode, err[-300:]))
         rows = read_fasta_rows(out)
         try:
@@ -315,13 +302,12 @@ def sketch_distance(a, b, size=SKETCH):
     return 1.0 - sum(1 for h in union if h in sa and h in sb) / len(union)
 
 
-def medoid(seqs, weights, k=K, deadline=None, max_work=MEDOID_WORK, counts=None):
+def medoid(seqs, weights, k=K, max_work=MEDOID_WORK, counts=None):
     """Index of the sequence minimising sum_j w_j (1 - Jaccard(i, j)) over all the others; ties go to the
     lower index. Jaccard is over k-mer multisets: the copies of each k-mer the two share, over the
     copies in either. When comparing every pair exactly would take more than `max_work` steps, Jaccard
     is estimated from each sequence's sketch. Only sequences of positive weight are candidates, when
-    there are any. `counts` are the sequences' kmer_counts, if made already. Past `deadline`, raises
-    TimedOut."""
+    there are any. `counts` are the sequences' kmer_counts, if made already."""
     n = len(seqs)
     counts = [kmer_counts(s, k) for s in seqs] if counts is None else counts
     sizes = [sum(c.values()) for c in counts]
@@ -331,8 +317,6 @@ def medoid(seqs, weights, k=K, deadline=None, max_work=MEDOID_WORK, counts=None)
     sketches = [sketch(c) for c in counts] if work > max_work else None
     dist = [[0.0] * n for _ in range(n)]
     for i in range(n):
-        if deadline is not None and time.time() > deadline:
-            raise TimedOut('time limit reached choosing the centre')
         for j in range(i + 1, n):
             if sketches is not None:
                 d = sketch_distance(sketches[i], sketches[j])
@@ -607,20 +591,19 @@ class StarMSA:
         self.banded_pairs, self.seeded_pairs, self.refined_windows = banded_pairs, seeded_pairs, refined_windows
 
 
-def star_msa(alleles, fragments=(), align=None, centre=None, k=K, deadline=None, max_cells=None,
-             min_share=None, scores=SCORES):
+def star_msa(alleles, fragments=(), align=None, centre=None, k=K, max_cells=None, min_share=None,
+             scores=SCORES):
     """The star alignment of a region (see the module docstring).
 
     `alleles` is a sequence of (id, sequence, weight), with distinct ids; `fragments` is a sequence of
-    (id, sequence, side), side being 'left', 'right' or 'internal'. `align` is the aligner: called with
-    a list of sequences, `banded` and `seeded` as Abpoa takes them, it returns their global alignment,
-    one row per sequence in order. Pass an Abpoa inside its `with` block, and its scores as `scores`,
-    by which long_pair chooses between alignments. `centre` names the centre allele instead of the
-    medoid. Past `deadline` (a time.time() value), raises TimedOut. An alignment to the centre whose
-    dynamic-programming matrix, the product of the two lengths, would exceed `max_cells` is made by
-    long_pair; every other one is unbanded. With `min_share`, raises NotHomologous, before aligning
-    anything, if an allele of positive weight shares less than that fraction of its k-mers with the
-    centre (check_homology). Returns a StarMSA.
+    (id, sequence, side), side being 'left', 'right' or 'internal'. `align` is the aligner: called with a
+    list of sequences, `banded` and `seeded` as Abpoa takes them, it returns their global alignment, one
+    row per sequence in order. Pass an Abpoa inside its `with` block, and its scores as `scores`, by which
+    long_pair chooses between alignments. `centre` names the centre allele instead of the medoid. An
+    alignment to the centre whose dynamic-programming matrix, the product of the two lengths, would exceed
+    `max_cells` is made by long_pair; every other one is unbanded. With `min_share`, raises NotHomologous,
+    before aligning anything, if an allele of positive weight shares less than that fraction of its k-mers
+    with the centre (check_homology). Returns a StarMSA.
     """
     if align is None:
         raise ValueError('star_msa needs an aligner, e.g. `with Abpoa() as align`')
@@ -639,7 +622,7 @@ def star_msa(alleles, fragments=(), align=None, centre=None, k=K, deadline=None,
     weights = [a[2] for a in alleles]
     counts = [kmer_counts(seq[m], k) for m in names] if centre is None or min_share else None
     if centre is None:
-        cid = names[medoid([seq[m] for m in names], weights, k, deadline, counts=counts)]
+        cid = names[medoid([seq[m] for m in names], weights, k, counts=counts)]
     elif centre in seq and centre in names:
         cid = centre
     else:
