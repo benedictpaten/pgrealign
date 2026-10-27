@@ -452,18 +452,18 @@ upper-cased sequence, and all rows to have one length. The centre is chosen from
 
 ### The centre
 
-The centre is the region's reference allele, the package's `ref`, when it has a positive weight and
-no more than `--max-excess`, 0.1, of the haplotypes' bases lie beyond its length (see below); and
+The centre is the region's reference allele, the package's `ref`, when it has a positive weight, and
 the medoid of the alleles otherwise, as when the reference does not span the region (`--centre
-medoid` takes the medoid always, and `--max-excess 0` the reference allele whatever). Every other
-allele is aligned to the centre on its own, so around the reference, the alignment that a genotyper
-reads between the reference and any allele, the pair's projected alignment (see Merging into one
-alignment), is that allele's own pairwise alignment to the reference: optimal under the scores,
-unless too large to align unbanded, and left-normalised against the reference, as a variant caller
-writes its records. Around any other centre it is the composition of two alignments to the centre,
-the reference's and the allele's, which is neither: an indel that each places as far left as it can
-go on the centre can land anywhere on the reference, so the same difference from the reference,
-carried by several alleles, can come out as several records at different places.
+medoid` takes the medoid always, and `--max-excess` the medoid where more than that share of the
+haplotypes' bases lie beyond the reference allele's length, which is off by default; see below).
+Every other allele is aligned to the centre on its own, so around the reference, the alignment that
+a genotyper reads between the reference and any allele, the pair's projected alignment (see Merging
+into one alignment), is that allele's own pairwise alignment to the reference: optimal under the
+scores, unless too large to align unbanded, and left-normalised against the reference, as a variant
+caller writes its records. Around any other centre it is the composition of two alignments to the
+centre, the reference's and the allele's, which is neither: an indel that each places as far left as
+it can go on the centre can land anywhere on the reference, so the same difference from the
+reference, carried by several alleles, can come out as several records at different places.
 
 Measured with `qc` on regions of the HPRC graph of 30 haplotypes realigned on CHM13 (a sample of
 1,468 regions of chr2, chr6, chr14 and chr16 with three or more alleles, one of 100 bp or more,
@@ -485,12 +485,11 @@ alignment puts them, and two alleles' insertions are aligned to each other only 
 same slot (see Merging into one alignment). At chr2:232.31M (30 alleles of up to 48.8 kb around a
 27.7 kb reference), pairs of other alleles keep 213,917 of the 499,974 aligned pairs of bases of their
 optimal alignments, against 416,142 around the medoid, while the region's variant sites, runs of
-columns whose rows differ, fall from 1,672 to 1,068. And an allele's optimal alignment to the
-reference is not always the one with the fewest records: at chr2:90.32M, where alleles hold diverged
-copies of the repeat, it aligns them base against base, and the region's 29 other alleles differ from
-the reference in 20,391 runs of columns (16,986 of mismatches only), against 7,676 (6,588) for the
-alignments composed through the medoid, which leave more of the copies unaligned, as long indels, in
-an alignment of 64,487 columns against 39,315.
+columns whose rows differ, fall from 1,672 to 1,068. At chr2:90.32M, around the reference, the
+region's 29 other alleles first differed from it in 20,391 runs of columns, against 7,676 for the
+alignments composed through the medoid; but those were abPOA's band threading long alleles through
+the wrong copies of the repeat, and aligned past it (Pairs too large to align unbanded) they differ in
+3,751.
 
 Where most haplotypes are much longer than the reference allele, as where they carry an expansion it
 lacks, the cost becomes the graph's size: their extra sequence is all inserted around the reference
@@ -504,14 +503,22 @@ these regions out. Taking the medoid where it exceeds `--max-excess`:
 
 | `--max-excess` | regions on the medoid | bases of graph against the medoid everywhere | blow-ups caught |
 |---|---|---|---|
-| none | 0 | +2.81 Mb | 0 of 228 |
+| none, the default | 0 | +2.81 Mb | 0 of 228 |
 | 0.25 | 980, 0.11% | -2.59 Mb | 150 |
 | 0.15 | 1,683, 0.19% | -2.86 Mb | 201 |
 | 0.1 | 2,508, 0.28% | -2.89 Mb | 220 |
 | 0.05 | 4,592, 0.51% | -2.74 Mb | 227 |
 
-At 0.1, the default, the realigned graph is smallest, and the eight blow-ups left carry 32 kb. The
-regions at chr2:232.31M and chr2:90.32M above keep the reference allele, their excess 0.095 and 0.018.
+The graph's size is a poor measure of the alignment in tandem repeats, though, and the VCF is better
+around the reference. Compared region by region between two rejoins of the 30-way graph, one with
+`--max-excess 0.1` and one with the reference everywhere, the 2,508 regions that took the medoid
+gave 19,639 more errors against the dipcall truths of 14 samples and 1,787 more against HG002's GIAB
+structural variants (105 more against its small variants; the medoid had fewer dipcall errors in 250
+of these regions, more in 507, and as many in the rest). Every band of excess from 0.1 up shows more
+errors around the medoid, so no threshold does better than none for the VCF: at 0.2, for instance,
+the medoid would keep 1,259 regions and 177 of the blow-ups, and the regions back on the reference
+would take back 11,231 of the dipcall errors and 1,204 of GIAB's. There is therefore no limit by
+default; `--max-excess` remains for a smaller graph at that cost.
 
 ### The medoid
 

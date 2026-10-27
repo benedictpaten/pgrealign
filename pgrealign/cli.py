@@ -324,10 +324,10 @@ def main(argv=None):
     c.add_argument('--centre', choices=CENTRES, default='ref',
                    help="the allele every other is aligned to: the reference allele, where the region has one and "
                         "--max-excess allows, or the medoid [ref]")
-    c.add_argument('--max-excess', type=float, default=MAX_EXCESS, metavar='FRACTION',
+    c.add_argument('--max-excess', type=float, default=MAX_EXCESS or 0, metavar='FRACTION',
                    help="with --centre ref, take the medoid instead where more than this share of the haplotypes' "
                         "bases lie beyond the reference allele's length, as where most carry an expansion it lacks; "
-                        "0 takes the reference allele whatever [%g]" % MAX_EXCESS)
+                        "0 takes the reference allele whatever [%g]" % (MAX_EXCESS or 0))
     c.add_argument('--max-work', type=float, default=MAX_WORK,
                    help='leave a region as it is (too_big) when its alignments would fill more than this many '
                         'dynamic-programming cells, by its package; 0 sets no limit [%.3g]' % MAX_WORK)
@@ -419,8 +419,8 @@ def main(argv=None):
     c.add_argument('--max-cells', type=int, default=MAX_CELLS, help='as for realign [%d]' % MAX_CELLS)
     c.add_argument('--min-share', type=float, default=MIN_SHARE, help='as for realign [%g]' % MIN_SHARE)
     c.add_argument('--centre', choices=CENTRES, default='ref', help='as for realign [ref]')
-    c.add_argument('--max-excess', type=float, default=MAX_EXCESS, metavar='FRACTION',
-                   help='as for realign [%g]' % MAX_EXCESS)
+    c.add_argument('--max-excess', type=float, default=MAX_EXCESS or 0, metavar='FRACTION',
+                   help='as for realign [%g]' % (MAX_EXCESS or 0))
     c.add_argument('--max-work', type=float, default=MAX_WORK, help='as for realign [%.3g]' % MAX_WORK)
     c.add_argument('--max-region-memory', type=float, default=MAX_REGION_MEMORY, metavar='GB',
                    help='as for realign [%g]' % MAX_REGION_MEMORY)

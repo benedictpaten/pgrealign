@@ -160,7 +160,7 @@ Options that control the same thing in several stages:
 | `--drop-sample`, `--keep-all-samples` | prepare, run | the samples `prepare` removes ([Dropped samples](#dropped-samples)) |
 | `--scores` | realign, qc, run | abPOA's scores |
 | `--max-cells` | realign, qc, run | the largest pairwise alignment run unbanded ([Limits](#limits), [qc](#qc)) |
-| `--centre`, `--max-excess` | realign, run | the allele each star is built around: the reference allele, unless too much of the haplotypes' sequence lies beyond its length, or the medoid ([realign](#realign)) |
+| `--centre`, `--max-excess` | realign, run | the allele each star is built around: the reference allele, or the medoid; with `--max-excess`, the medoid where too much of the haplotypes' sequence lies beyond the reference allele's length ([realign](#realign)) |
 | `--max-work`, `--max-region-memory`, `--max-address-space` | realign, run | the largest region `realign` aligns, by its work, memory estimate and abPOA's reservation, each decided from its package ([Limits](#limits)) |
 | `--timeout` | realign, run | `realign`'s time limit per region, none by default ([Limits](#limits)) |
 | `--min-share` | realign, run | the least share of an allele's 15-mers with the centre for its region to be aligned ([Limits](#limits)) |
@@ -369,9 +369,10 @@ regions `complex` for this reason (the summary's `internal_too_long`), at the co
 `realign` builds the star alignment of each region with abPOA. It reads `--packages`, the
 `packages.jsonl.gz` from `extract` (or from `union`), and writes `msas.jsonl.gz` to `-o`
 ([format](#msasjsonlgz)). Each star is built around the region's reference allele, where it has one
-of positive weight and no more than `--max-excess` (`realign.MAX_EXCESS`, 0.1) of the haplotypes'
-bases lie beyond its length, and around the medoid of its alleles otherwise; `--max-excess 0` takes
-the reference allele whatever, and `--centre medoid` takes the medoid always
+of positive weight, and around the medoid of its alleles otherwise. `--max-excess` takes the medoid
+where more than that share of the haplotypes' bases lie beyond the reference allele's length; by
+default (`realign.MAX_EXCESS`, None, and 0 on the command line) it is off, since the VCF is more
+accurate around the reference. `--centre medoid` takes the medoid always
 ([method.md](method.md#the-centre)).
 
 It aligns the packages whose status is `ok` and that `--select` selects; its summary lists the rest

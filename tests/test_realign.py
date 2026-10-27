@@ -30,8 +30,8 @@ class TestRealignPackage(unittest.TestCase):
 
     def test_reference_centre(self):
         # the heavier a2 is the medoid. The reference allele, a1, is the centre unless the medoid is asked for,
-        # or too much of the haplotypes' bases lie beyond its length: here 42%, as a1 lacks two or three copies
-        # of the unit that the other nine haplotypes carry
+        # or max_excess is given and more of the haplotypes' bases lie beyond its length: here 42%, as a1 lacks
+        # two or three copies of the unit that the other nine haplotypes carry
         unit = 'ACGTTGCAAGT'
         alleles = [('a1', 'GATTACA' + unit * 2 + 'CCGG', 1), ('a2', 'GATTACA' + unit * 4 + 'CCGG', 5),
                    ('a3', 'GATTACA' + unit * 5 + 'CCGG', 4)]
@@ -39,7 +39,9 @@ class TestRealignPackage(unittest.TestCase):
         r = realign.realign_package(pkg('R', alleles, ref='a1'), max_excess=0.5)
         self.assertEqual((r['status'], r['centre']), ('ok', 'a1'))
         self.assertEqual(realign.realign_package(pkg('R', alleles, ref='a1'), max_excess=None)['centre'], 'a1')
-        self.assertEqual(realign.realign_package(pkg('R', alleles, ref='a1'))['centre'], 'a2')       # 0.42 > 0.1
+        self.assertIsNone(realign.MAX_EXCESS)                                                       # no limit
+        self.assertEqual(realign.realign_package(pkg('R', alleles, ref='a1'))['centre'], 'a1')
+        self.assertEqual(realign.realign_package(pkg('R', alleles, ref='a1'), max_excess=0.1)['centre'], 'a2')
         self.assertEqual(realign.realign_package(pkg('R', alleles, ref='a1'), centre='medoid')['centre'], 'a2')
         self.assertEqual(realign.realign_package(pkg('R', alleles))['centre'], 'a2')     # no reference allele
         # a reference allele longer than the others is the centre: none of their bases lie beyond it
@@ -88,12 +90,11 @@ class TestEstimates(unittest.TestCase):
         # a 10 kb reference, and 100 kb and 30 kb alleles: around the reference, x's alignment is banded, its
         # band spanning the 90 kb the lengths differ by, y's is not, and the 90 kb and 20 kb by which x and y
         # are longer are aligned in a slot; around a medoid, not known in advance, the longest stands in. With
-        # 83% of the haplotypes' bases beyond the reference's length, the medoid is the centre by default, so
-        # the estimates around the reference are asked for with max_excess None
+        # 83% of the haplotypes' bases beyond the reference's length, a max_excess of 0.5 would take the medoid
         p = pkg('R', [('r', 'A' * 10000, 1), ('x', 'C' * 100000, 2), ('y', 'G' * 30000, 1)], ref='r')
         self.assertAlmostEqual(realign.excess(p, 'r'), (2 * 90000 + 20000) / 240000)
-        self.assertIsNone(realign.centre_of(p))
-        self.assertEqual(realign.work(p), realign.work(p, 'medoid'))
+        self.assertIsNone(realign.centre_of(p, max_excess=0.5))
+        self.assertEqual(realign.work(p, max_excess=0.5), realign.work(p, 'medoid'))
         ref = dict(max_excess=None)
         self.assertEqual(realign.centre_of(p, **ref), 'r')
         self.assertEqual(realign.banded_cells(10000, 100000), 10000 * (90000 + 2 * (10 + 1000)))

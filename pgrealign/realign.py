@@ -4,16 +4,17 @@
 parallel and writes msas.jsonl.gz.
 
 **Centre.** The star's centre is the reference allele, the package's `ref`, whenever it has one of
-positive weight (`centre` 'ref'), unless more than `max_excess` of the haplotypes' bases lie beyond its
-length (`excess`), and otherwise the medoid. Every allele is then aligned to the reference on its own, so the alignment a genotyper reads between the reference and any allele is that
-allele's optimal pairwise alignment, its indels left-normalised against the reference, as a variant
-caller writes them. Around a medoid that is not the reference, it would instead be the composition of
-two alignments to the medoid, which is neither optimal nor normalised against the reference, so that the
-same difference from the reference can come out in different places in different alleles. Where most
-haplotypes are much longer than the reference allele, as where they carry an expansion it lacks, their
-extra sequence would all be inserted around it and aligned only slot by slot, which leaves much of it
-unaligned and the graph several times the size it is around the medoid; there the medoid is the centre.
-`centre` 'medoid' keeps the medoid always.
+positive weight (`centre` 'ref'), and otherwise the medoid. Every allele is then aligned to the reference
+on its own, so the alignment a genotyper reads between the reference and any allele is that allele's
+optimal pairwise alignment, its indels left-normalised against the reference, as a variant caller writes
+them. Around a medoid that is not the reference, it would instead be the composition of two alignments to
+the medoid, which is neither optimal nor normalised against the reference, so that the same difference
+from the reference can come out in different places in different alleles. Where most haplotypes are much
+longer than the reference allele, as where they carry an expansion it lacks, their extra sequence is all
+inserted around it and aligned only slot by slot, which leaves much of it unaligned and the graph larger
+than around the medoid; `max_excess` takes the medoid where more than that share of the haplotypes' bases
+lie beyond the reference allele's length (`excess`), but by default it is off, since the VCF is more
+accurate around the reference there too (MAX_EXCESS). `centre` 'medoid' keeps the medoid always.
 
 **Limits.** abPOA's alignment of two sequences works in a matrix of cells, one per pair of their bases.
 It reserves 20 bytes of address space per cell, five matrices of 4-byte scores, banded or not, and an
@@ -93,13 +94,14 @@ MIN_SHARE = 0.5
 MAX_WORK = 200_000_000_000
 MAX_REGION_MEMORY = 64
 MAX_ADDRESS_SPACE = 128
-# The reference allele is the centre unless more than MAX_EXCESS of the haplotypes' bases lie beyond its length, as where
-# most haplotypes carry an expansion the reference lacks: around it, that sequence would all be inserted, and the
-# insertions aligned only to one another, slot by slot, which leaves much of it unaligned. The medoid is then the centre.
-# On the 30-way HPRC graph, 0.1 takes the medoid in 0.28% of regions, among them 220 of the 228 whose graph the reference
-# made half as large again, and leaves the realigned graph 2.9 Mb smaller than around the medoid everywhere
-# (docs/method.md).
-MAX_EXCESS = 0.1
+# With a limit, the medoid is the centre where more than MAX_EXCESS of the haplotypes' bases lie beyond the reference
+# allele's length, as where most haplotypes carry an expansion the reference lacks: around the reference, that sequence is
+# all inserted and aligned only slot by slot, which leaves much of it unaligned and the graph larger. On the 30-way HPRC
+# graph, 0.1 takes the medoid in 0.28% of regions, among them 220 of the 228 whose graph the reference made half as large
+# again, and leaves the realigned graph 5.7 Mb smaller than around the reference; but those regions' VCF records have
+# 19,639 more errors against the dipcall truths of 14 samples, and 1,787 more against HG002's GIAB structural variants,
+# and no threshold gains on errors over none (docs/method.md). So there is no limit by default.
+MAX_EXCESS = None
 # Failures of the machine rather than of the region, which `run` never records (see the module docstring)
 MACHINE_FAILURES = ('reservation_refused', 'aligner_killed', 'out_of_memory')
 # Measured on a 1 Mbp allele: its k-mer counts hold 74 bytes per base, 85 at most while they grow, and
