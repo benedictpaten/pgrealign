@@ -1,24 +1,39 @@
-"""Stage 3, `realign`: one multiple alignment per region package, by the medoid star (star.py).
+"""Stage 3, `realign`: one multiple alignment per region package, by the star (star.py).
 
 `realign_package` aligns one package from extract.py; `run` aligns a whole packages.jsonl.gz in
 parallel and writes msas.jsonl.gz.
 
-**Limits.** abPOA's alignment of two sequences works in a matrix of cells, one per pair of their bases.
-It reserves 20 bytes of address space per cell, five matrices of 4-byte scores, banded or not, and an
-unbanded alignment touches all of it, so `max_cells` cells take about 8 GB. An alignment to the
-centre whose matrix would exceed `max_cells` cells is banded instead: abPOA then fills only a band
-around its best path, adaptive in width (about 10 cells plus 1% of the sequence's length on either
-side). Its memory is then set by the centre's length, not by the band: each base of the centre
-touches at least one page of each of the five matrices, about 80 KB per base with 16 KB pages (macOS
-on Apple silicon), and more where the two lengths differ by tens of kb (memory.py). A region the star
-cannot be built for keeps its old alignment, and replace leaves it as it is. Its status says why:
-- `too_big`: even a banded alignment of the region's longest allele or fragment would exceed
-  `max_cells` cells (with the default, sequences longer than about 150 kb), or its alleles hold more
-  than MAX_TOTAL_BP bases in all, or its memory estimate alone exceeds `max_memory` (below), which
-  `run` records itself, without aligning the region.
-- `timeout`: the region ran longer than `timeout` seconds.
-- `aligner_failed`: abPOA exited with an error or returned the wrong rows, as when the system refuses
-  its reservation of address space.
+**Centre.** The star's centre is the reference allele, the package's `ref`, whenever it has one of
+positive weight (`centre` 'ref'), and otherwise the medoid. Every allele is then aligned to the reference
+on its own, so the alignment a genotyper reads between the reference and any allele is that allele's
+optimal pairwise alignment, its indels left-normalised against the reference, as a variant caller writes
+them. Around a medoid that is not the reference, it would instead be the composition of two alignments to
+the medoid, which is neither optimal nor normalised against the reference, so that the same difference
+from the reference can come out in different places in different alleles. Where most haplotypes are much
+longer than the reference allele, as where they carry an expansion it lacks, their extra sequence is all
+inserted around it and aligned only slot by slot, which leaves much of it unaligned and the graph larger
+than around the medoid; `max_excess` takes the medoid where more than that share of the haplotypes' bases
+lie beyond the reference allele's length (`excess`), but by default it is off, since the VCF is more
+accurate around the reference there too (MAX_EXCESS). `centre` 'medoid' keeps the medoid always.
+
+**Limits.** Every limit is a size of the alignment, as a window and a band are in cactus's own, never a
+size of the machine. abPOA's alignment of two sequences fills a matrix of cells, one per pair of their
+bases, at 20 bytes a cell, so `max_cells` cells take about 8 GB. An alignment to the centre whose matrix
+would exceed `max_cells` cells is made by star.long_pair instead: banded, with the widest band that keeps
+within about `max_cells` cells, and seeded, the better kept, and seeding's refined in windows of at most
+`max_cells` cells. It then fills about `max_cells` cells, more where the two lengths differ by more than
+that band allows (`pair_cells`), and takes about as much memory (memory.py).
+
+Whether a region is aligned is decided from its package alone, before anything runs, so the same input
+gives the same graph on any machine, under any memory budget. A region the star is not built for keeps
+its old alignment, and replace leaves it as it is. Its status says why:
+- `too_big`, decided from the package:
+  - one of its alignments would fill more than MAX_ALIGNMENT times `max_cells` cells (`largest_alignment`);
+    this bounds its memory, about 20 bytes a cell;
+  - its alleles hold more than MAX_TOTAL_BP bases in all, which bounds the k-mer counts that choose the
+    centre;
+  - or its alignments would fill more than `max_work` cells in all (`work`), which bounds its time.
+- `aligner_failed`: abPOA exited with an error or returned the wrong rows.
 - `no_alleles`: no walk spans the region.
 - `not_homologous`: an allele of the region shares less than `min_share` (MIN_SHARE) of its 15-mers
   with the centre (star.py), as an unrelated or reversed allele does at an inversion or a
@@ -27,68 +42,246 @@ cannot be built for keeps its old alignment, and replace leaves it as it is. Its
   centre of at least 100 bp (star.HOMOLOGY_BP).
 - `error`: any other failure, with its message; it means a bug.
 
-**Memory.** `peak_bytes` estimates, from a package alone, the most memory its region can take. `run`
-starts regions in package order, in up to `jobs` worker processes, while the estimates of those
-running stay within `max_memory` GB.
+Nor do the machine's failures decide anything. A region the machine fails (MACHINE_FAILURES: abPOA's
+reservation refused, as an abPOA that reserves its matrices whole can be on a small Linux machine, memory.py;
+abPOA killed by a signal, as by the OOM killer; the worker out of memory) is not recorded: `run` finishes
+the others, then stops with an error, and run again where the region can be aligned, it resumes with it.
+
+**Memory and time** follow from the limits; they are what a run needs, never what decides it.
+`peak_bytes` estimates, from a package alone, the most memory its region can take, with pages of
+ESTIMATE_PAGE bytes whatever the machine's, and `seconds` its time. `run` starts regions in package order,
+in up to `jobs` worker processes, while the estimates of those running stay within `max_memory` GB: that
+budget decides only how many run at once, and if a region needs more on its own, `run` stops before it
+starts anything. `plan` gives, without aligning, the memory the largest region needs and how long a run
+would take (memory.schedule_seconds), so that a caller can ask for them.
 
 **Output.** msas.jsonl.gz holds one JSON object per region, in package order:
 - `id`, `method` ('medoid_star'), `status`, `seconds`;
 - for `ok`: `centre` (the centre allele's id), `rows` {member id: row}, one per allele and fragment,
-  all the same length, `columns`, `slot_alignments`, `fragments_exact`, `fragments_aligned` and
-  `banded_pairs`;
+  all the same length, `columns`, `slot_alignments`, `fragments_exact`, `fragments_aligned`,
+  `banded_pairs`, `seeded_pairs` and `refined_windows` (star.StarMSA);
 - otherwise `message`.
 """
 import collections
 import functools
 import gzip
 import json
+import math
 import os
 import time
 
 from . import memory
-from .star import Abpoa, RealignError, SCORES, TooBig, star_msa
+from .star import Abpoa, RealignError, SCORES, TooBig, band_width, star_msa
 
 MAX_CELLS = 450_000_000
 MAX_TOTAL_BP = 40_000_000     # choosing the centre holds every allele's k-mer counts: KMER_BYTES per base
+CENTRES = ('ref', 'medoid')
+ESTIMATE_PAGE = memory.ESTIMATE_PAGE     # the page size peak_bytes assumes: macOS on Apple silicon's, 4x Linux's
 # Of the 1.12 million regions realigned in the HPRC CHM13 graph, MIN_SHARE 0.5 refuses 2,794 (0.6% of their
 # span): every region of the chrX and chr15 loci where unrelated or inverted alleles had been threaded
 # through the centre, and few others. On chrX that takes back 410,601 non-reference sample-records that
-# realignment had added to the VCF, and gives up 2,904 it had removed (docs/method.md).
+# realignment had added to the VCF, and gives up 2,904 it had removed (docs/method.md). Measured around the medoid;
+# around the reference allele it refuses nearly the same regions.
 MIN_SHARE = 0.5
+# The most a region may take, each decided from its package: cells of its largest alignment, MAX_ALIGNMENT times
+# max_cells (7 x 450 million cells, about 63 GB), and of its alignments in all (`work`; 2 x 10^11 cells, about an hour
+# of one core). docs/method.md calibrates them.
+MAX_ALIGNMENT = 7
+MAX_WORK = 200_000_000_000
+# `seconds`: a region's time, estimated from its work. On the 30-way HPRC graph, chrY and chr21 ran in 63% and 84% of
+# these estimates in all, and no region estimated at 10 s or more in more than 1.75 times its own.
+CELLS_PER_SECOND = 50_000_000
+REGION_SECONDS = 0.25
+# With a limit, the medoid is the centre where more than MAX_EXCESS of the haplotypes' bases lie beyond the reference
+# allele's length, as where most haplotypes carry an expansion the reference lacks: around the reference, that sequence is
+# all inserted and aligned only slot by slot, which leaves much of it unaligned and the graph larger. On the 30-way HPRC
+# graph, 0.1 takes the medoid in 0.28% of regions, among them 220 of the 228 whose graph the reference made half as large
+# again, and leaves the realigned graph 5.7 Mb smaller than around the reference; but those regions' VCF records have
+# 19,639 more errors against the dipcall truths of 14 samples, and 1,787 more against HG002's GIAB structural variants,
+# and no threshold gains on errors over none (docs/method.md). So there is no limit by default.
+MAX_EXCESS = None
+# Failures of the machine rather than of the region, which `run` never records (see the module docstring)
+MACHINE_FAILURES = ('reservation_refused', 'aligner_killed', 'out_of_memory')
 # Measured on a 1 Mbp allele: its k-mer counts hold 74 bytes per base, 85 at most while they grow, and
 # sketching it takes 49 more per base, comparing it exactly with another 25.
 KMER_BYTES, COMPARE_BYTES = 80, 50
 
 
-def banded_cells(length):
-    """About how many cells abPOA fills aligning a sequence of `length` bases to one of the same length
-    with its adaptive band, which reaches 10 cells plus 1% of the length either side of the path, and
-    never more than the whole matrix."""
-    return min(length * length, length * 2 * (10 + length // 100))
+def banded_cells(n, m=None, band=None):
+    """About how many cells abPOA fills aligning a sequence of `m` bases (by default `n`) to one of `n` given
+    before it, with its adaptive band: in each of the first's rows, the two lengths' difference and `band`
+    cells either side, by default abPOA's own, 10 cells plus 1% of m, and never more than the whole row, as
+    for its memory (memory.abpoa_bytes)."""
+    if m is None:
+        m = n
+    if band is None:
+        band = 10 + m // 100
+    return n * min(m, abs(n - m) + 2 * band)
 
 
-def peak_bytes(pkg, max_cells=MAX_CELLS, page=memory.PAGE):
+def long_pair_cells(n, m, max_cells=MAX_CELLS):
+    """About how many cells star.long_pair fills aligning a sequence of `m` bases to one of `n`, two whose
+    matrix exceeds `max_cells`: its band's (star.band_width), about max_cells where the two lengths allow a
+    band wider than abPOA's own, and abPOA's own band's where they do not. That is most of its time.
+    Seeding's alignment, window by window under abPOA's own band, took a median of 0.1 s a pair against the
+    band's 5 s, and refinement runs only where seeding's alignment scores higher, rarely, so neither is
+    counted; counted, they would refuse regions of 100 kb alleles that realign aligns in minutes."""
+    return banded_cells(n, m, band_width(n, m, max_cells))
+
+
+def pair_cells(n, m, max_cells=MAX_CELLS):
+    """About how many cells aligning a sequence of `m` bases to one of `n` fills: the product of the two
+    lengths, or long_pair_cells where that exceeds `max_cells`."""
+    return n * m if n * m <= max_cells else long_pair_cells(n, m, max_cells)
+
+
+def excess(pkg, aid):
+    """The share of the haplotypes' bases in `pkg` that lie beyond the length of allele `aid`: the sum over its
+    alleles of weight times the bases by which each is longer, over the sum of weight times length."""
+    n = len(next(a['seq'] for a in pkg['alleles'] if a['id'] == aid))
+    total = sum(a['weight'] * len(a['seq']) for a in pkg['alleles'])
+    return sum(a['weight'] * max(0, len(a['seq']) - n) for a in pkg['alleles']) / total if total > 0 else 0.0
+
+
+def centre_of(pkg, centre='ref', max_excess=MAX_EXCESS):
+    """The id of the allele the star of `pkg` is built around: its reference allele when `centre` is 'ref', it
+    has one of positive weight, and no more than `max_excess` of the haplotypes' bases lie beyond its length
+    (`excess`; None sets no limit); otherwise None, for the medoid."""
+    if centre not in CENTRES:
+        raise ValueError('centre must be one of %s, not %r' % (', '.join(CENTRES), centre))
+    if centre == 'ref':
+        for a in pkg['alleles']:
+            if a['id'] == pkg.get('ref') and a['weight'] > 0:
+                if max_excess is not None and excess(pkg, a['id']) > max_excess:
+                    return None
+                return a['id']
+    return None
+
+
+def _placed(frag, side, alleles):
+    """Whether star_msa places fragment `frag` in one of `alleles` (upper-cased sequences) rather than aligning
+    it: as a prefix of one if `side` is 'left', a suffix if 'right', and anywhere if 'internal'."""
+    if side == 'left':
+        return any(a.startswith(frag) for a in alleles)
+    if side == 'right':
+        return any(a.endswith(frag) for a in alleles)
+    return any(frag in a for a in alleles)
+
+
+def _centre_and_others(pkg, centre, max_excess=MAX_EXCESS):
+    """(the centre's length, the lengths of the members aligned to it, the centre's id or None): the alleles
+    but the centre, and the fragments that occur in no allele. With the medoid, whose length is not known
+    before the region runs, the longest allele's stands in for it."""
+    cid = centre_of(pkg, centre, max_excess)
+    lens = [(a['id'], len(a['seq'])) for a in pkg['alleles']]
+    if cid is None and lens:
+        cid_or_longest = max(lens, key=lambda t: t[1])[0]
+        c = dict(lens)[cid_or_longest]
+    else:
+        cid_or_longest = cid
+        c = dict(lens)[cid] if cid is not None else 0
+    seqs = [a['seq'].upper() for a in pkg['alleles']]
+    others = [n for a, n in lens if a != cid_or_longest] + \
+        [len(f['seq']) for f in pkg['fragments'] if not _placed(f['seq'].upper(), f['side'], seqs)]
+    return c, others, cid
+
+
+def _slots(c, others):
+    """The insertion slots' sequences as the estimates take them, longest first: for each member aligned to
+    a centre of c bases, the bases by which it is longer than the centre, all in one slot."""
+    return sorted((n - c for n in others if n > c), reverse=True)
+
+
+def work(pkg, centre='ref', max_cells=MAX_CELLS, max_excess=MAX_EXCESS):
+    """About how many cells of dynamic-programming matrices aligning `pkg` fills, the measure of its run time
+    (docs/method.md): each allele and fragment aligned to the centre, the product of the two lengths, or
+    long_pair_cells where that exceeds `max_cells`; and the insertion slots, each member's excess over the
+    centre aligned, banded, to the longest such (_slots). Around a medoid, which is not known in advance,
+    the longest allele stands in for it, and the slots, like choosing the medoid, are not counted."""
+    c, others, cid = _centre_and_others(pkg, centre, max_excess)
+    total = sum(pair_cells(c, n, max_cells) for n in others if c and n)
+    if cid is not None:
+        slots = _slots(c, others)
+        total += sum(banded_cells(slots[0], e) for e in slots[1:])
+    return total
+
+
+def largest_alignment(pkg, centre='ref', max_cells=MAX_CELLS, max_excess=MAX_EXCESS):
+    """About how many cells the largest of `pkg`'s alignments fills: its alignments to the centre
+    (pair_cells), and around a reference centre the slots' as `work` takes them. Around a medoid, which is
+    not known in advance, any two of its alleles and fragments in either order, and the longest sequence
+    banded against one of the same length, the bound taken for the slots."""
+    c, others, cid = _centre_and_others(pkg, centre, max_excess)
+    if cid is None:
+        aligned = sorted(set([c] + others))
+        longest = max(aligned, default=0)
+        return max([pair_cells(n, m, max_cells) for n in aligned for m in aligned if n and m] +
+                   [banded_cells(longest)], default=0)
+    slots = _slots(c, others)
+    return max([pair_cells(c, n, max_cells) for n in others if c and n] +
+               [banded_cells(slots[0], e) for e in slots[1:]], default=0)
+
+
+def seconds(pkg, centre='ref', max_cells=MAX_CELLS, max_excess=MAX_EXCESS):
+    """An estimate of the seconds realign_package takes for `pkg`, from its work."""
+    return REGION_SECONDS + work(pkg, centre, max_cells, max_excess) / CELLS_PER_SECOND
+
+
+def peak_bytes(pkg, max_cells=MAX_CELLS, page=ESTIMATE_PAGE, centre='ref', max_excess=MAX_EXCESS):
     """An upper bound in practice on the memory, in bytes, that realign_package takes for `pkg`: memory.BASE;
-    the k-mer counts that choose the centre, which the worker may still hold while abPOA runs; and the
-    larger of abPOA's worst pair of the region's alleles and fragments in either order, since the
-    centre is not known before the region runs (memory.any_pair_bytes), and its longest sequence
-    banded against one of the same length, the bound taken for the slot alignments. A region that
-    realign_package refuses before aligning anything takes memory.BASE."""
+    the k-mer counts the region's alleles take, which the worker may still hold while abPOA runs; and abPOA's
+    worst alignment. Around a reference centre, whose alignments are known in advance, that is the worst of
+    its alignments to the centre and of the slots' as `work` takes them. Around a medoid, which is not known,
+    it is the worst pair of the region's alleles and fragments in either order (memory.any_pair_bytes), or
+    the longest sequence banded against one of the same length, the bound taken for the slots. A region
+    that realign_package refuses for its size before aligning anything takes memory.BASE. The page size is
+    fixed, ESTIMATE_PAGE, so the estimate is the same on every machine."""
     alleles = [len(a['seq']) for a in pkg['alleles']]
-    lengths = alleles + [len(f['seq']) for f in pkg['fragments']]
-    if not alleles or banded_cells(max(lengths)) > max_cells or sum(alleles) > MAX_TOTAL_BP:
+    if not alleles or sum(alleles) > MAX_TOTAL_BP or \
+            largest_alignment(pkg, centre, max_cells, max_excess) > MAX_ALIGNMENT * max_cells:
         return memory.BASE
-    longest = max(lengths)
-    aligner = max(memory.any_pair_bytes(lengths, max_cells, page), memory.abpoa_bytes(longest, longest, True, page))
+    c, others, cid = _centre_and_others(pkg, centre, max_excess)
+    if cid is None:
+        aligned = [c] + others                  # every allele, and the fragments found in none
+        longest = max(aligned)
+        aligner = max(memory.any_pair_bytes(aligned, max_cells, page), memory.abpoa_bytes(longest, longest, True, page))
+    else:
+        slots = _slots(c, others)
+        aligner = max([memory.pair_bytes(c, n, max_cells, page) for n in others if c and n] +
+                      [memory.abpoa_bytes(slots[0], e, True, page) for e in slots[1:]], default=0)
     return memory.BASE + KMER_BYTES * sum(alleles) + COMPARE_BYTES * max(alleles) + aligner
 
 
-def realign_package(pkg, abpoa='abpoa', timeout=900, max_cells=MAX_CELLS, workdir=None, scores=SCORES,
-                    min_share=MIN_SHARE):
-    """The medoid-star alignment of one region package, as the dict described in the module docstring.
-    `min_share` 0 or None aligns the region however little its alleles share with the centre."""
+def _refusal(pkg, max_cells, centre, max_work, max_excess=MAX_EXCESS):
+    """(the limit `pkg` exceeds, why), or None: see refusal."""
+    lens = [len(a['seq']) for a in pkg['alleles']]
+    if not lens:
+        return None             # no_alleles, in realign_package
+    if sum(lens) > MAX_TOTAL_BP:
+        return 'max_total_bp', 'its alleles hold %d bp in all, more than %d' % (sum(lens), MAX_TOTAL_BP)
+    big = largest_alignment(pkg, centre, max_cells, max_excess)
+    if big > MAX_ALIGNMENT * max_cells:
+        return 'max_cells', 'one of its alignments would fill about %.3g cells, more than %d times max_cells %d' % (
+            big, MAX_ALIGNMENT, max_cells)
+    w = work(pkg, centre, max_cells, max_excess)
+    if max_work and w > max_work:
+        return 'max_work', 'aligning it takes about %.3g cells, more than max_work %.3g' % (w, max_work)
+    return None
+
+
+def refusal(pkg, max_cells=MAX_CELLS, centre='ref', max_work=MAX_WORK, max_excess=MAX_EXCESS):
+    """Why `pkg` is too big to align, from the package alone (see the module docstring), or None."""
+    r = _refusal(pkg, max_cells, centre, max_work, max_excess)
+    return r and r[1]
+
+
+def realign_package(pkg, abpoa='abpoa', max_cells=MAX_CELLS, workdir=None, scores=SCORES, min_share=MIN_SHARE,
+                    centre='ref', max_work=MAX_WORK, max_excess=MAX_EXCESS):
+    """The star alignment of one region package, as the dict described in the module docstring.
+    `min_share` 0 or None aligns the region however little its alleles share with the centre; `max_work` 0 or
+    None sets no limit on its work. A failure of the machine gives one of the statuses MACHINE_FAILURES, which
+    `run` does not record."""
     t0 = time.time()
-    deadline = t0 + timeout
     res = {'id': pkg['id'], 'method': 'medoid_star'}
     alleles = [(a['id'], a['seq'], a['weight']) for a in pkg['alleles']]
     fragments = [(f['id'], f['seq'], f['side']) for f in pkg['fragments']]
@@ -96,20 +289,21 @@ def realign_package(pkg, abpoa='abpoa', timeout=900, max_cells=MAX_CELLS, workdi
         res.update(status='no_alleles', message='no spanning allele to align', seconds=0.0)
         return res
     try:
-        lens = [len(s) for _, s, _ in alleles]
-        longest = max(lens + [len(s) for _, s, _ in fragments])
-        if banded_cells(longest) > max_cells or sum(lens) > MAX_TOTAL_BP:
-            raise TooBig('longest %d bp needs %d cells banded, more than %d, or %d bp in all' % (
-                longest, banded_cells(longest), max_cells, sum(lens)))
-        with Abpoa(abpoa, scores, deadline, workdir) as align:
-            msa = star_msa(alleles, fragments, align=align, deadline=deadline, max_cells=max_cells,
-                           min_share=min_share)
+        why = refusal(pkg, max_cells, centre, max_work, max_excess)
+        if why:
+            raise TooBig(why)
+        with Abpoa(abpoa, scores, workdir) as align:
+            msa = star_msa(alleles, fragments, align=align, centre=centre_of(pkg, centre, max_excess),
+                           max_cells=max_cells, min_share=min_share, scores=scores)
         rows = msa.rows
         res.update(status='ok', centre=msa.centre, rows=rows, columns=len(next(iter(rows.values()), '')),
                    slot_alignments=msa.slot_alignments, fragments_exact=msa.fragments_exact,
-                   fragments_aligned=msa.fragments_aligned, banded_pairs=msa.banded_pairs)
+                   fragments_aligned=msa.fragments_aligned, banded_pairs=msa.banded_pairs,
+                   seeded_pairs=msa.seeded_pairs, refined_windows=msa.refined_windows)
     except RealignError as e:
         res.update(status=e.status, message=str(e))
+    except MemoryError:
+        res.update(status='out_of_memory', message='the worker ran out of memory')
     except Exception as e:        # a bug: record it, so that one region cannot stop a contig
         res.update(status='error', message='%s: %s' % (type(e).__name__, e))
     res['seconds'] = round(time.time() - t0, 3)
@@ -134,24 +328,10 @@ def selected(pkg, select):
     return len(set(seqs)) > 1
 
 
-def run(packages_path, out_path, select='any', shard=(0, 1), jobs=1, max_memory=None, **kw):
-    """Realign the selected `ok` packages of one shard (index i of n, by package order) in up to `jobs`
-    worker processes, and write them to out_path. Regions start in package order while the sum of
-    their peak_bytes stays within `max_memory` GB (None: memory.default_gb()); a region whose
-    estimate alone exceeds it is recorded as too_big without being aligned.
-
-    Results go to out_path + '.partial', one gzip member per region, as each finishes. If that file
-    exists, the regions it holds are not redone, so an interrupted run resumes. Once every region is
-    done, the results are written to out_path in package order and the partial file is removed."""
+def _shard(packages_path, select, shard, skipped):
+    """The `ok` packages of shard i of n (`shard`, by package order) that `select` takes, counting the others
+    in `skipped` by their status, or as not_selected."""
     from .extract import read_packages
-    limit = memory.budget(max_memory)
-    partial = out_path + '.partial'
-    # each region's result is held as its compressed line, which is also its member in the partial file
-    done, brief = {}, {}
-    for r in read_partial(partial) if os.path.exists(partial) else ():
-        done[r['id']] = gzip.compress((json.dumps(r, separators=(',', ':')) + '\n').encode())
-        brief[r['id']] = (r['status'], r['seconds'])
-    todo, order, skipped = [], [], collections.Counter()
     for k, p in enumerate(read_packages(packages_path)):
         if k % shard[1] != shard[0]:
             continue
@@ -160,31 +340,107 @@ def run(packages_path, out_path, select='any', shard=(0, 1), jobs=1, max_memory=
         elif not selected(p, select):
             skipped['not_selected'] += 1
         else:
-            order.append(p['id'])
-            if p['id'] not in done:
-                todo.append(p)
-    resumed = len(order) - len(todo)
-    # rewritten from the records that read back whole, so that nothing follows a cut-off one
+            yield p
+
+
+def plan(packages_path, select='any', shard=(0, 1), max_cells=MAX_CELLS, centre='ref', max_work=MAX_WORK,
+         max_excess=MAX_EXCESS, jobs=1, max_memory=None):
+    """What `run` would do with the same packages, limits, `jobs` and `max_memory`, decided from the packages
+    alone, without aligning anything: the number of regions it would align (`admitted`), and leave too_big,
+    by the limit each exceeds (`too_big`); their `work` in all; `need_gb`, the largest admitted region's
+    memory estimate in GB, the least max_memory with which `run` aligns them, and that region's id
+    (`largest`); and `seconds`, an estimate of how long `run` would take with `jobs` workers
+    within `max_memory` GB (memory.schedule_seconds over the regions' `seconds`), with `cpu_seconds`, the
+    regions' estimates in all."""
+    skipped, too_big = collections.Counter(), collections.Counter()
+    admitted, cells, need, largest, costs, secs = 0, 0, 0, None, [], []
+    for p in _shard(packages_path, select, shard, skipped):
+        r = _refusal(p, max_cells, centre, max_work, max_excess)
+        if r:
+            too_big[r[0]] += 1
+            continue
+        admitted += 1
+        cells += work(p, centre, max_cells, max_excess)
+        b = peak_bytes(p, max_cells, centre=centre, max_excess=max_excess)
+        if b > need:
+            need, largest = b, p['id']
+        costs.append(b)
+        secs.append(seconds(p, centre, max_cells, max_excess))
+    wall = memory.schedule_seconds(costs, secs, jobs, max(memory.budget(max_memory), need))
+    return {'admitted': admitted, 'too_big': dict(too_big), 'skipped': dict(skipped), 'work': cells,
+            'need_gb': math.ceil(need / memory.GB * 100) / 100, 'largest': largest,
+            'seconds': math.ceil(wall), 'cpu_seconds': math.ceil(sum(secs))}
+
+
+def run(packages_path, out_path, select='any', shard=(0, 1), jobs=1, max_memory=None, **kw):
+    """Realign the selected `ok` packages of one shard (index i of n, by package order) in up to `jobs`
+    worker processes, and write them to out_path. `kw` goes to realign_package. A region that `refusal`
+    finds too big is recorded as too_big without being aligned. The others start in package order while
+    the sum of their peak_bytes stays within `max_memory` GB (None: memory.default_gb()); if one of them
+    alone needs more, nothing starts and a RuntimeError says so, so the budget never changes which regions
+    are aligned.
+
+    Results go to out_path + '.partial', one gzip member per region, as each finishes. If that file
+    exists, the regions it holds are not redone, so an interrupted run resumes; the limits apply afresh,
+    so a region the partial file holds is too_big if it is now and redone if it was then but is not now.
+    A region that fails for the machine's sake (MACHINE_FAILURES) is not recorded: the others finish, then
+    a RuntimeError names it, and a rerun redoes it. Once every region is done, the results are written to
+    out_path in package order and the partial file is removed."""
+    limit = memory.budget(max_memory)
+    partial = out_path + '.partial'
+    max_cells, centre = kw.get('max_cells', MAX_CELLS), kw.get('centre', 'ref')
+    max_excess = kw.get('max_excess', MAX_EXCESS)
+    limits = (kw.get('max_work', MAX_WORK), max_excess)
+    # each region's result is held as its compressed line, which is also its member in the partial file
+    held = {r['id']: r for r in (read_partial(partial) if os.path.exists(partial) else ())}
+    done, brief, refused = {}, {}, {}
+    todo, order, skipped = [], [], collections.Counter()
+    for p in _shard(packages_path, select, shard, skipped):
+        order.append(p['id'])
+        why = refusal(p, max_cells, centre, *limits)
+        r = held.get(p['id'])
+        if why is not None:
+            refused[p['id']] = why
+        elif r is not None and r['status'] != 'too_big':
+            done[p['id']] = gzip.compress((json.dumps(r, separators=(',', ':')) + '\n').encode())
+            brief[p['id']] = (r['status'], r['seconds'])
+        else:
+            todo.append(p)
+    resumed = len(done)
+    # rewritten from the records kept, so that nothing follows a cut-off one
     with open(partial + '.tmp', 'wb') as f:
         for rid in order:
             if rid in done:
                 f.write(done[rid])
     os.replace(partial + '.tmp', partial)
-    need = [peak_bytes(p, kw.get('max_cells', MAX_CELLS)) for p in todo]
+    need = [peak_bytes(p, max_cells, centre=centre, max_excess=max_excess) for p in todo]
+    over = [k for k in range(len(todo)) if need[k] > limit]
+    if over:
+        k = max(over, key=lambda k: need[k])
+        raise RuntimeError('%d regions need more memory than the budget of %.2f GB (max_memory); the largest, %s, '
+                           'needs about %.2f GB. Give realign that much (realign --plan gives need_gb).' % (
+                               len(over), limit / memory.GB, todo[k]['id'], need[k] / memory.GB))
+    failed = []               # regions this machine failed to align: not recorded, so a rerun redoes them
     with open(partial, 'ab') as f:
         def take(r):
+            if r['status'] in MACHINE_FAILURES:
+                failed.append(r)
+                return
             done[r['id']] = gzip.compress((json.dumps(r, separators=(',', ':')) + '\n').encode())
             brief[r['id']] = (r['status'], r['seconds'])
             f.write(done[r['id']])
             f.flush()
-        for p, b in zip(todo, need):
-            if b > limit:
-                take({'id': p['id'], 'method': 'medoid_star', 'status': 'too_big',
-                      'message': 'needs about %.2f GB, more than the memory budget of %.2f GB' % (
-                          b / memory.GB, limit / memory.GB), 'seconds': 0.0})
-        fit = [k for k in range(len(todo)) if need[k] <= limit]
-        peak = memory.run_within(functools.partial(realign_package, **kw), [todo[k] for k in fit],
-                                 [need[k] for k in fit], jobs, limit, lambda i, r: take(r))
+        for rid in order:
+            if rid in refused:
+                take({'id': rid, 'method': 'medoid_star', 'status': 'too_big', 'message': refused[rid], 'seconds': 0.0})
+        peak = memory.run_within(functools.partial(realign_package, **kw), todo, need, jobs, limit,
+                                 lambda i, r: take(r))
+    if failed:
+        raise RuntimeError('this machine failed to align %d regions (%s), among them %s: %s. Run realign again with '
+                           'more memory, or with an abPOA that does not reserve its matrices whole (the one cactus '
+                           'builds), and it resumes from %s.' % (
+                               len(failed), ', '.join(sorted({r['status'] for r in failed})), failed[0]['id'],
+                               failed[0]['message'][-160:], partial))
     # concatenated gzip members are one valid gzip file
     with open(out_path + '.tmp', 'wb') as out:
         for rid in order:

@@ -46,7 +46,7 @@ class TestPieces(unittest.TestCase):
         self.assertEqual((s['pair_precision'], s['pair_recall'], s['growth']), (1.0, 0.8, 1.2))
         self.assertIsNone(s['ref_f1'])
 
-    def test_pairs_over_the_budget(self):
+    def test_pairs_over_the_cap(self):
         seq = {'a1': 'ACGTACGTAC', 'a2': 'ACGTTCGTAC', 'a3': 'GATTACA' * 400}       # 10, 10 and 2,800 bp
         pkg = {'id': 'R', 'ref': 'a1', 'alleles': [{'id': a, 'weight': 1, 'seq': x} for a, x in seq.items()]}
         width = sum(len(x) for x in seq.values())
@@ -56,27 +56,23 @@ class TestPieces(unittest.TestCase):
             k += len(x)
         calls = []
 
-        def align(seqs, banded=False):                # no base aligned either: one deletion, one insertion
-            calls.append((len(seqs[0]), len(seqs[1]), banded))
+        def align(seqs, banded=False, seeded=False):  # no base aligned either: one deletion, one insertion
+            calls.append((len(seqs[0]), len(seqs[1]), banded, seeded))
             return [seqs[0] + '-' * len(seqs[1]), '-' * len(seqs[0]) + seqs[1]]
         self.assertEqual(qc.compared_pairs(pkg, rows), [('pair', 'a2', 'a3'), ('ref', 'a1', 'a2'), ('ref', 'a1', 'a3')])
-        limit = qc.pair_bytes(10, 10) + 1000                  # the pairs with a3 need more
-        r = qc.region_qc(pkg, rows, align, max_cells=50, max_bytes=limit)
-        # a1 and a2 are compared, banded since 100 cells exceed 50; the pairs with a3, over max_cells too, are not
-        self.assertEqual((r['skipped'], r['banded'], calls), (2, 1, [(10, 10, True)]))
-        self.assertEqual(qc.peak_bytes(pkg, rows, max_cells=50, max_bytes=limit), qc.pair_bytes(10, 10, 50))
-        self.assertEqual(qc.peak_bytes(pkg, rows, max_cells=50), qc.pair_bytes(10, 2800, 50))
-        self.assertEqual(qc.peak_bytes(pkg, rows, max_bytes=1), memory.BASE)
         r = qc.region_qc(pkg, rows, align, max_cells=50)
-        self.assertEqual((r['skipped'], r['banded']), (0, 3))
+        # a1 and a2 are compared, as star.long_pair aligns them since 100 cells exceed 50: banded, with abPOA's own
+        # band, 10 cells, and seeded; the pairs with a3 would fill 28,000 cells, more than 7 x 50, so are not
+        self.assertEqual((r['skipped'], r['banded'], calls), (2, 1, [(10, 10, 10, False), (10, 10, True, True)]))
+        self.assertEqual(qc.peak_bytes(pkg, rows, max_cells=50), qc.pair_bytes(10, 10, 50))
+        # under 10,000 cells, every pair is compared, those with a3 banded
+        r = qc.region_qc(pkg, rows, align, max_cells=10000)
+        self.assertEqual((r['skipped'], r['banded']), (0, 2))
+        self.assertEqual(qc.peak_bytes(pkg, rows, max_cells=10000), qc.pair_bytes(10, 2800, 10000))
+        self.assertEqual(qc.peak_bytes(pkg, rows), qc.pair_bytes(10, 2800))     # no max_cells: every pair, unbanded
         # with the graph, every pair's estimate holds the alleles' graph positions too
         held = qc.GRAPH_BYTES * width
-        graph = ({a: [('>', k)] for k, a in enumerate(seq)}, {k: len(x) for k, x in enumerate(seq.values())}, 0)
-        self.assertEqual(qc.peak_bytes(pkg, rows, max_cells=50, graph=True), held + qc.pair_bytes(10, 2800, 50))
-        self.assertEqual(qc.peak_bytes(pkg, rows, max_cells=50, max_bytes=limit, graph=True), held + memory.BASE)
-        for budget, skipped in ((limit, 3), (limit + held, 2)):
-            r = qc.region_qc(pkg, rows, align, max_cells=50, graph=graph, max_bytes=budget)
-            self.assertEqual(r['skipped'], skipped)
+        self.assertEqual(qc.peak_bytes(pkg, rows, max_cells=50, graph=True), held + qc.pair_bytes(10, 10, 50))
 
 
 @unittest.skipUnless(shutil.which('abpoa'), 'abpoa not on PATH')
@@ -134,15 +130,25 @@ class TestRun(unittest.TestCase):
             limit = 0.2               # GB: S's pairs fit, and B's, about 0.27 each unbanded, do not
             self.assertGreater(qc.pair_bytes(len(unit) * 215, len(unit) * 215), limit * memory.GB)
             out = os.path.join(d, 'qc.tsv')
-            s = qc.run(os.path.join(d, 'x'), os.path.join(d, 'msas.jsonl.gz'), out, jobs=2, max_memory=limit)
-            lines = [l.rstrip('\n').split('\t') for l in open(out)]
-            got = {x[0]: dict(zip(lines[0], x)) for x in lines[1:]}
-            self.assertEqual([x[0] for x in lines[1:]], ['B', 'S'])
-            self.assertEqual((got['B']['skipped'], got['B']['ref_opt'], got['B']['pair_opt']), ('3', '0', '0'))
-            self.assertEqual(got['S']['skipped'], '0')
-            self.assertGreater(int(got['S']['ref_opt']), 0)
-            self.assertEqual(s['skipped'], 3)
-            self.assertLessEqual(s['peak_estimate_gb'], limit)
+            args = (os.path.join(d, 'x'), os.path.join(d, 'msas.jsonl.gz'), out)
+            # the budget decides only how many regions run at once: B needs more than 0.2 GB, so nothing starts
+            with self.assertRaisesRegex(RuntimeError, 'the largest, B, needs about 0.2'):
+                qc.run(*args, jobs=2, max_memory=limit)
+            # the size of their alignments decides which pairs are compared, the same under any budget: under
+            # max_cells 30,000, B's pairs would fill 3,010 rows of 80 cells banded, more than 7 x 30,000
+            results = []
+            for budget in (limit, 4):
+                s = qc.run(*args, jobs=2, max_memory=budget, max_cells=30000)
+                lines = [l.rstrip('\n').split('\t') for l in open(out)]
+                got = {x[0]: dict(zip(lines[0], x)) for x in lines[1:]}
+                self.assertEqual([x[0] for x in lines[1:]], ['B', 'S'])
+                self.assertEqual((got['B']['skipped'], got['B']['ref_opt'], got['B']['pair_opt']), ('3', '0', '0'))
+                self.assertEqual(got['S']['skipped'], '0')
+                self.assertGreater(int(got['S']['ref_opt']), 0)
+                self.assertEqual(s['skipped'], 3)
+                self.assertLessEqual(s['peak_estimate_gb'], budget)
+                results.append(lines)
+            self.assertEqual(results[0], results[1])
         finally:
             shutil.rmtree(d, ignore_errors=True)
 

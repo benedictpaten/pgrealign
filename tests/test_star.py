@@ -49,6 +49,36 @@ class TestPieces(unittest.TestCase):
         seqs = ['ACGTACGTAC' * 3, 'ACGTACGTAC' * 4, 'ACGTACGTAC' * 5, 'TTTTGGGGCC' * 3]
         self.assertEqual(star.medoid(seqs, [1, 1, 1, 1], k=5, max_work=0), 1)
 
+    def test_score(self):
+        s = star.SCORES                                          # match 8, mismatch 16, gaps min(16 + 8g, 96 + g)
+        self.assertEqual(s.score('ACGT', 'ACGT'), 32)
+        self.assertEqual(s.score('ACGT', 'ACCT'), 8)
+        self.assertEqual(s.score('ANGT', 'ACGN'), 16)             # N scores nothing
+        self.assertEqual(s.score('AC--GT', 'ACTTGT'), 32 - 32)
+        self.assertEqual(s.score('A-C', 'AG-'), 8 - 24 - 24)       # an insertion then a deletion: two gaps
+        self.assertEqual(s.score('A' + '-' * 100 + 'C', 'A' + 'G' * 100 + 'C'), 16 - 196)   # the long gap's cost
+        self.assertEqual(s.score('A--C', 'A--C'), 16)              # a column with no base counts for nothing
+        self.assertEqual(s.score('', ''), 0)
+        self.assertEqual((s.gap(0), s.gap(1), s.gap(10), s.gap(11), s.gap(12)), (0, 24, 96, 104, 108))
+
+    def test_band_width(self):
+        self.assertEqual(star.default_band(30000), 310)
+        # the widest band whose |n - m| + 2w cells a row keep within max_cells, never narrower than abPOA's own
+        self.assertEqual(star.band_width(30000, 30000, 450_000_000), 7500)
+        self.assertEqual(star.band_width(30000, 32000, 450_000_000), 6500)
+        self.assertEqual(star.band_width(30000, 60000, 450_000_000), 610)
+        n, m = 27709, 27752
+        w = star.band_width(n, m, 450_000_000)
+        self.assertLessEqual(n * (abs(n - m) + 2 * w), 450_000_000)
+        self.assertGreater(n * (abs(n - m) + 2 * (w + 1)), 450_000_000)
+
+    def test_abpoa_flags(self):
+        al, s = star.Abpoa(), star.SCORES.flags()
+        self.assertEqual(al.flags(['A', 'C'], False), s + ['-b', '-1'])          # unbanded
+        self.assertEqual(al.flags(['A', 'C'], True), s)                         # abPOA's own band
+        self.assertEqual(al.flags(['A', 'C'], 7500), s + ['-b', '7500', '-f', '0'])
+        self.assertEqual(al.flags(['A', 'C'], True, seeded=True), s + ['-S'])
+
     def test_scores(self):
         self.assertEqual(star.SCORES.flags(), ['-M', '8', '-X', '16', '-O', '16,96', '-E', '8,1'])
         self.assertEqual(star.Scores.parse(''), star.Scores())
@@ -67,8 +97,8 @@ class FakeAligner:
     def __init__(self):
         self.calls = []
 
-    def __call__(self, seqs, banded=False):
-        self.calls.append((len(seqs), banded))
+    def __call__(self, seqs, banded=False, seeded=False):
+        self.calls.append((len(seqs), banded, seeded))
         w = max(len(s) for s in seqs)
         return [s + '-' * (w - len(s)) for s in seqs]
 
@@ -89,11 +119,13 @@ class TestStarMSAInputs(unittest.TestCase):
         al = FakeAligner()
         m = star.star_msa([('a', 'ACGT' * 10, 2), ('b', 'ACGT' * 20, 1), ('c', 'ACGA' * 2, 1)], align=al,
                           centre='a', max_cells=100)
-        self.assertEqual(m.banded_pairs, 2)                      # a x b is 3,200 cells and a x c 320, both over 100
-        self.assertEqual(sorted(al.calls), [(2, True), (2, True)])
+        # a x b is 3,200 cells and a x c 320, both over 100: each is aligned with the widest band within 100
+        # cells, which is abPOA's own, 10, and seeded; the two are the same here, so the band's is kept
+        self.assertEqual((m.banded_pairs, m.seeded_pairs, m.refined_windows), (2, 0, 0))
+        self.assertEqual(al.calls, [(2, 10, False), (2, True, True)] * 2)
         al = FakeAligner()
         m = star.star_msa([('a', 'ACGT' * 10, 2), ('b', 'ACGT' * 20, 1)], align=al, centre='a')
-        self.assertEqual((m.banded_pairs, al.calls), (0, [(2, False)]))
+        self.assertEqual((m.banded_pairs, al.calls), (0, [(2, False, False)]))
 
     def test_centre_and_weight_zero(self):
         al = FakeAligner()
@@ -187,11 +219,54 @@ class TestStarMSA(unittest.TestCase):
         for aid, s, _ in alleles:
             self.assertEqual(m.rows[aid].replace('-', ''), s)
 
-    def test_deadline(self):
-        alleles = [('a1', 'ACGTACGTAC', 1), ('a2', 'ACGTTCGTAC', 1)]
-        with star.Abpoa(deadline=0) as align:
-            with self.assertRaises(star.TimedOut):
-                star.star_msa(alleles, align=align)
+    def guide(self):
+        """A centre, an allele that is the centre with 12 bases inserted in its middle stretch, and an alignment
+        of the two that matches their flanks but puts the insertion at the stretch's end, so that 15 of the
+        stretch's bases are aligned out of register."""
+        rng = random.Random(7)
+        rand = lambda n: ''.join(rng.choice('ACGT') for _ in range(n))
+        a, x, b, ins = rand(100), rand(30), rand(100), rand(12)
+        c, s = a + x + b, a + x[:15] + ins + x[15:] + b
+        return c, s, (a + x + '-' * 12 + b, a + x[:15] + ins + x[15:] + b)
+
+    def test_refine_pair(self):
+        c, s, (gc, gs) = self.guide()
+        with star.Abpoa() as align:
+            (rc, rs), better = star.refine_pair(gc, gs, align, 10 ** 6)
+            self.assertEqual((rc.replace('-', ''), rs.replace('-', ''), better), (c, s, 1))
+            # the stretch between the two flanks, realigned on its own: all matched, and one 12-base gap
+            self.assertEqual(star.SCORES.score(rc, rs), 8 * 230 - star.SCORES.gap(12))
+            self.assertGreater(star.SCORES.score(rc, rs), star.SCORES.score(gc, gs))
+            self.assertEqual(star.align_pair(c, s, align), (rc, rs))
+            # the window is at most the stretch's 15 centre bases and 27 allele bases out of register; over
+            # max_cells, it is left as it is
+            self.assertEqual(star.refine_pair(gc, gs, align, 15 * 27), ((rc, rs), 1))
+            self.assertEqual(star.refine_pair(gc, gs, align, 100), (star.left_normalise_pair(gc, gs), 0))
+            # with no run of `anchor` matched columns, the whole alignment is one window
+            self.assertEqual(star.refine_pair(gc, gs, align, len(c) * len(s), anchor=200), ((rc, rs), 1))
+            self.assertEqual(star.refine_pair(gc, gs, align, len(c) * len(s) - 1, anchor=200)[1], 0)
+
+    def test_long_pair(self):
+        c, s, (gc, gs) = self.guide()
+        poor = (c + '-' * len(s), '-' * len(c) + s)              # nothing aligned
+        for band, seeded, kept in ((poor, (gc, gs), True), ((gc, gs), poor, False)):
+            calls = []
+            with star.Abpoa() as abpoa:
+                def align(seqs, banded=False, seeded_=False, **kw):
+                    seeded_ = kw.get('seeded', seeded_)
+                    calls.append((banded, seeded_))
+                    if banded is True and seeded_:
+                        return list(seeded)
+                    return list(band) if banded else abpoa(seqs)
+                rows, used, better = star.long_pair(c, s, align, len(c) * len(s) - 1)
+            self.assertEqual(calls[:2], [(star.band_width(len(c), len(s), len(c) * len(s) - 1), False), (True, True)])
+            self.assertEqual(used, kept)
+            if kept:           # seeding's kept, and its out-of-register window realigned
+                self.assertEqual((better, len(calls), calls[2]), (1, 3, (False, False)))
+                with star.Abpoa() as abpoa:
+                    self.assertEqual(rows, star.align_pair(c, s, abpoa))
+            else:              # the band's kept as it is
+                self.assertEqual((rows, better, len(calls)), (star.left_normalise_pair(gc, gs), 0, 2))
 
 
 if __name__ == '__main__':

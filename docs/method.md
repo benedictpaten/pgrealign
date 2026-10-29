@@ -409,16 +409,16 @@ allele; every run that is not complex, which `replace` rewrites; and each region
 which `replace` removes ([packages](reference.md#packagesjsonlgz),
 [runs](reference.md#occurrencestsvgz), [interiors](reference.md#interiorstsvgz)).
 
-## Realign: the medoid star
+## Realign: the star
 
 `realign` builds one multiple alignment for each `ok` region that it selects (see Which regions are
 realigned). A multiple alignment here is a set of rows of equal length, one per member, each row
 being the member's sequence with gap characters (`-`) inserted. A column is one position across all
 the rows.
 
-The method is a star alignment around a medoid, the allele with the least weighted distance to the
-others, which is called the centre:
-1. Centre. The centre is chosen from the alleles.
+The method is a star alignment around one allele, called the centre: the region's reference allele,
+where it has one, or else a medoid, the allele with the least weighted distance to the others:
+1. Centre. The reference allele, or the medoid of the alleles (see The centre).
 2. Pairwise alignment. Every other allele is aligned to the centre alone.
 3. Left normalisation. Each pairwise alignment's indels are moved as far left as they can go without
    lowering its score.
@@ -437,18 +437,91 @@ Every alignment is computed by abPOA, a partial-order aligner, under the scores 
 align two sequences abPOA fills a dynamic-programming matrix of one cell per pair of positions, one
 from each sequence, at 20 bytes per cell. A band limits it to the cells near the alignment's
 path. abPOA's own band is adaptive, reaching about 10 cells plus 1% of the sequence's length either
-side of the path, and `-b -1` turns it off. A band saves time, but less memory than its cells
-suggest: abPOA reserves the whole matrix either way, and a banded alignment still touches at least
-one page per base of the centre in each of its five score matrices
-([limits](reference.md#limits)). The aligner is told, for each alignment, whether a band
-is wanted: alignments to the centre are unbanded unless too large, and alignments of inserted
-sequences to one another are banded, as the sections below say.
+side of the path; `-b w -f 0` makes it w cells, and `-b -1` turns it off. A band saves time, but less
+memory than its cells suggest: a banded alignment still touches at least one page per base of the
+centre in each of its five score matrices, and abPOA reserves the whole matrix either way, rounded up
+to a power of two, which the abPOA that cactus builds maps so that only what it writes takes memory
+([memory](reference.md#memory)). abPOA can also seed an alignment (`-S`): it
+chains the minimizers the sequences share and aligns between them, window by window. The aligner is
+told, for each alignment, whether a band is wanted, how wide, and whether to seed: alignments to the
+centre are unbanded unless too large, when they are aligned both with a band and seeded, and
+alignments of inserted sequences to one another are banded, as the sections below say.
 
 abPOA is given A, C, G, T and N only. Every sequence is upper-cased first, and any other character is
 given to abPOA as N and restored in the returned rows. Every row is checked to spell its member's
 upper-cased sequence, and all rows to have one length. The centre is chosen from the same sequences.
 
-### Choosing the centre
+### The centre
+
+The centre is the region's reference allele, the package's `ref`, when it has a positive weight, and
+the medoid of the alleles otherwise, as when the reference does not span the region (`--centre
+medoid` takes the medoid always, and `--max-excess` the medoid where more than that share of the
+haplotypes' bases lie beyond the reference allele's length, which is off by default; see below).
+Every other allele is aligned to the centre on its own, so around the reference, the alignment that
+a genotyper reads between the reference and any allele, the pair's projected alignment (see Merging
+into one alignment), is that allele's own pairwise alignment to the reference: optimal under the
+scores, unless too large to align unbanded, and left-normalised against the reference, as a variant
+caller writes its records. Around any other centre it is the composition of two alignments to the
+centre, the reference's and the allele's, which is neither: an indel that each places as far left as
+it can go on the centre can land anywhere on the reference, so the same difference from the
+reference, carried by several alleles, can come out as several records at different places.
+
+Measured with `qc` on regions of the HPRC graph of 30 haplotypes realigned on CHM13 (a sample of
+1,468 regions of chr2, chr6, chr14 and chr16 with three or more alleles, one of 100 bp or more,
+aligned around each centre in turn), the reference as centre gives:
+
+| centre | ref F1 | pair F1 | growth | gap runs of 50+ bp against the reference | seconds |
+|---|---|---|---|---|---|
+| medoid | 0.9934 | 0.9949 | 1.030 | 830 | 1,169 |
+| reference allele | 1.0000 | 0.9942 | 1.027 | 625, as many as the optimal alignments | 981 |
+
+The reference's own alignments become optimal (ref F1 1, by construction), at a small cost to pairs
+of other alleles, which are now composed through the reference rather than through the medoid
+(pair F1), and the graph does not grow. The 726 of these regions whose medoid is not the reference
+allele carry the whole difference. ([QC](#qc) defines the metrics.)
+
+That cost is larger where many alleles are much longer than the reference, as at a tandem repeat
+expanded in most haplotypes. Each allele's extra copies are inserted into the reference where its own
+alignment puts them, and two alleles' insertions are aligned to each other only where they fall in the
+same slot (see Merging into one alignment). At chr2:232.31M (30 alleles of up to 48.8 kb around a
+27.7 kb reference), pairs of other alleles keep 213,917 of the 499,974 aligned pairs of bases of their
+optimal alignments, against 416,142 around the medoid, while the region's variant sites, runs of
+columns whose rows differ, fall from 1,672 to 1,068. At chr2:90.32M, around the reference, the
+region's 29 other alleles first differed from it in 20,391 runs of columns, against 7,676 for the
+alignments composed through the medoid; but those were abPOA's band threading long alleles through
+the wrong copies of the repeat, and aligned past it (Pairs too large to align unbanded) they differ in
+3,751.
+
+Where most haplotypes are much longer than the reference allele, as where they carry an expansion it
+lacks, the cost becomes the graph's size: their extra sequence is all inserted around the reference
+and aligned only slot by slot, and much of it stays unaligned. Joined both ways, the 30-way graph's
+realigned regions held 2.8 Mb more sequence around the reference allele than around the medoid, and
+228 regions whose graph the reference made at least half as large again carried 5.5 Mb, all with a
+reference allele far shorter than most haplotypes': at chr19:8.79M, a 23 kb reference allele against
+75 kb at the median, 717,811 bases of graph against 129,260. `excess`, the share of the haplotypes'
+bases that lie beyond the reference allele's length, each allele counted once per haplotype, picks
+these regions out. Taking the medoid where it exceeds `--max-excess`:
+
+| `--max-excess` | regions on the medoid | bases of graph against the medoid everywhere | blow-ups caught |
+|---|---|---|---|
+| none, the default | 0 | +2.81 Mb | 0 of 228 |
+| 0.25 | 980, 0.11% | -2.59 Mb | 150 |
+| 0.15 | 1,683, 0.19% | -2.86 Mb | 201 |
+| 0.1 | 2,508, 0.28% | -2.89 Mb | 220 |
+| 0.05 | 4,592, 0.51% | -2.74 Mb | 227 |
+
+The graph's size is a poor measure of the alignment in tandem repeats, though, and the VCF is better
+around the reference. Compared region by region between two rejoins of the 30-way graph, one with
+`--max-excess 0.1` and one with the reference everywhere, the 2,508 regions that took the medoid
+gave 19,639 more errors against the dipcall truths of 14 samples and 1,787 more against HG002's GIAB
+structural variants (105 more against its small variants; the medoid had fewer dipcall errors in 250
+of these regions, more in 507, and as many in the rest). Every band of excess from 0.1 up shows more
+errors around the medoid, so no threshold does better than none for the VCF: at 0.2, for instance,
+the medoid would keep 1,259 regions and 177 of the blow-ups, and the regions back on the reference
+would take back 11,231 of the dipcall errors and 1,204 of GIAB's. There is therefore no limit by
+default; `--max-excess` remains for a smaller graph at that cost.
+
+### The medoid
 
 The distance between two alleles comes from their 15-mers. Each allele's k-mers, with k = 15, form a
 multiset: a k-mer that occurs three times counts three times. k-mers that contain a character other
@@ -459,14 +532,14 @@ of their multisets:
 
 where `shared` sums, over every k-mer, the smaller of its two copy numbers, and |i| is the number of
 k-mers in i. When neither allele has a k-mer, as when both are shorter than 15 bp, J is 1, so the two
-are at distance 0; an allele without k-mers is at distance 1 from one that has them. The centre is
+are at distance 0; an allele without k-mers is at distance 1 from one that has them. The medoid is
 the allele i of positive weight with the least weighted sum of distances to the others, the sum over
 every other allele j of w_j (1 - J(i, j)), where w_j is j's weight. Ties go to the earlier allele.
-If no allele has a positive weight, every weighted sum is 0 and the centre is the first allele.
+If no allele has a positive weight, every weighted sum is 0 and the medoid is the first allele.
 
 The multiset, rather than the set, carries copy number: tandem-repeat alleles differ mostly in how
 many copies of the motif they hold, and two that differ only in copy number often contain the same
-distinct k-mers. Because the distances are weighted, the centre lies near the sequences that most
+distinct k-mers. Because the distances are weighted, the medoid lies near the sequences that most
 runs spell. An allele can have weight 0 when `union` adds it (see Realigning on a panel).
 
 ### Estimating distances from sketches
@@ -478,7 +551,7 @@ allele's sketch is the `star.SKETCH`, 1,000, smallest hash values of its k-mer m
 of a k-mer hashed as an element of its own, so that copy number still counts. J(i, j) is estimated
 as the fraction of the 1,000 smallest values of the two sketches' union that lie in both sketches;
 two empty sketches are at distance 1 (see Known gaps). The hash is a fixed function, so the
-sketches, and the centre, are the same in every run.
+sketches, and the medoid, are the same in every run.
 
 ### Homology
 
@@ -486,9 +559,9 @@ The star assumes that every allele is a variant of the centre. An allele that is
 at a non-homologous structural variant, or reversed, as at an inversion, has no good forward
 alignment to it, but the aligner returns one anyway: the allele threaded through the centre by
 hundreds of short chance matches, each of which becomes a variant of its own in the graph, and a VCF
-record for every haplotype that carries the allele. So once the centre is chosen, and before anything
-is aligned, `realign` compares each allele of positive weight with it, using the 15-mers that chose
-the centre, as sets:
+record for every haplotype that carries the allele. So once the centre is known, and before anything
+is aligned, `realign` compares each allele of positive weight with it, using their 15-mers (those
+that choose a medoid), as sets:
 
     share = shared distinct k-mers / the distinct k-mers of whichever of the two has fewer
 
@@ -521,17 +594,91 @@ takes back. Counting events, the variants an allele has against the centre once 
 as well and not adopted: among the regions the share passes, every event threshold tried gave up
 about as many records on chrX as it took back.
 
+These were measured with the medoid as centre. Around the reference allele the guard compares each
+allele with the reference instead, and refuses nearly the same regions: on nine chromosomes of the
+same graph (chr1, 2, 4, 5, 7, 11, 15, 22 and X), 1,401 regions against 1,385, 1,364 of them the same,
+among them every region of the chrX and chr15 loci above. On chrX the regions it refuses take back
+410,605 records and give up 3,470 (410,601 and 2,904 around the medoid), and on chr15 159,764 and
+7,466 (159,142 and 6,396), so 0.5 stays.
+
 ### Pairwise alignment to the centre
 
 Every allele is aligned to the centre with abPOA, so the number of alignments grows linearly with
 the number of alleles. The alignment is unbanded, and so optimal under the scores, unless its
-matrix, the centre's length times the allele's, would exceed `--max-cells` cells. Such an alignment
-is banded instead, which bounds its memory and time but finds only the best alignment within the
-band; the output's `banded_pairs` counts these, fragments aligned to the centre included. Two cases
+matrix, the centre's length times the allele's, would exceed `--max-cells` cells. Such a pair is
+aligned as the next section says, which bounds its memory and time but need not find the optimum;
+the output's `banded_pairs` counts these, fragments aligned to the centre included. Two cases
 need no aligner: a sequence equal to the centre, once both are upper-cased and other characters made
 N, aligns to it base for base, and an empty allele, or an empty centre, aligns as one run of gaps
 opposite the other sequence. The rows abPOA returns must spell their two inputs, or the region fails
 as `aligner_failed`.
+
+### Pairs too large to align unbanded
+
+A band holds only the alignments that stay near the matrix's diagonals. abPOA's adaptive band covers,
+in each row, the columns from the best cell of the row before to the diagonal that ends at the
+matrix's corner, and its margin either side, so it holds any alignment that stays between the two
+diagonals that start and end the matrix, give or take the margin, and none that strays further. In
+a tandem repeat whose alleles differ by many copies, the optimal alignment often strays: an allele
+that carries more copies in one place and fewer in another aligns with an insertion and a deletion
+far larger than the difference between the two lengths. Kept within the band, abPOA threads such an
+allele through the wrong copies instead, with a mismatch wherever two copies differ, and each
+mismatch becomes a variant of its own in the graph and the VCF. At chr2:90.32M in the 30-way HPRC
+graph, an allele 2,126 bp longer than the 32,286 bp reference allele carries 6,851 bp more of the
+repeat in one place and 4,805 bp less in another: aligned with abPOA's own band, about 2,800
+columns wide there, it has 2,349 mismatches; aligned with that insertion and that deletion, 34.
+
+A pair whose matrix exceeds `--max-cells` is therefore aligned twice (`star.long_pair`):
+- with the widest band that keeps within `--max-cells` cells, |n − m| + 2w in each of the centre's n
+  rows for a margin of w either side, and never narrower than abPOA's own (`star.band_width`); and
+- seeded, which has no such limit on how far the alignment strays, but in a tandem repeat can chain
+  minimizers of the wrong copies, and then aligns copies that do not belong together.
+
+The one that scores higher under the scores is kept, the band's on a tie. Where the seeded one is
+kept, it is refined (`star.refine_pair`): cut at every run of 32 or more matched columns
+(`star.ANCHOR`), the stretches between cuts joined, in order, into windows as large as keep within
+`--max-cells` cells, the product of a window's bases in the two rows, and each window aligned
+unbanded and kept where it scores higher. No gap crosses a matched column, so the alignment's score
+is the sum of its windows' and can only rise. Seeding aligns between anchors under abPOA's own band,
+and so falls short where a stretch between two anchors needs the alignment to stray, as around a
+large insertion; refinement aligns such a stretch with the anchors around it, unbanded. The
+output's `seeded_pairs` counts the pairs whose seeded alignment was kept, and `refined_windows` the
+windows refinement improved. Each step depends only on the two sequences, the scores and
+`--max-cells`, so the alignment is the same on every machine.
+
+At two loci of the 30-way graph where realignment around the reference had added the most VCF
+records that the truth sets do not have, the region's alleles against the reference allele in the
+alignment, every allele there being too long to align with it unbanded:
+
+| locus | other alleles | mismatched bases, abPOA's own band | now | variant runs, abPOA's own band | now | columns, abPOA's own band | now |
+|---|---|---|---|---|---|---|---|
+| chr2:90.32M | 29 | 20,448 | 3,586 | 20,391 | 3,751 | 39,315 | 54,918 |
+| chr2:232.31M | 29 | 18,576 | 8,009 | 19,974 | 8,662 | 97,994 | 101,547 |
+
+A variant run is a maximal run of columns in which the two rows differ, about one VCF record. The
+alignment grows where it now inserts and deletes copies of the repeat that abPOA's own band had
+forced onto other copies. The band's alignment was kept for every pair at these two loci, scoring
+no less than the seeded one, which at chr2:232.31M chained the wrong copies of the repeat. Seeding matters
+where the band within `--max-cells` can be no wider than abPOA's own, as at chr14:6.20M, where the
+reference allele is 62,146 bp and five alleles are 7.7 to 9.1 kb longer: one of them, which abPOA's
+band had threaded through the wrong copies with 2,857 mismatches, is aligned with 225 by seeding,
+and with 199 once refined (the band's alignments there need 128 GB of address space, more than the
+machine these were measured on grants). minimap2 (`-x asm20`, scored the same way where it gives
+one chain end to end) finds alignments of about the same score at all three loci.
+
+Elsewhere the wider band rarely changes anything. Of the 323 pairs over `--max-cells` in 21 regions
+of the same graph, every such region of chr20 and a third of chrX's, leaving out pairs for which
+abPOA would reserve more than 32 GB, it improved one (303 mismatches to 185) and left the other 322
+as abPOA's own band had aligned them, and no seeded alignment was kept. A pair took a median of 5.2
+s rather than 0.3 s; the most memory a pair took, 10.9 GB resident, was the same either way, for a
+pair whose lengths differ too much for a band wider than abPOA's own. On chrX, whose 35,839
+regions realign in 14.6 hours of one core, its 681 pairs over `--max-cells` add about an hour.
+`realign` admits the same chrX regions as before, and the largest one's memory estimate is the
+same; the estimated work rises by 11%. The work counts a long pair's band only: seeding took a
+median of 0.1 s a pair against the band's 5 s, and refinement runs only where the seeded alignment
+is kept. Counting both at their worst would more than double the work of regions whose long pairs
+differ in length by more than a wider band allows, such as regions of alleles of 100 kb and more,
+which `realign` aligns in a few minutes.
 
 ### Left normalisation
 
@@ -542,9 +689,9 @@ left-normalised. A run of gaps in one row moves one column left when the column 
 bases and the other row's base in that column equals the other row's base in the run's last column.
 The column the run leaves then holds the pair of bases that the column before it held, so the score
 is unchanged, unless the run comes to abut another gap in its row, which joins the two and can only
-raise the score; that happens only in a banded alignment, which need not be optimal. Moves repeat,
-in both rows, until none applies. For example, the alignment on the left becomes the one on the
-right:
+raise the score; that happens only in an alignment too large to align unbanded, which need not be
+optimal. Moves repeat, in both rows, until none applies. For example, the alignment on the left
+becomes the one on the right:
 
     GCACACAT    GCACACAT
     GCACA--T    G--CACAT
@@ -579,7 +726,7 @@ the allele, a `right` fragment as a suffix, and an `internal` fragment anywhere,
 occurrence. A fragment found in an allele takes that allele's merged row, with every base outside
 the matching stretch replaced by a gap, so in the graph it adds no sequence: its walk follows the
 allele's, though nodes may be cut where it starts and ends (`fragments_exact`). A fragment found in
-no allele is aligned to the centre like an allele, banded under the same rule, and joins the merge
+no allele is aligned to the centre like an allele, under the same rules, and joins the merge
 (`fragments_aligned`).
 
 ### Scores
@@ -616,26 +763,59 @@ as it is:
 
 | status | when |
 |---|---|
-| `too_big` | even a banded alignment of the region's longest allele or fragment would exceed `--max-cells` cells, or its alleles hold more than 40,000,000 bases in all, or its memory estimate alone exceeds `--max-memory` |
-| `timeout` | the region ran longer than `--timeout` seconds |
+| `too_big` | the region exceeds one of the limits on its size below |
 | `aligner_failed` | abPOA exited with an error, left out a row, or returned pairwise rows that do not spell their inputs |
 | `no_alleles` | the region has fragments but no allele: no walk spans it |
 | `not_homologous` | an allele shares less than `--min-share` of its 15-mers with the centre (see Homology) |
 | `error` | any other failure, recorded with its message: a bug, a slot alignment whose rows the final check rejects, or abPOA could not be started |
 
-Both size limits are checked before any work. A banded alignment of a sequence of length n to one
-of the same length is taken to fill the smaller of n² and 2n (10 + ⌊n / 100⌋) cells, abPOA's
-adaptive band, n being the length of the region's longest allele or fragment. For long sequences
-this is about n² / 50, so the limit admits sequences about seven times as long as an unbanded
-alignment of two equal lengths would. The slot alignments are not counted. The limit on total bases
-exists because choosing the centre holds every allele's k-mer counts at once. The memory limit is
-checked before the region starts: `realign` estimates from the lengths of the region's alleles and
-fragments the most memory its alignments and its choice of centre can take, assuming the worst
-centre, since the centre is not yet chosen ([reference.md](reference.md#memory)). A region over
-`--max-memory` on its own is not started, and `realign` starts the others in order while the
-estimates of those running fit within it. The time limit is checked while choosing the centre and
-before each call to abPOA, and abPOA itself is stopped at the deadline. Each region's failure is
-recorded in its own result, so one region cannot stop a contig.
+Whether a region is aligned is decided from its package alone, before anything is aligned, so the
+same packages give the same alignments, and the same graph, on any machine. Nothing that depends on
+the machine decides it: not the time a region takes, which depends on the machine's speed and on
+what else runs there, nor the memory `realign` is given, nor the machine's page size. Every limit is
+a size of the alignment, as a window and a band are in cactus's own alignments, never a size of the
+machine, and the memory and time a region needs follow from them. Each of these makes a region
+`too_big`, computed from the lengths of its alleles and fragments ([reference.md](reference.md#limits)):
+- one of its alignments would fill more than 7 times `--max-cells` cells (`realign.largest_alignment`),
+  about 3.2 × 10^9 cells, or 63 GB, with the default. An alignment to the centre fills the product of
+  the two lengths, or, for a pair too large to align unbanded, its band's cells: about `--max-cells`,
+  and more where the two lengths differ by more than that band allows, as the band then spans their
+  difference. A slot's alignment fills abPOA's own band across each member's excess and the longest.
+  This bounds the region's memory, about 20 bytes a cell;
+- its alleles hold more than 40,000,000 bases in all, since choosing the centre holds every allele's
+  k-mer counts at once;
+- its work exceeds `--max-work`: the cells of dynamic-programming matrices its alignments to the
+  centre fill, for a pair too large to align unbanded its band's (seeding and refinement add little;
+  see Pairs too large to align unbanded), and its slots', taking each member's excess over the centre
+  to fall in one slot and be aligned to the longest. This bounds its time.
+
+Run time follows the work. On the 7,288 regions of chrX in the HPRC graph realigned on CHM13 that
+took a second or more, the logarithms of the two correlate at 0.90, and the 160 that took a minute
+or more ran at 3, 6 and 9 × 10^7 cells a second (the 10th, 50th and 90th percentiles), so the
+default `--max-work`, 2 × 10^11 cells, is about an hour of one core. `--plan` estimates a region's
+time as a quarter of a second plus its work at 5 × 10^7 cells a second (`realign.seconds`): chrY and
+chr21 of the 30-way graph ran in 63% and 84% of their regions' estimates in all, and no region
+estimated at 10 s or more in more than 1.75 times its own.
+
+Of the 1,123,110 regions extract made `ok` in the HPRC graph on CHM13, the defaults leave 340
+`too_big`: 206 for an alignment over 7 times `--max-cells` cells, 117 for their work and 17 for their
+bases. The largest region they admit needs 68.5 GB (`need_gb`), and their estimates add up to 947
+core-hours. Of the 897,485 of a 30-way graph of HPRC v2.1 assemblies, they leave 69, all for an
+alignment over that size; the largest admitted needs 69.3 GB, and the estimates add up to 246
+core-hours, where a run of nearly the same regions took 195.
+
+`--max-memory` decides only how many regions run at once: `realign` starts them in order while the
+estimates of those running fit within it. If a region needs more than `--max-memory` on its own,
+`realign` stops before it aligns anything, with an error that names the region and how much it
+needs, rather than leave it out. `--plan` gives, without aligning anything, the regions each limit
+leaves `too_big`, the memory the largest region needs (`need_gb`), and an estimate of how long the
+run would take with a given `-j` and `--max-memory` (`seconds`), which replays `realign`'s order of
+starts, since where many regions each need a large share of the budget they run a few at a time.
+Nor does the machine decide: a region the machine fails (abPOA's reservation refused, as an abPOA
+that reserves its matrices whole can be on a small Linux machine; abPOA killed; the worker out of
+memory) is not recorded: `realign` aligns the others and then stops, and run again where the region
+can be aligned, it resumes with it. There is no time limit. Every other failure is recorded in the
+region's own result, so one region cannot stop a contig.
 
 ### Which regions are realigned
 
@@ -759,12 +939,13 @@ those whose package has more than one allele. Within a region it compares two se
 Each pair's projected alignment is compared with its optimal alignment: the pair's global,
 unbanded, left-normalised abPOA alignment under the scores given with `--scores`. A pair whose
 optimal alignment would need more than `--max-cells` cells, the product of the two lengths, is
-compared with abPOA's banded alignment instead, which can fall short of the optimum, and is counted
-in `banded`; `run` gives `qc` the same `--max-cells` as `realign`, so a pair through the centre that
-`realign` banded is compared with the very alignment `realign` used. A pair whose alignment's
-memory estimate alone exceeds `--max-memory` is not compared at all, and is counted in `skipped`
-([reference.md](reference.md#qc)). An aligned pair is a base of one sequence and a base of the other
-in one column, whether they match or not.
+compared with the alignment `realign` makes of such a pair (Pairs too large to align unbanded), which
+can fall short of the optimum, and is counted in `banded`; `run` gives `qc` the same `--max-cells` as
+`realign`, so a pair through the centre that is too large for `realign` too is compared with the very
+alignment `realign` used. A pair whose alignment would fill more than 7 times `--max-cells` cells,
+the size at which `realign` leaves a region `too_big`, is not compared at all, on any machine, and is
+counted in `skipped` ([reference.md](reference.md#qc)). An aligned pair is a base of one sequence and
+a base of the other in one column, whether they match or not.
 
 ### The graph's own alignment
 
@@ -791,7 +972,7 @@ induced graph. Its other fields are counts summed over the region's compared pai
 | `ref_sv`, `ref_sv_opt` | in the reference pairs' projected and optimal alignments, runs of 50 or more consecutive columns in which one row has a gap opposite a base of the other, whichever row holds the gap |
 | `forced`, `forced_opt` | columns of the projected and optimal alignments, of random and reference pairs alike, that lie in a forced-homology window |
 | `banded` | random and reference pairs compared with a banded alignment because of `--max-cells` |
-| `skipped` | random and reference pairs not compared because of `--max-memory`; every other field leaves them out |
+| `skipped` | random and reference pairs not compared, their alignment over 7 times `--max-cells` cells; every other field leaves them out |
 | `graph_pair_msa`, `graph_pair_tp` | with `--graph`: aligned pairs in the graph's alignment of the random pairs, and in both it and the optimal alignment |
 | `graph_ref_msa`, `graph_ref_tp` | the same, for the reference pairs |
 | `graph_sequence` | with `--graph`: the bases of the nodes the region's runs visit, which `replace` removes |
@@ -823,7 +1004,8 @@ has the same anchors in both. Then:
    matched by side and sequence. A union package's status is the panel's, except that a region
    complex in the recipient is complex, so a region invariant in the panel is not realigned even
    when the recipient has alleles the panel lacks.
-2. `realign` aligns the union's packages, so the panel's alleles choose each centre.
+2. `realign` aligns the union's packages, so each centre is the panel's reference allele, or chosen
+   from the panel's alleles.
 3. `project` keeps, from each `ok` alignment of the union, the rows of the recipient's members,
    under the recipient's ids, and drops the columns that are gaps in all of them.
 4. The recipient's `replace` takes the recipient's extract and project's output, and rewrites the
@@ -858,12 +1040,15 @@ theirs; an output that is not is renamed to `<output>.failed`.
   stretch of the region it does not cover is scored as an ordinary gap.
 - A node between the anchors that no recorded run visits is not in the interior, so `replace` keeps
   it, with whatever edges it has to nodes that stay.
-- Two alleles that both lack k-mers are at distance 0 when the centre is chosen exactly, and 1 when
+- Two alleles that both lack k-mers are at distance 0 when the medoid is chosen exactly, and 1 when
   it is chosen from sketches.
+- Around the reference, two other alleles' projected alignment is composed through the reference,
+  which aligns them less well than composing through the medoid did (pair F1 0.9942 against
+  0.9949, and much less at a repeat expanded far beyond the reference; see The centre).
 - Under the same `--max-cells`, `qc` compares a pair of the centre and an allele that `realign`
   aligned with a band with that same banded alignment, so it agrees by construction, and the region's
-  pairs over `--max-cells` are measured against an alignment that may not be optimal. `qc`'s
-  alignments have no time limit, so a region can take longer in `qc` than it did in `realign`.
+  pairs over `--max-cells` are measured against an alignment that may not be optimal. `qc` has no
+  limit on a region's work or time, so a region can take longer in `qc` than it did in `realign`.
 - `run` judges a stage done by its output alone, whatever options made it, and `merge` refuses a
   contig whose reuse numbering reached past other contigs' ids
   ([reference.md](reference.md#known-gaps)).

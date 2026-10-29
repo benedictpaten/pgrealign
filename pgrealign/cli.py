@@ -106,14 +106,22 @@ def cmd_realign(a):
     from . import provenance, realign
     started = time.time()
     i, n = (int(x) for x in a.shard.split('/'))
+    if a.plan:
+        _print(realign.plan(a.packages, select=a.select, shard=(i, n), max_cells=a.max_cells, centre=a.centre,
+                            max_work=a.max_work, max_excess=a.max_excess or None, jobs=a.jobs,
+                            max_memory=a.max_memory))
+        return
+    if not a.out:
+        sys.exit('pgrealign realign: -o/--out is required, unless with --plan')
     scores = scores_of(a)
     summary = realign.run(a.packages, a.out, select=a.select, shard=(i, n), jobs=a.jobs, max_memory=a.max_memory,
-                          abpoa=a.abpoa, timeout=a.timeout, max_cells=a.max_cells, scores=scores,
-                          min_share=a.min_share)
+                          abpoa=a.abpoa, max_cells=a.max_cells, scores=scores, min_share=a.min_share,
+                          centre=a.centre, max_work=a.max_work, max_excess=a.max_excess or None)
     provenance.write_manifest(a.out, 'realign', {'packages': a.packages},
-                              {'method': 'medoid_star', 'select': a.select, 'shard': a.shard, 'timeout': a.timeout,
+                              {'method': 'medoid_star', 'select': a.select, 'shard': a.shard,
                                'max_cells': a.max_cells, 'max_memory': a.max_memory,
-                               'scores': ' '.join(scores.flags()), 'min_share': a.min_share},
+                               'scores': ' '.join(scores.flags()), 'min_share': a.min_share, 'centre': a.centre,
+                               'max_work': a.max_work, 'max_excess': a.max_excess},
                               tools=_tools(a, 'abpoa'), extra={'summary': summary}, started=started)
     _print(summary)
 
@@ -171,9 +179,10 @@ def cmd_run(a):
     from . import pipeline
     summary = pipeline.run_contig(a.gbz, a.contig, a.targets, a.out, jobs=a.jobs, threads=a.threads, vg=a.vg,
                                   abpoa=a.abpoa, ref_sample=a.ref_sample, drop_samples=drop_samples_of(a),
-                                  scores=scores_of(a), timeout=a.timeout, max_cells=a.max_cells,
-                                  min_share=a.min_share, max_internal_bp=a.max_internal_bp, id_start=a.id_start,
-                                  do_qc=not a.no_qc, max_memory=a.max_memory,
+                                  scores=scores_of(a), max_cells=a.max_cells,
+                                  min_share=a.min_share, centre=a.centre, max_work=a.max_work,
+                                  max_excess=a.max_excess or None, max_internal_bp=a.max_internal_bp,
+                                  id_start=a.id_start, do_qc=not a.no_qc, max_memory=a.max_memory,
                                   log=lambda m: print(m, file=sys.stderr))
     _print(summary)
 
@@ -208,7 +217,7 @@ def cmd_project(a):
 def main(argv=None):
     from .memory import default_gb
     from .prepare import DROP_SAMPLES
-    from .realign import MAX_CELLS, MIN_SHARE
+    from .realign import CENTRES, MAX_ALIGNMENT, MAX_CELLS, MAX_EXCESS, MAX_WORK, MIN_SHARE
     from .star import SCORES
     default_drop = ','.join(DROP_SAMPLES) or 'none'
     default_memory = default_gb()
@@ -292,19 +301,35 @@ def main(argv=None):
 
     c = sub.add_parser('realign', help='the medoid-star alignment of every selected region')
     c.add_argument('--packages', required=True, help='packages.jsonl.gz from extract')
-    c.add_argument('-o', '--out', required=True, help='msas.jsonl.gz')
+    c.add_argument('-o', '--out', help='msas.jsonl.gz')
+    c.add_argument('--plan', action='store_true',
+                   help='align nothing and write nothing, but print how many regions realign would align and leave '
+                        'too_big, by the limit each exceeds, need_gb, the least --max-memory that aligns them, and '
+                        'seconds, an estimate of how long it would take with -j and --max-memory')
     c.add_argument('--select', choices=['any', 'length'], default='any',
                    help="realign a region when its alleles differ at all ('any') or in length [any]")
     c.add_argument('--shard', default='0/1', help='do shard i of n, by package order [0/1]')
     c.add_argument('-j', '--jobs', type=int, default=1, help='the most regions aligned in parallel [1]')
     c.add_argument('--max-memory', type=gigabytes, default=default_memory, metavar='GB',
-                   help='the memory the regions aligned at once may need in all, by their estimates; a region that '
-                        "alone needs more is left as it is (too_big) [half the machine's: %.1f]" % default_memory)
+                   help='the memory the regions aligned at once may need in all, by their estimates; it decides only '
+                        'how many run at once, and realign stops before starting if a region it would align alone '
+                        "needs more [half the machine's: %.1f]" % default_memory)
     c.add_argument('--abpoa', default='abpoa', help='abPOA binary [abpoa on PATH]')
-    c.add_argument('--timeout', type=float, default=900, help='seconds per region [900]')
+    c.add_argument('--centre', choices=CENTRES, default='ref',
+                   help="the allele every other is aligned to: the reference allele, where the region has one and "
+                        "--max-excess allows, or the medoid [ref]")
+    c.add_argument('--max-excess', type=float, default=MAX_EXCESS or 0, metavar='FRACTION',
+                   help="with --centre ref, take the medoid instead where more than this share of the haplotypes' "
+                        "bases lie beyond the reference allele's length, as where most carry an expansion it lacks; "
+                        "0 takes the reference allele whatever [%g]" % (MAX_EXCESS or 0))
+    c.add_argument('--max-work', type=float, default=MAX_WORK,
+                   help='leave a region as it is (too_big) when its alignments would fill more than this many '
+                        'dynamic-programming cells, by its package; 0 sets no limit [%.3g]' % MAX_WORK)
     c.add_argument('--max-cells', type=int, default=MAX_CELLS,
-                   help='band a pairwise alignment that would exceed this many cells unbanded, and leave a region as '
-                        'it is when even a banded one would [%d]' % MAX_CELLS)
+                   help='align a pair that would exceed this many cells unbanded with a band and with seeding, in '
+                        'about as many cells, and leave a region as it is (too_big) when one of its alignments would '
+                        'fill more than %d times as many; memory follows, about 20 bytes a cell [%d]'
+                        % (MAX_ALIGNMENT, MAX_CELLS))
     c.add_argument('--min-share', type=float, default=MIN_SHARE,
                    help="leave a region as it is (not_homologous) when an allele shares less than this fraction of "
                         "its 15-mers with the centre, counted against whichever of the two has fewer, as an "
@@ -346,12 +371,15 @@ def main(argv=None):
     c.add_argument('--scores', metavar='FLAGS', help="abPOA's scores for the optimal pairwise alignments; use the "
                    "scores the alignment was built with [%s]" % ' '.join(SCORES.flags()))
     c.add_argument('--max-cells', type=int, default=MAX_CELLS,
-                   help='band a pair whose unbanded optimal alignment would exceed this many cells [%d]' % MAX_CELLS)
+                   help='align a pair whose unbanded optimal alignment would exceed this many cells as realign does, '
+                        'and leave one uncompared (skipped) that would fill more than %d times as many [%d]'
+                        % (MAX_ALIGNMENT, MAX_CELLS))
     c.add_argument('--graph', help="the graph extract read: measure its own alignment of each region too")
     c.add_argument('-j', '--jobs', type=int, default=1, help='the most regions measured in parallel [1]')
     c.add_argument('--max-memory', type=gigabytes, default=default_memory, metavar='GB',
-                   help='the memory the regions measured at once may need in all, by their estimates; a pair that '
-                        "alone needs more is not compared (skipped) [half the machine's: %.1f]" % default_memory)
+                   help='the memory the regions measured at once may need in all, by their estimates; it decides only '
+                        'how many run at once, and qc stops before starting if a region alone needs more '
+                        "[half the machine's: %.1f]" % default_memory)
     c.add_argument('-t', '--threads', type=int, default=4, help='threads for vg convert, with --graph [4]')
     c.add_argument('--abpoa', default='abpoa', help='abPOA binary [abpoa on PATH]')
     vg_arg(c)
@@ -370,9 +398,12 @@ def main(argv=None):
     c.add_argument('--ref-sample', default='CHM13', help='the reference sample [CHM13]')
     drop_args(c)
     c.add_argument('--scores', metavar='FLAGS', help=scores_help)
-    c.add_argument('--timeout', type=float, default=900, help='seconds per region [900]')
     c.add_argument('--max-cells', type=int, default=MAX_CELLS, help='as for realign [%d]' % MAX_CELLS)
     c.add_argument('--min-share', type=float, default=MIN_SHARE, help='as for realign [%g]' % MIN_SHARE)
+    c.add_argument('--centre', choices=CENTRES, default='ref', help='as for realign [ref]')
+    c.add_argument('--max-excess', type=float, default=MAX_EXCESS or 0, metavar='FRACTION',
+                   help='as for realign [%g]' % (MAX_EXCESS or 0))
+    c.add_argument('--max-work', type=float, default=MAX_WORK, help='as for realign [%.3g]' % MAX_WORK)
     c.add_argument('--max-internal-bp', type=int, default=200000, help='as for extract [200000]')
     c.add_argument('--id-start', type=int, help="replace's first node id [the contig's smallest id]")
     c.add_argument('--no-qc', action='store_true', help='skip the qc stage')

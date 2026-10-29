@@ -23,9 +23,9 @@ measures that graph's own alignment of the same pairs too, so each region has a 
   forced-homology window: 40 columns, of which at least 20 have both bases, with more than 30% of
   those mismatched. Homologous tandem-repeat alleles differ mostly by gaps, so such a window shows
   unrelated sequence aligned base against base.
-- `banded`: the pairs compared with a banded alignment rather than an optimal one (below).
-- `skipped`: the pairs not compared, because aligning them alone would exceed the memory budget
-  (below).
+- `banded`: the pairs compared with star.long_pair's alignment rather than an optimal one (below).
+- `skipped`: the pairs not compared, because aligning them would fill more than realign.MAX_ALIGNMENT times
+  `max_cells` cells, the limit by which realign leaves a region too_big (below).
 - With the graph: `graph_pair_tp` and `graph_pair_msa`, `graph_ref_tp` and `graph_ref_msa`, the same
   counts for the alignment the graph implies, against the same optimal alignments; and
   `graph_sequence`, the bases of the nodes the region's runs visit, which `replace` removes. The graph
@@ -36,16 +36,19 @@ measures that graph's own alignment of the same pairs too, so each region has a 
 
 The optimal alignment of a pair is global, unbanded and left-normalised, under the scores given, which
 should be those the alignment was built with. A pair whose unbanded alignment would exceed `max_cells`
-cells is compared with abPOA's banded alignment instead, which may fall short of the optimum. For a
-pair through the centre that `realign` also banded, that is the alignment `realign` used. Pairs are
-drawn with a seed fixed per region, so a rerun measures the same pairs.
+cells is compared with the alignment star.long_pair makes of it instead, which may fall short of the
+optimum. For a pair through the centre that is too large for `realign` too, that is the alignment
+`realign` used. Pairs are drawn with a seed fixed per region, so a rerun measures the same pairs.
 
-**Memory.** `pair_bytes` estimates the memory that aligning one pair takes (memory.py), and with
-the graph a region also holds GRAPH_BYTES per base of its alleles, their graph positions, while it
-aligns. A pair's estimate is the two together. `run` measures regions in up to `jobs` worker
-processes, starting them in order while the estimates of those running, each that of its largest
-compared pair (`peak_bytes`), stay within `max_memory` GB. A pair whose estimate alone exceeds that
-is not compared, and counts in `skipped` and in no other field.
+**Memory.** A pair whose alignment would fill more than realign.MAX_ALIGNMENT times `max_cells` cells
+(realign.pair_cells) is not compared, and counts in `skipped` and in no other field, the same on every
+machine. `pair_bytes` estimates the memory that aligning one pair takes (memory.py), and with the graph
+a region also holds GRAPH_BYTES per base of its alleles, their graph positions, while it aligns. A
+pair's estimate is the two together, with pages of memory.ESTIMATE_PAGE bytes whatever the machine's.
+`run` measures regions in up to `jobs` worker processes, starting them in order while the estimates of
+those running, each that of its largest compared pair (`peak_bytes`), stay within `max_memory` GB. That
+budget decides only how many run at once: if a region needs more on its own, `run` stops before it
+measures anything.
 
 **Output.** A TSV with one row per region that realign made `ok` and that has at least two alleles,
 and a summary (written next to it as .json) with the sums and the F1 values over all regions.
@@ -60,6 +63,7 @@ import zlib
 from . import memory
 from .extract import flip, read_packages
 from .graph import STEP, GfaStream, parse_w, walk_key
+from .realign import MAX_ALIGNMENT, pair_cells
 from .star import Abpoa, SCORES, align_pair
 
 FIELDS = ['id', 'alleles', 'longest', 'sequence', 'pair_tp', 'pair_opt', 'pair_msa', 'ref_tp', 'ref_opt',
@@ -167,28 +171,32 @@ def compared_pairs(pkg, rows, pairs=20, refs=20):
     return out
 
 
-def pair_bytes(n, m, max_cells=None):
+def pair_bytes(n, m, max_cells=None, page=memory.ESTIMATE_PAGE):
     """The memory, in bytes, that aligning an allele of m bases to one of n bases takes: memory.BASE and
-    abPOA's matrices, banded when n * m exceeds `max_cells`."""
-    return memory.BASE + memory.abpoa_bytes(n, m, max_cells is not None and n * m > max_cells)
+    abPOA's matrices (memory.pair_bytes), with pages of `page` bytes."""
+    return memory.BASE + memory.pair_bytes(n, m, max_cells, page)
 
 
-def peak_bytes(pkg, rows, pairs=20, refs=20, max_cells=None, max_bytes=None, graph=False):
+def compared(n, m, max_cells):
+    """Whether region_qc compares a pair of alleles of n and m bases: unless max_cells is given and aligning
+    them would fill more than MAX_ALIGNMENT times as many cells."""
+    return max_cells is None or pair_cells(n, m, max_cells) <= MAX_ALIGNMENT * max_cells
+
+
+def peak_bytes(pkg, rows, pairs=20, refs=20, max_cells=None, graph=False):
     """The most memory, in bytes, that region_qc takes for a region: what it holds, GRAPH_BYTES per base
-    of the alleles with `graph`, plus the largest pair_bytes of the pairs it compares, or plus
-    memory.BASE when it compares none. A pair whose sum exceeds `max_bytes` is not compared."""
+    of the alleles with `graph`, plus the largest pair_bytes of the pairs it compares (`compared`), or plus
+    memory.BASE when it compares none."""
     length = {a['id']: len(a['seq']) for a in pkg['alleles']}
     held = GRAPH_BYTES * sum(length.values()) if graph else 0
-    need = [held + pair_bytes(length[a], length[b], max_cells)
-            for _, a, b in compared_pairs(pkg, rows, pairs, refs)]
-    return max([b for b in need if max_bytes is None or b <= max_bytes], default=held + memory.BASE)
+    return max([held + pair_bytes(length[a], length[b], max_cells) for _, a, b in compared_pairs(pkg, rows, pairs, refs)
+                if compared(length[a], length[b], max_cells)], default=held + memory.BASE)
 
 
-def region_qc(pkg, rows, align, pairs=20, refs=20, max_cells=None, graph=None, max_bytes=None):
+def region_qc(pkg, rows, align, pairs=20, refs=20, max_cells=None, graph=None, scores=SCORES):
     """The metrics of one region (see the module docstring), as a dict keyed by FIELDS, and by
     GRAPH_FIELDS too when `graph` is given: ({allele: [(orient, node)]}, {node: length}, interior bp).
-    A pair whose pair_bytes, with GRAPH_BYTES per base of the alleles when `graph` is given, exceeds
-    `max_bytes` is not compared, and counts in `skipped`."""
+    A pair that `compared` excludes is not compared, and counts in `skipped`. `scores` are the aligner's."""
     alleles = [(a['id'], a['seq'].upper(), a['weight']) for a in pkg['alleles']]
     seqs = {a: s for a, s, _ in alleles}
     out = dict.fromkeys(FIELDS + (GRAPH_FIELDS if graph else []), 0)
@@ -204,12 +212,12 @@ def region_qc(pkg, rows, align, pairs=20, refs=20, max_cells=None, graph=None, m
                                                                             len(position[a])))
 
     def compare(kind, a, b):
-        if max_bytes is not None and held + pair_bytes(len(seqs[a]), len(seqs[b]), max_cells) > max_bytes:
+        if not compared(len(seqs[a]), len(seqs[b]), max_cells):
             out['skipped'] += 1
             return
         banded = max_cells is not None and len(seqs[a]) * len(seqs[b]) > max_cells
         out['banded'] += banded
-        opt = align_pair(seqs[a], seqs[b], align, banded=banded)
+        opt = align_pair(seqs[a], seqs[b], align, max_cells, scores)
         ind = induced(rows[a], rows[b])
         o, m = aligned_pairs(*opt), aligned_pairs(*ind)
         out[kind + '_tp'] += len(o & m)
@@ -253,7 +261,7 @@ def summarise(rows):
 def _one(args):
     pkg, rows, graph, kw = args
     with Abpoa(kw['abpoa'], kw['scores'], workdir=kw['workdir']) as align:
-        return region_qc(pkg, rows, align, kw['pairs'], kw['refs'], kw['max_cells'], graph, kw['max_bytes'])
+        return region_qc(pkg, rows, align, kw['pairs'], kw['refs'], kw['max_cells'], graph, kw['scores'])
 
 
 def graph_walks(extract_dir, graph, regions, vg=None, threads=4):
@@ -318,9 +326,11 @@ def run(extract_dir, msas_path, out_path, pairs=20, refs=20, sample=None, jobs=1
         max_memory=None):
     """Measure every region realign made `ok` (or a fixed random `sample` of them) and write the TSV and
     its summary. `extract_dir` is extract's output directory, and `graph`, if given, the graph extract
-    read (GBZ or GFA), whose own alignment is then measured too. `max_memory` is the budget in GB (see
-    the module docstring; None: memory.default_gb()). Returns the summary, with `peak_estimate_gb`, the
-    largest sum of the estimates of regions measured at once."""
+    read (GBZ or GFA), whose own alignment is then measured too. A pair that `compared` excludes is not
+    compared; `max_memory` is the budget in GB that decides how many regions run at once (see the module
+    docstring; None: memory.default_gb()), and a region that needs more alone raises RuntimeError before
+    anything is measured. Returns the summary, with `peak_estimate_gb`, the largest sum of the estimates
+    of regions measured at once."""
     limit = memory.budget(max_memory)
     packages_path = os.path.join(extract_dir, 'packages.jsonl.gz')
     msas = {}
@@ -338,9 +348,14 @@ def run(extract_dir, msas_path, out_path, pairs=20, refs=20, sample=None, jobs=1
         for p in todo:
             p.setdefault('ref', ref.get(p['id']))
     walks = graph_walks(extract_dir, graph, {p['id'] for p in todo}, vg, threads) if graph else {}
-    kw = {'pairs': pairs, 'refs': refs, 'abpoa': abpoa, 'scores': scores, 'workdir': workdir, 'max_cells': max_cells,
-          'max_bytes': limit}
-    need = [peak_bytes(p, msas[p['id']], pairs, refs, max_cells, limit, bool(graph)) for p in todo]
+    kw = {'pairs': pairs, 'refs': refs, 'abpoa': abpoa, 'scores': scores, 'workdir': workdir, 'max_cells': max_cells}
+    need = [peak_bytes(p, msas[p['id']], pairs, refs, max_cells, bool(graph)) for p in todo]
+    over = [k for k in range(len(todo)) if need[k] > limit]
+    if over:
+        k = max(over, key=lambda k: need[k])
+        raise RuntimeError('%d regions need more memory than the budget of %.2f GB (max_memory); the largest, %s, '
+                           'needs about %.2f GB. Give qc that much.' % (len(over), limit / memory.GB, todo[k]['id'],
+                                                                         need[k] / memory.GB))
     out = [None] * len(todo)
     peak = memory.run_within(_one, [(p, msas[p['id']], walks.get(p['id']), kw) for p in todo], need, jobs, limit,
                              out.__setitem__)
