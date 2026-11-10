@@ -954,7 +954,11 @@ file, including gzip files concatenated with `cat`.
 | `error` | any other failure, as the exception's type and message; it means a bug |
 
 `replace` reads only `id`, `status` and `rows`, so a program can feed it MSAs made another way
-([realign_package](#realignrealign_package)). After `project`, `rows` are keyed by the recipient's
+([realign_package](#realignrealign_package)). In place of `rows`, an `ok` record may have `gfa`: the
+path, relative to its msas file, of a GFA of the region's alignment made by another aligner, such as
+centrolign. It needs a P line named by each member's id, which may be left out only for an empty
+allele, and every link and step must be forward. `replace` unchops and chops it as it does an MSA's
+induced graph, and stops if a member's walk does not spell its sequence. `qc` and `project` need `rows`. After `project`, `rows` are keyed by the recipient's
 member ids, `columns` is the projected width, and every other field, `centre` included, is the
 union's.
 

@@ -11,8 +11,13 @@ translation when it becomes a GBZ.
 
 The result is a forward-only DAG with local node ids 1..n in topological order, and every row's walk
 spells the row's sequence. An empty row (an allele that deletes the whole interior) has an empty walk.
+
+**Alignments made elsewhere.** `read_gfa` reads the graph of an alignment that another aligner wrote as
+a GFA (centrolign's, for one), with one P line per member, and `normalize` unchops and chops it the same
+way, so it comes out in the same form.
 """
 import collections
+import gzip
 import heapq
 
 MAX_NODE = 1024
@@ -137,10 +142,52 @@ def chop(g, max_node=MAX_NODE):
     return out
 
 
+def normalize(g, max_node=MAX_NODE):
+    """`g` unchopped, numbered 1..n in topological order, and chopped."""
+    return chop(unchop(g), max_node)
+
+
+def read_gfa(path):
+    """The graph of an alignment from a GFA's S, L and P lines: one P line per member, named by the
+    member's id. Every link and step must be forward. Sequences are upper-cased, and the nodes are
+    numbered 1..n in the order of their S lines; normalize puts the graph in induce's form."""
+    g, ids, links, paths = Graph(), {}, [], {}
+    with (gzip.open if path.endswith('.gz') else open)(path, 'rt') as f:
+        for line in f:
+            t = line.rstrip('\n').split('\t')
+            if t[0] == 'S':
+                if t[1] in ids:
+                    raise ValueError('%s: node %s has two S lines' % (path, t[1]))
+                ids[t[1]] = len(ids) + 1
+                g.seq[ids[t[1]]] = t[2].upper()
+            elif t[0] == 'L':
+                if t[2] != '+' or t[4] != '+':
+                    raise ValueError('%s: link %s%s %s%s is not forward' % (path, t[1], t[2], t[3], t[4]))
+                links.append((t[1], t[3]))
+            elif t[0] == 'P':
+                if t[1] in paths:
+                    raise ValueError('%s: path %s has two P lines' % (path, t[1]))
+                paths[t[1]] = t[2]
+
+    def node(name):
+        try:
+            return ids[name]
+        except KeyError:
+            raise ValueError('%s: node %s has no S line' % (path, name)) from None
+    g.edges = {(node(a), node(b)) for a, b in links}
+    for m, steps in paths.items():
+        w = g.walks[m] = []
+        for s in steps.split(','):
+            if s[-1] != '+':
+                raise ValueError('%s: path %s steps on %s in reverse' % (path, m, s[:-1]))
+            w.append(node(s[:-1]))
+    return g
+
+
 def induce(rows, max_node=MAX_NODE):
     """Graph of an MSA {member: row}; checks that every member's walk spells its row's bases."""
     names = sorted(rows)
-    g = chop(unchop(columns(rows, names)), max_node)
+    g = normalize(columns(rows, names), max_node)
     for n in names:
         if ''.join(g.seq[x] for x in g.walks[n]) != rows[n].replace('-', ''):
             raise ValueError('walk of %s does not spell its row' % n)

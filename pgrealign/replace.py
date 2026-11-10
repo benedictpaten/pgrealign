@@ -5,7 +5,9 @@
   first W line, as `vg convert -f` writes them.
 - The `extract` outputs: `packages.jsonl.gz`, `occurrences.tsv.gz` and `interiors.tsv.gz`.
 - The `realign` outputs: one `msas.jsonl.gz`, or several, such as one per shard. A region may appear in
-  only one of them.
+  only one of them. In place of `rows`, a record may name a GFA (`gfa`, relative to its msas file): an
+  alignment of the region made by another aligner, such as centrolign, with a P line for every member
+  of the package except an empty allele (alignment_graph).
 
 Only regions whose package is `ok` and whose MSA is `ok` are replaced. Every other region keeps its
 subgraph.
@@ -74,6 +76,8 @@ def load_plan(extract_dir, msas):
                         m['id'], found[m['id']], path))
                 found[m['id']] = path
                 if m.get('status') == 'ok':
+                    if 'gfa' in m:
+                        m['gfa'] = os.path.join(os.path.dirname(path), m['gfa'])
                     ok[m['id']] = m
     plan = {}
     for p in read_packages(os.path.join(extract_dir, 'packages.jsonl.gz'), status={'ok'}):
@@ -134,16 +138,36 @@ class RegionGraph:
         self.seq, self.edges, self.walks = seq, edges, walks
 
 
-def region_graph(pkg, rows):
-    """The graph that replaces the interior of the region `pkg`, from its MSA `rows` {member: row}:
-    - `seq`: {node: sequence} of the induced graph (induce.py). Its nodes are numbered -1, -2, ... in
-      topological order, so they cannot be mistaken for the anchors, which keep the input's ids.
+def alignment_graph(pkg, msa):
+    """The induced graph (induce.py) of region `pkg`'s alignment `msa`: of its `rows`, or of the GFA it
+    names (`gfa`), unchopped and chopped the same way. The GFA has a P line for each member of the
+    package, except that an empty allele may have none, and each member's walk spells its sequence."""
+    if 'gfa' not in msa:
+        return induce_mod.induce(msa['rows'])
+    g = induce_mod.normalize(induce_mod.read_gfa(msa['gfa']))
+    members = pkg['alleles'] + pkg['fragments']
+    extra = set(g.walks) - {x['id'] for x in members}
+    if extra:
+        raise ValueError('%s: region %s has no member %s' % (msa['gfa'], pkg['id'], ', '.join(sorted(extra))))
+    for x in members:
+        if x['id'] not in g.walks and x['seq']:
+            raise ValueError('%s: no P line for %s of region %s' % (msa['gfa'], x['id'], pkg['id']))
+        if ''.join(g.seq[n] for n in g.walks.setdefault(x['id'], [])) != x['seq'].upper():
+            raise ValueError('%s: the walk of %s does not spell its sequence in region %s' % (
+                msa['gfa'], x['id'], pkg['id']))
+    return g
+
+
+def region_graph(pkg, g):
+    """The graph that replaces the interior of the region `pkg`, from `g`, the induced graph of its
+    alignment (alignment_graph):
+    - `seq`: {node: sequence} of `g`. Its nodes are numbered -1, -2, ... in topological order, so they
+      cannot be mistaken for the anchors, which keep the input's ids.
     - `edges`: {(from, from_orient, to, to_orient)}, all forward: the induced graph's edges, plus L->first
       for an allele or a left fragment, last->R for an allele or a right fragment, and L->R for an
       empty allele.
     - `walks`: {member: [node, ...]}, in the region's forward orientation. An empty member's is empty."""
-    g = induce_mod.induce(rows)
-    ids = {n: -(i + 1) for i, n in enumerate(sorted(g.seq))}
+    ids ={n: -(i + 1) for i, n in enumerate(sorted(g.seq))}
     L, R = pkg['L'], pkg['R']
     side = {f['id']: f['side'] for f in pkg['fragments']}
     edges = {(ids[a], '+', ids[b], '+') for a, b in g.edges}
@@ -446,7 +470,7 @@ def replace(graph, extract_dir, msas, out_gfa, id_start=None, vg=None, threads=4
     stats = collections.Counter()
     graphs = {}
     for rid, (pkg, msa) in plan.items():
-        graphs[rid] = region_graph(pkg, msa['rows'])
+        graphs[rid] = region_graph(pkg, alignment_graph(pkg, msa))
         stats['regions'] += 1
         stats['nodes_removed'] += len(interiors[rid])
         stats['nodes_added'] += len(graphs[rid].seq)

@@ -6,7 +6,7 @@ import shutil
 import tempfile
 import unittest
 
-from pgrealign import extract, regions, replace, verify
+from pgrealign import extract, induce, regions, replace, verify
 from pgrealign.graph import revcomp
 
 UNIT = 'ACGTTGCAAGT'
@@ -95,6 +95,21 @@ def naive_msa(pkg):
                                                       for m in members}}
 
 
+def write_alignment_gfa(path, rows):
+    """The alignment `rows` as another aligner might write it: one base per node, a P line per member but
+    an empty one."""
+    g = induce.columns(rows, sorted(rows))
+    with open(path, 'w') as f:
+        f.write('H\tVN:Z:1.0\n')
+        for n in sorted(g.seq):
+            f.write('S\t%d\t%s\n' % (n, g.seq[n].lower()))
+        for a, b in sorted(g.edges):
+            f.write('L\t%d\t+\t%d\t+\t0M\n' % (a, b))
+        for m, w in sorted(g.walks.items()):
+            if w:
+                f.write('P\t%s\t%s\t*\n' % (m, ','.join('%d+' % n for n in w)))
+
+
 def ref_interval(L, R):
     pos, at = 0, {}
     for _, n in parse_steps(WALKS[0][2]):
@@ -136,7 +151,7 @@ class TestPieces(unittest.TestCase):
     ROWS = {'a1': 'ACGT', 'a2': '----', 'f1': 'AC--', 'f2': '--GT', 'f3': '-CG-'}
 
     def test_region_graph(self):
-        rg = replace.region_graph(self.PKG, self.ROWS)
+        rg = replace.region_graph(self.PKG, induce.induce(self.ROWS))
         self.assertEqual(rg.seq, {-1: 'A', -2: 'C', -3: 'G', -4: 'T'})
         self.assertEqual(rg.walks, {'a1': [-1, -2, -3, -4], 'a2': [], 'f1': [-1, -2], 'f2': [-3, -4],
                                     'f3': [-2, -3]})
@@ -146,6 +161,39 @@ class TestPieces(unittest.TestCase):
                          {(1, '+', -1, '+'), (-4, '+', 9, '+'), (1, '+', 9, '+')})
         self.assertEqual({e for e in rg.edges if e[0] < 0 and e[2] < 0},
                          {(-1, '+', -2, '+'), (-2, '+', -3, '+'), (-3, '+', -4, '+')})
+
+    def test_alignment_graph_from_gfa(self):
+        d = tempfile.mkdtemp()
+        try:
+            gfa = os.path.join(d, 'aln.gfa')
+            write_alignment_gfa(gfa, self.ROWS)
+            g = replace.alignment_graph(self.PKG, {'id': 'R', 'status': 'ok', 'gfa': gfa})
+            want = induce.induce(self.ROWS)
+            self.assertEqual((g.seq, g.edges, g.walks), (want.seq, want.edges, want.walks))
+            # each edit maps a line's fields to its new fields, or to None to drop it
+            def drop_f1(t):
+                return None if t[:2] == ['P', 'f1'] else t
+
+            def rename_f1(t):
+                return ['P', 'zz'] + t[2:] if t[:2] == ['P', 'f1'] else t
+
+            def change_base(t):                 # node 1 is a1's first base
+                return ['S', '1', 'T'] if t[:2] == ['S', '1'] else t
+
+            def reverse_link(t):
+                return t[:4] + ['-'] + t[5:] if t[:2] == ['L', '1'] else t
+
+            for edit, regex in ((drop_f1, 'no P line for f1'), (rename_f1, 'no member zz'),
+                                (change_base, 'walk of a1 does not spell'), (reverse_link, 'is not forward')):
+                with open(gfa) as f:
+                    lines = [edit(line.rstrip('\n').split('\t')) for line in f]
+                bad = os.path.join(d, 'bad.gfa')
+                with open(bad, 'w') as f:
+                    f.writelines('\t'.join(t) + '\n' for t in lines if t is not None)
+                with self.assertRaisesRegex(ValueError, regex):
+                    replace.alignment_graph(self.PKG, {'id': 'R', 'status': 'ok', 'gfa': bad})
+        finally:
+            shutil.rmtree(d)
 
     def test_number_dense(self):
         regs = [('R1', 1, 3), ('R2', 5, 1)]
@@ -258,6 +306,25 @@ class TestReplace(unittest.TestCase):
             self.assertEqual(a.read(), b.read())
         with self.assertRaisesRegex(ValueError, 'appears twice'):
             replace.replace(fx.graph, fx.extract, [fx.single_msas, fx.msas[1]], several)
+
+    def test_gfa_alignments(self):
+        """Regions whose alignments come as GFAs, named relative to their msas file, are replaced just as
+        the same alignments given as rows are."""
+        fx = Fixture(self.d)
+        os.makedirs(os.path.join(self.d, 'aln'))
+        gfa_msas = os.path.join(self.d, 'msas.gfa.jsonl.gz')
+        with gzip.open(gfa_msas, 'wt') as out:
+            for pkg in extract.read_packages(os.path.join(fx.extract, 'packages.jsonl.gz')):
+                write_alignment_gfa(os.path.join(self.d, 'aln', pkg['id'] + '.gfa'), naive_msa(pkg)['rows'])
+                out.write(json.dumps({'id': pkg['id'], 'status': 'ok', 'method': 'centrolign',
+                                      'gfa': os.path.join('aln', pkg['id'] + '.gfa')}) + '\n')
+        rows_out, gfa_out = os.path.join(self.d, 'rows.gfa'), os.path.join(self.d, 'gfa.gfa')
+        st1 = replace.replace(fx.graph, fx.extract, fx.single_msas, rows_out)
+        st2 = replace.replace(fx.graph, fx.extract, gfa_msas, gfa_out)
+        self.assertEqual(st1, st2)
+        with open(rows_out) as a, open(gfa_out) as b:
+            self.assertEqual(a.read(), b.read())
+        self.check_roundtrip(fx.graph, gfa_out)
 
     def test_anchor_free_walk_against_the_region(self):
         # d's anchor-free walk runs against R1: extract flips it, and replace writes it back reversed
