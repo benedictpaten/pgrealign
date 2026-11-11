@@ -159,6 +159,11 @@ class TestExtract(unittest.TestCase):
         # one run that visits a node both ways, as in a hairpin, is complex on its own
         s, pk, occ = self.run_extract([('s1', '1', '>1>2<2>5>6')], 'hairpin')
         self.assertEqual(pk[0]['complex'], ['s1#1#chrT#0: visits node 2 both ways, as at an inversion'])
+        # allowed: the region is kept, and the inverted allele is the forward sequence it spells
+        s, pk, occ = self.run_extract(walks, 'inv_allowed', allow_inversions=True)
+        self.assertEqual((s['status'], s['both_ways']), ({'ok': 1}, 1))
+        self.assertEqual(pk[0]['complex'], [])
+        self.assertEqual({a['seq'] for a in pk[0]['alleles']}, {'CCC', 'GGG', 'GCC'})
 
     def test_node_stored_reversed(self):
         # node 7 is stored reversed: every run visits it backward, forward runs and the reverse one alike
@@ -185,6 +190,11 @@ class TestExtract(unittest.TestCase):
         s, pk, occ = self.run_extract(ref + [('s3', '1', '>7<4')], 'both')
         self.assertEqual(s['status'], {'complex': 1})
         self.assertEqual(pk[0]['complex'], ['s3#1#chrT#0: an anchor-free walk runs both ways through the region'])
+        # both ways, allowed: it takes the orientation more of its nodes agree with, here against the region
+        s, pk, occ = self.run_extract(ref + [('s3', '1', '<2>7<4')], 'both_allowed', allow_inversions=True)
+        self.assertEqual((s['status'], s['internal_flipped']), ({'ok': 1}, 1))
+        self.assertEqual([o[3] for o in occ if o[0] == 's3#1#chrT#0'], ['-'])
+        self.assertEqual([(f['side'], f['seq']) for f in pk[0]['fragments']], [('internal', 'CCAAAC')])
 
 
 if __name__ == '__main__':

@@ -80,9 +80,10 @@ def cmd_extract(a):
     started = time.time()
     rs = list(regions.read_regions(a.regions))
     summary = extract.extract(a.graph, rs, a.out, vg=a.vg, threads=a.threads, ref_sample=a.ref_sample,
-                              max_internal_bp=a.max_internal_bp)
+                              max_internal_bp=a.max_internal_bp, allow_inversions=a.allow_inversions)
     provenance.write_manifest(os.path.join(a.out, 'extract'), 'extract', {'graph': a.graph, 'regions': a.regions},
-                              {'ref_sample': a.ref_sample, 'max_internal_bp': a.max_internal_bp},
+                              {'ref_sample': a.ref_sample, 'max_internal_bp': a.max_internal_bp,
+                               'allow_inversions': a.allow_inversions},
                               tools=_tools(a, 'vg'), extra={'summary': summary}, started=started)
     _print(summary)
 
@@ -295,6 +296,9 @@ def main(argv=None):
     c.add_argument('--max-internal-bp', type=int, default=200000,
                    help="an anchor-free walk longer than this inside a region's interior makes the region complex, "
                         "left as it is [200000]")
+    c.add_argument('--allow-inversions', action='store_true',
+                   help="keep a region whose runs visit a node both ways, as at an inversion, instead of making "
+                        "it complex: the inverted allele is realigned as the forward sequence it spells")
     vg_arg(c)
     c.add_argument('-t', '--threads', type=int, default=4)
     c.set_defaults(func=cmd_extract)

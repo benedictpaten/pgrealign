@@ -27,6 +27,8 @@ Realign would spell the inverted allele as a plain forward sequence and lose the
 region is made complex. An anchor-free walk has no anchor to orient it, so it takes its orientation from
 the interior nodes the runs visit: one that visits them all the other way runs against the region and
 is flipped, like a reverse run, and one that agrees with some and not others makes the region complex.
+With `allow_inversions`, neither makes the region complex: an inverted allele is kept as the forward
+sequence it spells, and an anchor-free walk takes the orientation that agrees with more of the nodes.
 
 A fragment's **side** is the end of the region it touches, in that forward orientation, which depends
 on both its type and its orient:
@@ -43,9 +45,10 @@ replaced interior outside a recorded run. So a longer walk that uses an interior
 complex.
 
 **Status.** Each region has one:
-- `complex`: a walk's run is complex, runs visit an interior node both ways (above), an anchor-free walk
-  uses the interiors of more than one region or runs both ways through one, or an anchor-free walk
-  longer than `max_internal_bp` uses its interior.
+- `complex`: a walk's run is complex, runs visit an interior node both ways (above, unless
+  `allow_inversions`), an anchor-free walk uses the interiors of more than one region or runs both ways
+  through one (unless `allow_inversions`), or an anchor-free walk longer than `max_internal_bp` uses its
+  interior.
 - `no_runs`: no walk has a run in it.
 - `invariant`: there are no fragments, and every spanning run spells one sequence.
 - `ok`: every other region.
@@ -91,9 +94,9 @@ FWD, REV = 1, 2         # the ways a run visits an interior node, in the region'
 
 class RegionRuns:
     """Everything one region collects during the pass."""
-    __slots__ = ('alleles', 'fragments', 'interior', 'complex', 'n_runs', 'ref', 'both_ways')
+    __slots__ = ('alleles', 'fragments', 'interior', 'complex', 'n_runs', 'ref', 'both_ways', 'allow_inversions')
 
-    def __init__(self):
+    def __init__(self, allow_inversions=False):
         self.ref = None         # the allele the reference sample's walk spells
         self.alleles = {}       # sequence -> [id, weight]
         self.fragments = {}     # (side, sequence) -> [id, weight]
@@ -101,11 +104,12 @@ class RegionRuns:
         self.complex = []
         self.n_runs = collections.Counter()
         self.both_ways = False  # some node is visited both ways
+        self.allow_inversions = allow_inversions
 
     def visit(self, key, steps):
         """Record the interior nodes of walk `key`'s run, `steps` in the region's forward orientation. A
         run that visits a node the other way from an earlier run, or from itself, makes the region
-        complex."""
+        complex, unless allow_inversions."""
         turned = None
         for o, n in steps:
             way = FWD if o == '>' else REV
@@ -115,7 +119,8 @@ class RegionRuns:
             self.interior[n] = had | way
         if turned is not None:
             self.both_ways = True
-            self.complex.append('%s: visits node %d both ways, as at an inversion' % (key, turned))
+            if not self.allow_inversions:
+                self.complex.append('%s: visits node %d both ways, as at an inversion' % (key, turned))
 
 
 def _member(table, key, prefix):
@@ -170,17 +175,19 @@ def runs_of_walk(toks, occ):
         yield ('suffix', '+' if state == 'fwd' else '-', s + 1, len(toks))
 
 
-def extract(graph, regions, out_dir, vg=None, threads=4, max_internal_bp=200000, ref_sample='CHM13'):
+def extract(graph, regions, out_dir, vg=None, threads=4, max_internal_bp=200000, ref_sample='CHM13',
+            allow_inversions=False):
     """Run the pass over `graph` (a GBZ or GFA) for the `regions` (regions.Region) with status 'ok'; the
     others get no package. A package's `ref` is the allele that a walk of `ref_sample` spells. An
-    anchor-free walk longer than `max_internal_bp` that uses an interior makes its region complex."""
+    anchor-free walk longer than `max_internal_bp` that uses an interior makes its region complex.
+    `allow_inversions` keeps a region whose runs visit a node both ways (see Orientation)."""
     os.makedirs(out_dir, exist_ok=True)
     regs = {r.id: r for r in regions if r.status == 'ok'}
     anchor_of = collections.defaultdict(list)     # node -> [(region id, 'L'|'R')]
     for r in regs.values():
         anchor_of[str(r.L)].append((r.id, 'L'))
         anchor_of[str(r.R)].append((r.id, 'R'))
-    runs = {rid: RegionRuns() for rid in regs}
+    runs = {rid: RegionRuns(allow_inversions) for rid in regs}
     seq = {}
     occ_out = gzip.open(os.path.join(out_dir, 'occurrences.tsv.gz'), 'wt')
     occ_out.write('#walk\tregion\ttype\torient\tfirst\tend\tmember\n')
@@ -254,14 +261,16 @@ def extract(graph, regions, out_dir, vg=None, threads=4, max_internal_bp=200000,
         steps = [(o, int(n)) for o, n in toks]
         # the ways the runs visit the interior nodes this walk visits, against the ways it does
         known = [(FWD if o == '>' else REV, rr.interior[n]) for o, n in steps if n in rr.interior]
-        if all(had & way for way, had in known):
-            orient = '+'
-        elif all(had & ((FWD | REV) ^ way) for way, had in known):
-            orient, steps = '-', flip(steps)
-            n_flipped += 1
-        else:
+        agree = sum(bool(had & way) for way, had in known)
+        against = sum(bool(had & ((FWD | REV) ^ way)) for way, had in known)
+        if agree < len(known) and against < len(known) and not allow_inversions:
             rr.complex.append('%s: an anchor-free walk runs both ways through the region' % key)
             continue
+        if agree == len(known) or agree >= against:
+            orient = '+'
+        else:
+            orient, steps = '-', flip(steps)
+            n_flipped += 1
         rr.visit(key, steps)
         mid = _member(rr.fragments, ('internal', spell(steps, seq)), 'f')
         rr.n_runs['internal'] += 1
