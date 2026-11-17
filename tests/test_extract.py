@@ -197,5 +197,23 @@ class TestExtract(unittest.TestCase):
         self.assertEqual([(f['side'], f['seq']) for f in pk[0]['fragments']], [('internal', 'CCAAAC')])
 
 
+# Exit edges: a reference 1..9 with anchors L=2 and R=8 (interior 3..7); 10..14 are off the reference.
+EXIT_S = {1: 'GATTACA', 2: 'CCGG', 3: 'ACGTTGCAAGT', 4: 'TTAGGCATC', 5: 'AAAACCCC', 6: 'GGTTGG', 7: 'CATCAT',
+          8: 'GGCC', 9: 'TGCATGCA', 10: 'ACACACAGT', 11: 'TTTTGGG', 12: 'CCCAAA', 13: 'AGAGAG', 14: 'GTGTGT'}
+EXIT_WALKS = [
+    ('CHM13', '0', '>1>2>3>4>5>6>7>8>9'),
+    ('s1', '1', '>1>2>3>4>5>6>7>8>9'),
+    ('s2', '1', '>1>10>4>5>6>7>8>9'),        # leaves before L, comes back inside through 10: an exit
+    ('s3', '1', '<9<11<6<5<4<3<2<1'),        # reverse, leaves after R through 11
+    ('s4', '1', '>1>12>9'),                  # misses the whole region: no run
+    ('s5', '1', '>9>10'),                    # visits 10 outside every run, so 10 stays
+    ('s6', '1', '>5>6>7>8>9'),               # starts inside: a prefix
+    ('s7', '1', '>1>2>3>14>1'),              # enters by L and leaves before it: a U-turn
+    ('s8', '1', '>13>4'),                    # lies inside, with an interior reference step
+    ('s9', '1', '>1>4>5>6>7>8>9'),           # an edge from before L straight into the interior
+    ('s10', '1', '>11'),                     # anchor-free, on a node of s3's run
+]
+
+
 if __name__ == '__main__':
     unittest.main()

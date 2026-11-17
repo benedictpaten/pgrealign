@@ -68,9 +68,16 @@ def cmd_prepare(a):
 def cmd_regions(a):
     from . import provenance, regions
     started = time.time()
-    summary = regions.build(a.targets, a.contig, a.snarls, a.ref, a.out, vg=a.vg, pad=a.pad, max_span=a.max_span)
-    provenance.write_manifest(a.out, 'regions', {'targets': a.targets, 'snarls': a.snarls, 'ref': a.ref},
-                              {'contig': a.contig, 'pad': a.pad, 'max_span': a.max_span}, tools=_tools(a, 'vg'),
+    if a.max_bypass is None and a.snarls is None:
+        raise SystemExit('pgrealign regions: --snarls is needed without --max-bypass')
+    if a.max_bypass is not None and a.graph is None:
+        raise SystemExit('pgrealign regions: --max-bypass needs --graph')
+    summary = regions.build(a.targets, a.contig, a.snarls, a.ref, a.out, vg=a.vg, pad=a.pad, max_span=a.max_span,
+                            graph=a.graph, max_bypass=a.max_bypass, ref_sample=a.ref_sample, threads=a.threads)
+    inputs = {'targets': a.targets, 'snarls': a.snarls, 'ref': a.ref, 'graph': a.graph}
+    provenance.write_manifest(a.out, 'regions', {k: v for k, v in inputs.items() if v is not None},
+                              {'contig': a.contig, 'pad': a.pad, 'max_span': a.max_span, 'max_bypass': a.max_bypass},
+                              tools=_tools(a, 'vg'),
                               extra={'summary': summary}, started=started)
     _print(summary)
 
@@ -279,13 +286,20 @@ def main(argv=None):
     c = sub.add_parser('regions', help="anchor every target in the contig's snarls, and merge those that touch")
     c.add_argument('--targets', required=True, help='catalogue or BED of target intervals')
     c.add_argument('--contig', required=True)
-    c.add_argument('--snarls', required=True, help='<contig>.snarls.pb from prepare')
+    c.add_argument('--snarls', help='<contig>.snarls.pb from prepare (not read with --max-bypass)')
     c.add_argument('--ref', required=True, help='<contig>.ref.tsv.gz from prepare')
     c.add_argument('-o', '--out', required=True, help='regions.tsv(.gz)')
     c.add_argument('--pad', type=int, default=200, help='pad each target by this many bp [200]')
     c.add_argument('--max-span', type=int, default=100000,
                    help='leave a region whose anchors are further apart than this as it is [100000]')
+    c.add_argument('--max-bypass', type=float, metavar='FRACTION',
+                   help="anchor each target on the nearest reference nodes that at most this fraction of the "
+                        "haplotypes' walks go around, instead of on the snarls; extract then needs --exit-edges")
+    c.add_argument('--graph', help="the contig's graph, for --max-bypass: prepare's <contig>.gbz, prepare --graph's "
+                                   "graph, or a GFA")
+    c.add_argument('--ref-sample', default='CHM13', help='the reference sample, for --max-bypass [CHM13]')
     vg_arg(c)
+    c.add_argument('-t', '--threads', type=int, default=4)
     c.set_defaults(func=cmd_regions)
 
     c = sub.add_parser('extract', help="every walk's run through every region, in one streaming pass")
