@@ -6,7 +6,7 @@ import shutil
 import tempfile
 import unittest
 
-from pgrealign import extract, induce, regions, replace, verify
+from pgrealign import extract, induce, prepare, regions, replace, verify
 from pgrealign.graph import revcomp
 
 UNIT = 'ACGTTGCAAGT'
@@ -42,7 +42,7 @@ def parse_steps(w):
     return [(x[0], int(x[1:])) for x in w.replace('>', ' >').replace('<', ' <').split()]
 
 
-def write_gfa(path, walks=WALKS, paths=()):
+def write_gfa(path, walks=WALKS, paths=(), seq=None):
     edges = set()
     for _, _, w in walks:
         st = parse_steps(w)
@@ -50,7 +50,7 @@ def write_gfa(path, walks=WALKS, paths=()):
             edges.add(canonical((a, '+' if oa == '>' else '-', b, '+' if ob == '>' else '-')))
     with open(path, 'w') as f:
         f.write('H\tVN:Z:1.1\tRS:Z:CHM13\n')
-        for n, s in S.items():
+        for n, s in (S if seq is None else seq).items():
             f.write('S\t%d\t%s\n' % (n, s))
         for a, ao, b, bo in sorted(edges):
             f.write('L\t%d\t%s\t%d\t%s\t0M\n' % (a, ao, b, bo))
@@ -267,6 +267,74 @@ class TestReplace(unittest.TestCase):
     def assert_edges_once(self, gfa):
         edges = read_gfa(gfa)[1]
         self.assertEqual(len({canonical(e) for e in edges}), len(edges))
+
+    def test_exit_edges(self):
+        # extract's exit-edge graph: runs bounded by reference nodes off the anchors, and a node (10) that a
+        # walk uses outside every run, which stays
+        from test_extract import EXIT_S, EXIT_WALKS, exit_region
+        g = os.path.join(self.d, 'g.gfa')
+        write_gfa(g, EXIT_WALKS, seq=EXIT_S)
+        prepare.write_ref_index(g, 'CHM13', 'chrT', os.path.join(self.d, 'chrT.ref.tsv.gz'))
+        x = os.path.join(self.d, 'x')
+        self.assertEqual(extract.extract(g, [exit_region()], x, exit_edges=True, ref_dir=self.d)['status'], {'ok': 1})
+        pkg = next(extract.read_packages(os.path.join(x, 'packages.jsonl.gz')))
+        msas = os.path.join(self.d, 'msas.jsonl.gz')
+        with gzip.open(msas, 'wt') as f:
+            f.write(json.dumps(naive_msa(pkg)) + '\n')
+        for mode, start in (('dense', None), ('reuse', 100)):
+            with self.subTest(mode=mode):
+                out = os.path.join(self.d, 'out.%s.gfa' % mode)
+                st = replace.replace(g, x, msas, out, id_start=start, id_mode=mode)
+                self.assertEqual((st['nodes_removed'], st['nodes_kept']), (8, 1))
+                seq1, walks1 = self.check_roundtrip(g, out)
+                self.assert_edges_once(out)
+                if mode == 'reuse':
+                    # 10 stays for s5, which visits it outside every run; s2's run no longer does
+                    self.assertEqual(seq1[10], EXIT_S[10])
+                    self.assertEqual(walks1['s5#1'], [('>', 9), ('>', 10)])
+                    self.assertNotIn(10, {n for _, n in walks1['s2#1']})
+                    self.assertEqual(walks1['s4#1'], [('>', 1), ('>', 12), ('>', 9)])
+                if shutil.which('vg'):
+                    gbz = os.path.join(self.d, 'out.%s.gbz' % mode)
+                    replace.to_gbz(out, gbz, keep_gfa=True)
+                    res = verify.verify(g, gbz)
+                    self.assertTrue(res['ok'], res)
+                    self.assertEqual(res['paths'], len(EXIT_WALKS))
+
+    def test_keep_fragments(self):
+        # the exit-edge graph without s8 and s10, so that only 4 and s3's 11 are the alleles' alone: those
+        # go, and the nodes that s6's prefix and s7's U-turn visit stay, with the walks on them
+        from test_extract import EXIT_S, EXIT_WALKS, exit_region
+        walks = [w for w in EXIT_WALKS if w[0] not in ('s8', 's10')]
+        g = os.path.join(self.d, 'g.gfa')
+        write_gfa(g, walks, seq={n: s for n, s in EXIT_S.items() if n != 13})
+        prepare.write_ref_index(g, 'CHM13', 'chrT', os.path.join(self.d, 'chrT.ref.tsv.gz'))
+        x = os.path.join(self.d, 'x')
+        extract.extract(g, [exit_region()], x, exit_edges=True, ref_dir=self.d, keep_fragments=True)
+        pkg = next(extract.read_packages(os.path.join(x, 'packages.jsonl.gz')))
+        self.assertEqual((pkg['fragments'], pkg['kept_fragments']), ([], 2))
+        msas = os.path.join(self.d, 'msas.jsonl.gz')
+        with gzip.open(msas, 'wt') as f:
+            f.write(json.dumps(naive_msa(pkg)) + '\n')
+        for mode, start in (('dense', None), ('reuse', 100)):
+            with self.subTest(mode=mode):
+                out = os.path.join(self.d, 'out.%s.gfa' % mode)
+                st = replace.replace(g, x, msas, out, id_start=start, id_mode=mode)
+                self.assertEqual((st['nodes_removed'], st['nodes_kept']), (2, 5))
+                seq1, walks1 = self.check_roundtrip(g, out)
+                self.assert_edges_once(out)
+                if mode == 'reuse':
+                    self.assertEqual(walks1['s6#1'], [('>', 5), ('>', 6), ('>', 7), ('>', 8), ('>', 9)])
+                    self.assertEqual(walks1['s7#1'], [('>', 1), ('>', 2), ('>', 3), ('>', 14), ('>', 1)])
+                    self.assertEqual({n: seq1[n] for n in (3, 5, 6, 7)}, {n: EXIT_S[n] for n in (3, 5, 6, 7)})
+                    # the reference's allele moved to the new nodes
+                    self.assertFalse({3, 5, 6, 7} & {n for _, n in walks1['CHM13#0']})
+                if shutil.which('vg'):
+                    gbz = os.path.join(self.d, 'out.%s.gbz' % mode)
+                    replace.to_gbz(out, gbz, keep_gfa=True)
+                    res = verify.verify(g, gbz)
+                    self.assertTrue(res['ok'], res)
+                    self.assertEqual(res['paths'], len(walks))
 
     def test_modes(self):
         fx = Fixture(self.d, paths=PATHS)

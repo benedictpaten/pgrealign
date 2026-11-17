@@ -274,7 +274,7 @@ def graph_walks(extract_dir, graph, regions, vg=None, threads=4):
         for line in f:
             if line[0] == '#':
                 continue
-            walk, region, typ, orient, first, end, member = line.rstrip('\n').split('\t')
+            walk, region, typ, orient, first, end, member = line.rstrip('\n').split('\t')[:7]
             if typ == 'spanning' and region in regions and (region, member) not in seen:
                 seen.add((region, member))
                 want[walk].append((int(first), int(end), orient, region, member))
@@ -283,7 +283,7 @@ def graph_walks(extract_dir, graph, regions, vg=None, threads=4):
         for line in f:
             if line[0] == '#':
                 continue
-            region, nodes = line.rstrip('\n').split('\t')
+            region, nodes = line.rstrip('\n').split('\t')[:2]
             if region in regions:
                 interior[region] = [int(n) for n in nodes.split(',') if n]
     needed = {n for ns in interior.values() for n in ns}
@@ -315,7 +315,7 @@ def reference_alleles(occurrences_path, ref_sample):
     with gzip.open(occurrences_path, 'rt') as f:
         for line in f:
             if line.startswith(prefix):
-                walk, region, typ, _, _, _, member = line.rstrip('\n').split('\t')
+                walk, region, typ, _, _, _, member = line.rstrip('\n').split('\t')[:7]
                 if typ == 'spanning':
                     out[region] = member
     return out

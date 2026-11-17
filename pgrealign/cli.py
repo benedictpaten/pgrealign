@@ -86,11 +86,17 @@ def cmd_extract(a):
     from . import extract, provenance, regions
     started = time.time()
     rs = list(regions.read_regions(a.regions))
+    if a.exit_edges and a.ref_dir is None:
+        raise SystemExit('pgrealign extract: --exit-edges needs --ref-dir')
+    if a.keep_fragments and not a.exit_edges:
+        raise SystemExit('pgrealign extract: --keep-fragments needs --exit-edges')
     summary = extract.extract(a.graph, rs, a.out, vg=a.vg, threads=a.threads, ref_sample=a.ref_sample,
-                              max_internal_bp=a.max_internal_bp, allow_inversions=a.allow_inversions)
+                              max_internal_bp=a.max_internal_bp, allow_inversions=a.allow_inversions,
+                              exit_edges=a.exit_edges, ref_dir=a.ref_dir, keep_fragments=a.keep_fragments)
     provenance.write_manifest(os.path.join(a.out, 'extract'), 'extract', {'graph': a.graph, 'regions': a.regions},
                               {'ref_sample': a.ref_sample, 'max_internal_bp': a.max_internal_bp,
-                               'allow_inversions': a.allow_inversions},
+                               'allow_inversions': a.allow_inversions, 'exit_edges': a.exit_edges,
+                               'ref_dir': a.ref_dir, 'keep_fragments': a.keep_fragments},
                               tools=_tools(a, 'vg'), extra={'summary': summary}, started=started)
     _print(summary)
 
@@ -313,6 +319,13 @@ def main(argv=None):
     c.add_argument('--allow-inversions', action='store_true',
                    help="keep a region whose runs visit a node both ways, as at an inversion, instead of making "
                         "it complex: the inverted allele is realigned as the forward sequence it spells")
+    c.add_argument('--exit-edges', action='store_true',
+                   help="let runs begin and end at reference nodes other than the anchors, for regions whose "
+                        "anchors walks go around (regions --max-bypass); needs --ref-dir")
+    c.add_argument('--ref-dir', help="prepare's output directory, whose <contig>.ref.tsv.gz --exit-edges reads")
+    c.add_argument('--keep-fragments', action='store_true',
+                   help="with --exit-edges, record only the spanning runs, and leave every other run (the "
+                        "fragments) and every anchor-free walk on its own nodes, which stay in the graph")
     vg_arg(c)
     c.add_argument('-t', '--threads', type=int, default=4)
     c.set_defaults(func=cmd_extract)

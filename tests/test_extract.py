@@ -4,7 +4,7 @@ import shutil
 import tempfile
 import unittest
 
-from pgrealign import extract, regions
+from pgrealign import extract, prepare, regions
 
 # A small graph: 0 -> 1 (anchor L) -> {2, 3} -> 4 -> 5 (anchor R) -> 6, plus 7 between 2 and 4 for a
 # longer allele. Nodes:
@@ -213,6 +213,107 @@ EXIT_WALKS = [
     ('s9', '1', '>1>4>5>6>7>8>9'),           # an edge from before L straight into the interior
     ('s10', '1', '>11'),                     # anchor-free, on a node of s3's run
 ]
+
+
+def exit_region(S=EXIT_S):
+    """The region between 2 and 8 of the exit-edge reference."""
+    pos, at = 0, {}
+    for n in range(1, 10):
+        at[n] = (pos, pos + len(S[n]))
+        pos += len(S[n])
+    return regions.Region('X', 'chrT', 2, 8, at[2][1], at[8][0], at[8][1] - at[2][0], 'X', 'cen', 'ok', '')
+
+
+class TestExitEdges(unittest.TestCase):
+    def runs(self, walk, kinds):
+        toks = [(w[0], w[1:]) for w in walk.replace('>', ' >').replace('<', ' <').split()]
+        return list(extract.exit_runs_of_walk(toks, 0, len(toks), kinds))
+
+    def test_runs_of_walk(self):
+        # spanning through the anchors, forward and reverse
+        self.assertEqual(self.runs('>1>2>3>8>9', ['o', 'L', 'i', 'R', 'O']), [('spanning', '+', 2, 3, False)])
+        self.assertEqual(self.runs('<9<8<3<2<1', ['O', 'R', 'i', 'L', 'o']), [('spanning', '-', 2, 3, False)])
+        # an exit: leaves before L and comes back inside through a node off the reference
+        self.assertEqual(self.runs('>1>10>3>8', ['o', None, 'i', 'R']), [('spanning', '+', 1, 3, True)])
+        # off the reference between L and R: the run is the stretch
+        self.assertEqual(self.runs('>2>10>8', ['L', None, 'R']), [('spanning', '+', 1, 2, False)])
+        # from before L to after R off the reference: no run
+        self.assertEqual(self.runs('>1>10>9', ['o', None, 'O']), [])
+        # leaving L on its outer side, or arriving at it from there, is outside the region
+        self.assertEqual(self.runs('<2>10', ['L', None]), [])
+        self.assertEqual(self.runs('>10>2', [None, 'L']), [])
+        # entering by L and ending inside: a suffix; starting inside and leaving by R: a prefix
+        self.assertEqual(self.runs('>2>10', ['L', None]), [('suffix', '+', 1, 2, False)])
+        self.assertEqual(self.runs('>10>3>9', [None, 'i', 'O']), [('prefix', '+', 0, 2, True)])
+        # in and out on one side: a U-turn
+        self.assertEqual(self.runs('>2>3>10>1', ['L', 'i', None, 'o']), [('uturn', '+', 1, 3, True)])
+        # inside throughout: internal, oriented by its interior reference steps
+        self.assertEqual(self.runs('<4<10<3', ['i', None, 'i']), [('internal', '-', 0, 3, False)])
+        # a node the reference visits inside and outside
+        self.assertEqual(self.runs('>2>3>5>8', ['L', 'i', 'x', 'R'])[0][0], 'complex')
+
+    def test_extract(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        g = os.path.join(d, 'g.gfa')
+        with open(g, 'w') as f:
+            f.write('H\tVN:Z:1.1\n')
+            f.writelines('S\t%d\t%s\n' % kv for kv in EXIT_S.items())
+            f.writelines('W\t%s\t%s\tchrT\t0\t0\t%s\n' % w for w in EXIT_WALKS)
+        prepare.write_ref_index(g, 'CHM13', 'chrT', os.path.join(d, 'chrT.ref.tsv.gz'))
+        s = extract.extract(g, [exit_region()], os.path.join(d, 'x'), exit_edges=True, ref_dir=d)
+        self.assertEqual((s['status'], s['exit_runs']), ({'ok': 1}, 4))
+        pk = next(extract.read_packages(os.path.join(d, 'x', 'packages.jsonl.gz')))
+        S = EXIT_S
+        alleles = {a['seq']: a['weight'] for a in pk['alleles']}
+        self.assertEqual(alleles, {S[3] + S[4] + S[5] + S[6] + S[7]: 2,         # CHM13, s1
+                                   S[10] + S[4] + S[5] + S[6] + S[7]: 1,        # s2
+                                   S[3] + S[4] + S[5] + S[6] + S[11]: 1,        # s3, forward
+                                   S[4] + S[5] + S[6] + S[7]: 1})               # s9
+        frags = {(f['side'], f['seq']) for f in pk['fragments']}
+        self.assertEqual(frags, {('right', S[5] + S[6] + S[7]), ('left', S[3] + S[14]),
+                                 ('internal', S[13] + S[4]), ('internal', S[11])})
+        self.assertEqual(pk['n_runs'], {'spanning': 5, 'prefix': 1, 'uturn': 1, 'internal': 2})
+        self.assertEqual((pk['exit_edges'], pk['kept_nodes'], pk['kept_bp']), (True, 1, len(S[10])))
+        with gzip.open(os.path.join(d, 'x', 'interiors.tsv.gz'), 'rt') as f:
+            rows = [l.rstrip('\n').split('\t') for l in f if not l.startswith('#')]
+        self.assertEqual(rows, [['X', '3,4,5,6,7,10,11,13,14', '10']])
+        with gzip.open(os.path.join(d, 'x', 'occurrences.tsv.gz'), 'rt') as f:
+            occ = {l.split('\t')[0]: l.rstrip('\n').split('\t')[2:] for l in f if not l.startswith('#')}
+        self.assertEqual(occ['s2#1#chrT#0'], ['spanning', '+', '1', '6', 'a2', '>1', '>8'])
+        self.assertEqual(occ['s3#1#chrT#0'], ['spanning', '-', '1', '6', 'a3', '<9', '<2'])
+        self.assertEqual(occ['s7#1#chrT#0'][:2] + occ['s7#1#chrT#0'][5:], ['uturn', '+', '>2', '>1'])
+        self.assertEqual(occ['s10#1#chrT#0'][:2], ['internal', '+'])
+        self.assertNotIn('s4#1#chrT#0', occ)
+        self.assertNotIn('s5#1#chrT#0', occ)
+
+    def test_keep_fragments(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        g = os.path.join(d, 'g.gfa')
+        with open(g, 'w') as f:
+            f.write('H\tVN:Z:1.1\n')
+            f.writelines('S\t%d\t%s\n' % kv for kv in EXIT_S.items())
+            f.writelines('W\t%s\t%s\tchrT\t0\t0\t%s\n' % w for w in EXIT_WALKS)
+        prepare.write_ref_index(g, 'CHM13', 'chrT', os.path.join(d, 'chrT.ref.tsv.gz'))
+        with self.assertRaisesRegex(ValueError, 'exit edges'):
+            extract.extract(g, [exit_region()], os.path.join(d, 'y'), keep_fragments=True)
+        s = extract.extract(g, [exit_region()], os.path.join(d, 'x'), exit_edges=True, ref_dir=d,
+                            keep_fragments=True)
+        # s6's prefix, s7's U-turn and s8's internal run stay on their nodes; anchor-free s10 is not a run
+        self.assertEqual((s['status'], s['exit_runs'], s['kept_fragments']), ({'ok': 1}, 3, 3))
+        pk = next(extract.read_packages(os.path.join(d, 'x', 'packages.jsonl.gz')))
+        S = EXIT_S
+        self.assertEqual(len(pk['alleles']), 4)
+        self.assertEqual((pk['fragments'], pk['n_runs']), ([], {'spanning': 5}))
+        self.assertEqual(pk['kept_fragment_bp'], sum(len(S[n]) for n in (5, 6, 7, 3, 14, 13, 4)))
+        # the alleles' nodes, every one of which a fragment or a walk outside every run visits
+        with gzip.open(os.path.join(d, 'x', 'interiors.tsv.gz'), 'rt') as f:
+            rows = [l.rstrip('\n').split('\t') for l in f if not l.startswith('#')]
+        self.assertEqual(rows, [['X', '3,4,5,6,7,10,11', '3,4,5,6,7,10,11']])
+        with gzip.open(os.path.join(d, 'x', 'occurrences.tsv.gz'), 'rt') as f:
+            occ = {l.split('\t')[0] for l in f if not l.startswith('#')}
+        self.assertEqual(occ, {'CHM13#0#chrT#0', 's1#1#chrT#0', 's2#1#chrT#0', 's3#1#chrT#0', 's9#1#chrT#0'})
 
 
 if __name__ == '__main__':

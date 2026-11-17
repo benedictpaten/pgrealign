@@ -44,6 +44,31 @@ walks there are). A longer walk is never recorded as a run, and replace stops at
 replaced interior outside a recorded run. So a longer walk that uses an interior makes the region
 complex.
 
+**Exit edges** (`exit_edges`). Anchors that walks go around (regions' `max_bypass`) do not separate
+the graph: a haplotype whose sequence of the region never aligned to the reference can leave it before L
+and come back inside, or leave inside and come back after R. With exit edges, a run need not begin or end
+at an anchor: each walk's steps near the region are classed by the reference index (prepare's
+<contig>.ref.tsv.gz) as before L, L, between the anchors (interior), R, after R, or off the reference.
+A stretch of steps off the reference belongs to the region when a step that bounds it is on the
+interior's side: an interior reference step, or an anchor that the walk crosses into or out of the
+interior. A run is a maximal stretch of a walk's steps in the region, and is bounded by reference steps
+outside the interior, or by the walk's ends (exit_runs_of_walk):
+- spanning: in on one side (at L or before it) and out on the other, forward or reverse. These are
+  the alleles, whether a bound is an anchor or another reference node (an exit);
+- prefix and suffix: the walk starts or ends in the region;
+- uturn: in and out on the same side, a fragment on that side;
+- internal: the walk lies in the region.
+A walk that leaves the reference before L and comes back after R without a step in the region has no
+run. The region's interior is every node its runs visit; those that some walk also visits outside every
+run stay in the graph for it (`kept`), so replace removes only the others. A node in the interiors of
+two regions makes both complex.
+
+**Keeping fragments** (`keep_fragments`, with exit edges). Only the spanning runs are recorded. Every
+other run, and every anchor-free walk, counts as outside every run: replace leaves its walk as it is,
+on its nodes, which stay with the edges between them. The interior is then the nodes of the alleles, and
+those of its nodes that fragments visit are `kept`. A region's fragments are not realigned, but it
+gains no unaligned copy of them either.
+
 **Status.** Each region has one:
 - `complex`: a walk's run is complex, runs visit an interior node both ways (above, unless
   `allow_inversions`), an anchor-free walk uses the interiors of more than one region or runs both ways
@@ -68,19 +93,27 @@ Outputs, in the output directory:
     `weight`;
   - `ref`: the id of the allele that a spanning run of the reference sample spells (the last, if it
     has several), or null if it has none.
+  - with exit edges, `exit_edges` (true), `exit_runs` (the runs with a bound off the anchors),
+    `kept_nodes` and `kept_bp` (the interior nodes that stay, as walks visit them outside every run);
+  - with keep_fragments, `kept_fragments` and `kept_fragment_bp`: the runs left on their nodes, and the
+    bp they spell, counted per run;
 - `occurrences.tsv.gz`: one row per run: walk, region, type, orient, the run's interior as step
-  indices [first, end) in the W line, and the allele or fragment it spells. `replace` rewrites these.
+  indices [first, end) in the W line, and the allele or fragment it spells; with exit edges, also the
+  steps before and after the run in its walk ('.' at a walk's end), which replace links it to.
+  `replace` rewrites these.
 - `interiors.tsv.gz`: region, and the ids of the nodes its runs visit. These are the nodes `replace`
-  removes.
+  removes, except those of a third column, with exit edges, which stay.
 - `summary.json`: the walks and regions read, the regions of each status, the anchor-free walks held
   whole (`internal_candidates`), the regions an anchor-free walk longer than `max_internal_bp`
   made complex (`internal_too_long`), the regions whose runs visit a node both ways (`both_ways`), and
   the anchor-free walks flipped to run with their region (`internal_flipped`).
 """
+import bisect
 import collections
 import gzip
 import json
 import os
+from array import array
 
 from .graph import GfaStream, parse_w, spell, walk_key, STEP
 
@@ -94,7 +127,8 @@ FWD, REV = 1, 2         # the ways a run visits an interior node, in the region'
 
 class RegionRuns:
     """Everything one region collects during the pass."""
-    __slots__ = ('alleles', 'fragments', 'interior', 'complex', 'n_runs', 'ref', 'both_ways', 'allow_inversions')
+    __slots__ = ('alleles', 'fragments', 'interior', 'complex', 'n_runs', 'ref', 'both_ways', 'allow_inversions',
+                 'exit_runs', 'kept_runs', 'kept_run_bp')
 
     def __init__(self, allow_inversions=False):
         self.ref = None         # the allele the reference sample's walk spells
@@ -105,6 +139,9 @@ class RegionRuns:
         self.n_runs = collections.Counter()
         self.both_ways = False  # some node is visited both ways
         self.allow_inversions = allow_inversions
+        self.exit_runs = 0      # exit edges: the runs with a bound off the anchors
+        self.kept_runs = 0      # keep_fragments: the fragment runs left on their nodes, and their bp
+        self.kept_run_bp = 0
 
     def visit(self, key, steps):
         """Record the interior nodes of walk `key`'s run, `steps` in the region's forward orientation. A
@@ -134,6 +171,9 @@ def _member(table, key, prefix):
 def side_of(typ, orient):
     if typ == 'internal':
         return 'internal'
+    if typ == 'uturn':
+        # exit edges: a run in and out on one side, '+' for the left (exit_runs_of_walk)
+        return 'left' if orient == '+' else 'right'
     return 'left' if (typ == 'suffix') == (orient == '+') else 'right'
 
 
@@ -175,26 +215,204 @@ def runs_of_walk(toks, occ):
         yield ('suffix', '+' if state == 'fwd' else '-', s + 1, len(toks))
 
 
+IN, OUT = 1, 2      # which side of a region a stretch's bound leaves it on
+
+
+def _bound(kind, o, leaving):
+    """Where the bound of a stretch puts the stretch: IN (the region's interior side), OUT, None (a walk
+    end) or 'x' (a reference node the reference visits both inside and outside the region). `kind` is
+    the bound's class (exit_runs_of_walk) and `o` its orientation; `leaving` says that the walk leaves
+    the bound into the stretch, rather than arriving at it from the stretch."""
+    if kind == 'i':
+        return IN
+    if kind == 'L':
+        return IN if (o == '>') == leaving else OUT
+    if kind == 'R':
+        return IN if (o == '<') == leaving else OUT
+    if kind == 'x':
+        return 'x'
+    return OUT
+
+
+def exit_runs_of_walk(toks, lo, hi, kinds):
+    """The runs of one walk through one region with exit edges, from the steps [lo, hi) of the walk
+    `toks`. `kinds[i - lo]` is the class of step i: None for a node not on the reference, 'L' or 'R' for
+    an anchor, 'i' for a reference node between them, 'o' or 'O' for a reference node before L or after
+    R, 'x' for a reference node the reference visits both inside and outside. Step lo is the walk's first
+    or a reference step, and so is step hi - 1 its last; the steps outside [lo, hi) are outside every run.
+
+    A stretch of steps off the reference belongs to the region when either of the steps that bound it
+    is on the region's interior side: an interior reference node, or an anchor the walk crosses from or
+    into the interior. A run is a maximal stretch of steps in the region: interior reference steps and
+    the stretches that belong. Its bounds are reference steps outside the interior, or the walk's ends.
+    Yields (type, orient, first, end, exit) with [first, end) the run's steps, `exit` whether a bound is
+    a reference node other than an anchor, or ('complex', reason, None, None, None):
+    - spanning: bounds on both sides, L or before it then R or after it ('+'), or the reverse ('-');
+    - prefix / suffix: the walk starts / ends in the region, and the other bound gives the orientation;
+    - uturn: both bounds on one side, left or right: a fragment on that side;
+    - internal: the walk lies in the region, oriented as most of its interior reference steps."""
+    n = len(toks)
+    ref = [i for i in range(lo, hi) if kinds[i - lo] is not None]
+    inx = bytearray(hi - lo)
+    for i in ref:
+        if kinds[i - lo] == 'i':
+            inx[i - lo] = 1
+    # the stretches off the reference, each between two reference steps or a reference step and a walk end
+    bounds = [None] + ref + [None]
+    for p, q in zip(bounds, bounds[1:]):
+        a = lo if p is None else p + 1
+        b = hi if q is None else q
+        if a >= b:
+            continue
+        if p is None and lo > 0 or q is None and hi < n:
+            continue        # bounded by a step outside [lo, hi), which is not in the region
+        left = None if p is None else _bound(kinds[p - lo], toks[p][0], True)
+        right = None if q is None else _bound(kinds[q - lo], toks[q][0], False)
+        if IN in (left, right):
+            if 'x' in (left, right):
+                yield ('complex', 'a run reaches a node the reference visits inside and outside the region',
+                       None, None, None)
+                return
+            for i in range(a, b):
+                inx[i - lo] = 1
+    i = lo
+    while i < hi:
+        if not inx[i - lo]:
+            i += 1
+            continue
+        a = i
+        while i < hi and inx[i - lo]:
+            i += 1
+        b = i
+        before = kinds[a - 1 - lo] if a > lo else None
+        after = kinds[b - lo] if b < hi else None
+        if 'x' in (before, after):
+            yield ('complex', 'a run ends at a node the reference visits inside and outside the region',
+                   None, None, None)
+            return
+        sb = None if before is None else 'left' if before in ('L', 'o') else 'right'
+        sa = None if after is None else 'left' if after in ('L', 'o') else 'right'
+        exit = before in ('o', 'O') or after in ('o', 'O')
+        if sb and sa:
+            if sb != sa:
+                yield ('spanning', '+' if sb == 'left' else '-', a, b, exit)
+            else:
+                yield ('uturn', '+' if sb == 'left' else '-', a, b, exit)
+        elif sa:
+            yield ('prefix', '+' if sa == 'right' else '-', a, b, exit)
+        elif sb:
+            yield ('suffix', '+' if sb == 'left' else '-', a, b, exit)
+        else:
+            fwd = sum(1 if toks[k][0] == '>' else -1 for k in range(a, b) if kinds[k - lo] == 'i')
+            yield ('internal', '+' if fwd >= 0 else '-', a, b, exit)
+
+
+class RefIndex:
+    """Where the reference visits each node, for exit edges: `start[node]` is the start of its first
+    visit, or -1 for a node the reference does not visit; `multi` {node: (first start, last start)} for
+    the nodes it visits more than once."""
+
+    def __init__(self, index, max_id):
+        self.start = array('q', [-1]) * (max(max_id, max((n for n, _, _, _ in index), default=0)) + 1)
+        first, last = {}, {}
+        for n, _, st, _ in index:
+            if n in first:
+                last[n] = st
+            else:
+                first[n] = st
+                self.start[n] = st
+        self.multi = {n: (first[n], st) for n, st in last.items()}
+
+    def kind(self, n, r):
+        """The class of node `n` for region `r` (exit_runs_of_walk)."""
+        st = self.start[n] if n < len(self.start) else -1
+        if st < 0:
+            return None
+        if n == r.L:
+            return 'L'
+        if n == r.R:
+            return 'R'
+        ks = {self._side(st, r)}
+        if n in self.multi:
+            ks |= {self._side(s, r) for s in self.multi[n]}
+        return ks.pop() if len(ks) == 1 else 'x'
+
+    @staticmethod
+    def _side(st, r):
+        return 'o' if st < r.ref_start else 'O' if st >= r.ref_end else 'i'
+
+
 def extract(graph, regions, out_dir, vg=None, threads=4, max_internal_bp=200000, ref_sample='CHM13',
-            allow_inversions=False):
+            allow_inversions=False, exit_edges=False, ref_dir=None, keep_fragments=False):
     """Run the pass over `graph` (a GBZ or GFA) for the `regions` (regions.Region) with status 'ok'; the
     others get no package. A package's `ref` is the allele that a walk of `ref_sample` spells. An
     anchor-free walk longer than `max_internal_bp` that uses an interior makes its region complex.
-    `allow_inversions` keeps a region whose runs visit a node both ways (see Orientation)."""
+    `allow_inversions` keeps a region whose runs visit a node both ways (see Orientation). `exit_edges`
+    finds the runs as exit_runs_of_walk does (see Exit edges), from the reference indexes
+    <contig>.ref.tsv.gz that prepare wrote in `ref_dir`. `keep_fragments`, with exit edges, records only
+    the spanning runs and leaves the fragments on their nodes (see Keeping fragments)."""
+    from .prepare import read_ref_index
+    if keep_fragments and not exit_edges:
+        raise ValueError('keeping fragments needs exit edges')
     os.makedirs(out_dir, exist_ok=True)
     regs = {r.id: r for r in regions if r.status == 'ok'}
     anchor_of = collections.defaultdict(list)     # node -> [(region id, 'L'|'R')]
     for r in regs.values():
         anchor_of[str(r.L)].append((r.id, 'L'))
         anchor_of[str(r.R)].append((r.id, 'R'))
+    ref_indexes, ref_of = {}, {}
+    if exit_edges:
+        if ref_dir is None:
+            raise ValueError('exit edges need the reference indexes (ref_dir)')
+        # each region's anchors and the reference nodes between them, by which the pass finds its walks
+        anchor_of = collections.defaultdict(list)
+        for contig in sorted({r.contig for r in regs.values()}):
+            index = ref_indexes[contig] = read_ref_index(os.path.join(ref_dir, contig + '.ref.tsv.gz'))
+            starts = [x[2] for x in index]
+            for r in regs.values():
+                if r.contig != contig:
+                    continue
+                anchor_of[str(r.L)].append((r.id, 'L'))
+                anchor_of[str(r.R)].append((r.id, 'R'))
+                for n, _, _, _ in index[bisect.bisect_left(starts, r.ref_start):bisect.bisect_left(starts, r.ref_end)]:
+                    if n != r.L and n != r.R:
+                        anchor_of[str(n)].append((r.id, 'i'))
     runs = {rid: RegionRuns(allow_inversions) for rid in regs}
     seq = {}
+    used = None           # exit edges: the nodes that walks visit outside every run
     occ_out = gzip.open(os.path.join(out_dir, 'occurrences.tsv.gz'), 'wt')
-    occ_out.write('#walk\tregion\ttype\torient\tfirst\tend\tmember\n')
+    occ_out.write('#walk\tregion\ttype\torient\tfirst\tend\tmember%s\n' % ('\tbefore\tafter' if exit_edges else ''))
     candidates = []       # anchor-free walks of at most max_internal_bp: possible internal fragments
     long_walks = []       # the keys of the longer anchor-free walks
     long_at = {}          # node -> index in long_walks of the first longer walk to visit it
     n_walks = 0
+
+    def mark_used(toks, a, b):
+        for _, n in toks[a:b]:
+            used[int(n)] = 1
+
+    def on_ref(n):
+        return any(ri.start[n] >= 0 for ri in ref_of.values() if n < len(ri.start))
+
+    def record(rr, rid, key, w, toks, typ, orient, a, b):
+        steps = [(o, int(n)) for o, n in toks[a:b]]
+        if orient == '-':
+            steps = flip(steps)
+        rr.visit(key, steps)
+        s = spell(steps, seq)
+        if typ == 'spanning':
+            mid = _member(rr.alleles, s, 'a')
+            if w.sample == ref_sample:
+                rr.ref = mid
+        else:
+            mid = _member(rr.fragments, (side_of(typ, orient), s), 'f')
+        rr.n_runs[typ] += 1
+        row = '%s\t%s\t%s\t%s\t%d\t%d\t%s' % (key, rid, typ, orient, a, b, mid)
+        if exit_edges:
+            # the steps that bound the run, which replace links its new walk to
+            row += '\t%s\t%s' % (''.join(toks[a - 1]) if a > 0 else '.', ''.join(toks[b]) if b < len(toks) else '.')
+        occ_out.write(row + '\n')
+
     with GfaStream(graph, vg, threads) as f:
         for line in f:
             t = line[0]
@@ -204,6 +422,10 @@ def extract(graph, regions, out_dir, vg=None, threads=4, max_internal_bp=200000,
                 continue
             if t != 'W':
                 continue
+            if exit_edges and used is None:
+                max_id = max(seq) if seq else 0
+                ref_of = {c: RefIndex(index, max_id) for c, index in ref_indexes.items()}
+                used = bytearray(max(len(ri.start) for ri in ref_of.values()) if ref_of else max_id + 1)
             n_walks += 1
             w = parse_w(line)
             toks = STEP.findall(w.steps)
@@ -215,13 +437,55 @@ def extract(graph, regions, out_dir, vg=None, threads=4, max_internal_bp=200000,
                     for rid, side in a:
                         hits[rid].append((i, side, o))
             if not hits:
-                if regs and toks:
+                if exit_edges and toks and (keep_fragments or any(on_ref(int(n)) for _, n in toks)):
+                    mark_used(toks, 0, len(toks))
+                elif regs and toks:
                     if sum(len(seq[int(n)]) for _, n in toks) <= max_internal_bp:
                         candidates.append((key, toks))
+                    elif exit_edges:
+                        # outside every run, so its nodes stay for it, whichever regions they are in
+                        mark_used(toks, 0, len(toks))
                     else:
                         for _, n in toks:
                             long_at.setdefault(int(n), len(long_walks))
                         long_walks.append(key)
+                continue
+            if exit_edges:
+                spans = []
+                for rid, occ in hits.items():
+                    r, rr = regs[rid], runs[rid]
+                    ri = ref_of[r.contig]
+                    st = ri.start
+                    lo = occ[0][0] - 1
+                    while lo >= 0 and st[int(toks[lo][1])] < 0:
+                        lo -= 1
+                    lo = max(lo, 0)
+                    hi = occ[-1][0] + 1
+                    while hi < len(toks) and st[int(toks[hi][1])] < 0:
+                        hi += 1
+                    hi = min(hi + 1, len(toks))
+                    kinds = [ri.kind(int(toks[i][1]), r) for i in range(lo, hi)]
+                    for typ, orient, a, b, ex in exit_runs_of_walk(toks, lo, hi, kinds):
+                        if typ == 'complex':
+                            rr.complex.append('%s: %s' % (key, orient))
+                            continue
+                        if keep_fragments and typ != 'spanning':
+                            # outside every run, so its nodes stay for it
+                            rr.kept_runs += 1
+                            rr.kept_run_bp += sum(len(seq[int(n)]) for _, n in toks[a:b])
+                            continue
+                        record(rr, rid, key, w, toks, typ, orient, a, b)
+                        rr.exit_runs += bool(ex)
+                        spans.append((a, b, rid))
+                spans.sort()
+                pos = 0
+                for a, b, rid in spans:
+                    if a < pos:
+                        for x in {rid, prev}:
+                            runs[x].complex.append('%s: runs of regions %s and %s overlap' % (key, prev, rid))
+                    mark_used(toks, pos, a)
+                    pos, prev = max(pos, b), rid
+                mark_used(toks, pos, len(toks))
                 continue
             for rid, occ in hits.items():
                 rr = runs[rid]
@@ -229,32 +493,28 @@ def extract(graph, regions, out_dir, vg=None, threads=4, max_internal_bp=200000,
                     if typ == 'complex':
                         rr.complex.append('%s: %s' % (key, orient))
                         continue
-                    steps = [(o, int(n)) for o, n in toks[a:b]]
-                    if orient == '-':
-                        steps = flip(steps)
-                    rr.visit(key, steps)
-                    s = spell(steps, seq)
-                    if typ == 'spanning':
-                        mid = _member(rr.alleles, s, 'a')
-                        if w.sample == ref_sample:
-                            rr.ref = mid
-                    else:
-                        mid = _member(rr.fragments, (side_of(typ, orient), s), 'f')
-                    rr.n_runs[typ] += 1
-                    occ_out.write('%s\t%s\t%s\t%s\t%d\t%d\t%s\n' % (key, rid, typ, orient, a, b, mid))
+                    record(rr, rid, key, w, toks, typ, orient, a, b)
     # internal fragments: the held anchor-free walks that use a region's interior nodes
     n_flipped = 0
     node_region = {}
     for rid, rr in runs.items():
         for n in rr.interior:
-            node_region[n] = rid
+            other = node_region.setdefault(n, rid)
+            if other != rid and exit_edges:
+                # exit edges can take one stretch into two regions
+                for x in (rid, other):
+                    runs[x].complex.append('node %d is in the interiors of regions %s and %s' % (n, other, rid))
     for key, toks in candidates:
         rids = {node_region.get(int(n)) for _, n in toks} - {None}
         if not rids:
+            if exit_edges:
+                mark_used(toks, 0, len(toks))
             continue
         if len(rids) > 1:
             for rid in rids:
                 runs[rid].complex.append('%s: an anchor-free walk through %d regions' % (key, len(rids)))
+            if exit_edges:
+                mark_used(toks, 0, len(toks))
             continue
         rid = rids.pop()
         rr = runs[rid]
@@ -274,7 +534,8 @@ def extract(graph, regions, out_dir, vg=None, threads=4, max_internal_bp=200000,
         rr.visit(key, steps)
         mid = _member(rr.fragments, ('internal', spell(steps, seq)), 'f')
         rr.n_runs['internal'] += 1
-        occ_out.write('%s\t%s\tinternal\t%s\t0\t%d\t%s\n' % (key, rid, orient, len(toks), mid))
+        occ_out.write('%s\t%s\tinternal\t%s\t0\t%d\t%s%s\n' % (key, rid, orient, len(toks), mid,
+                                                             '\t.\t.' if exit_edges else ''))
     occ_out.close()
     # the longer anchor-free walks have no run, so a region whose interior one uses is left as it is
     n_long = 0
@@ -288,9 +549,11 @@ def extract(graph, regions, out_dir, vg=None, threads=4, max_internal_bp=200000,
     status = collections.Counter()
     with gzip.open(os.path.join(out_dir, 'packages.jsonl.gz'), 'wt') as pk, \
             gzip.open(os.path.join(out_dir, 'interiors.tsv.gz'), 'wt') as it:
-        it.write('#region\tnodes\n')
+        it.write('#region\tnodes%s\n' % ('\tkept' if exit_edges else ''))
         for rid in sorted(regs, key=lambda k: (regs[k].ref_start, regs[k].ref_end)):
             r, rr = regs[rid], runs[rid]
+            # exit edges: the nodes of the runs that walks also visit outside every run stay for them
+            kept = sorted(n for n in rr.interior if used is not None and used[n])
             if rr.complex:
                 st = 'complex'
             elif not rr.alleles and not rr.fragments:
@@ -306,11 +569,21 @@ def extract(graph, regions, out_dir, vg=None, threads=4, max_internal_bp=200000,
                    'alleles': [{'id': v[0], 'weight': v[1], 'seq': s} for s, v in rr.alleles.items()],
                    'fragments': [{'id': v[0], 'weight': v[1], 'side': k[0], 'seq': k[1]}
                                  for k, v in rr.fragments.items()]}
+            if exit_edges:
+                pkg.update({'exit_edges': True, 'exit_runs': rr.exit_runs, 'kept_nodes': len(kept),
+                            'kept_bp': sum(len(seq[n]) for n in kept)})
+            if keep_fragments:
+                pkg.update({'kept_fragments': rr.kept_runs, 'kept_fragment_bp': rr.kept_run_bp})
             pk.write(json.dumps(pkg, separators=(',', ':')) + '\n')
-            it.write('%s\t%s\n' % (rid, ','.join(str(n) for n in sorted(rr.interior))))
+            it.write('%s\t%s%s\n' % (rid, ','.join(str(n) for n in sorted(rr.interior)),
+                                      '\t' + ','.join(str(n) for n in kept) if exit_edges else ''))
     summary = {'walks': n_walks, 'regions': len(regs), 'status': dict(status),
                'internal_candidates': len(candidates), 'internal_too_long': n_long,
                'both_ways': sum(rr.both_ways for rr in runs.values()), 'internal_flipped': n_flipped}
+    if exit_edges:
+        summary['exit_runs'] = sum(rr.exit_runs for rr in runs.values())
+    if keep_fragments:
+        summary['kept_fragments'] = sum(rr.kept_runs for rr in runs.values())
     path = os.path.join(out_dir, 'summary.json')
     with open(path + '.tmp', 'w') as f:
         json.dump(summary, f, indent=1)
