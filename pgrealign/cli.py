@@ -116,12 +116,13 @@ def cmd_realign(a):
     scores = scores_of(a)
     summary = realign.run(a.packages, a.out, select=a.select, shard=(i, n), jobs=a.jobs, max_memory=a.max_memory,
                           abpoa=a.abpoa, max_cells=a.max_cells, scores=scores, min_share=a.min_share,
-                          centre=a.centre, max_work=a.max_work, max_excess=a.max_excess or None)
+                          centre=a.centre, max_work=a.max_work, max_excess=a.max_excess or None,
+                          min_gain=a.min_gain)
     provenance.write_manifest(a.out, 'realign', {'packages': a.packages},
                               {'method': 'medoid_star', 'select': a.select, 'shard': a.shard,
                                'max_cells': a.max_cells, 'max_memory': a.max_memory,
                                'scores': ' '.join(scores.flags()), 'min_share': a.min_share, 'centre': a.centre,
-                               'max_work': a.max_work, 'max_excess': a.max_excess},
+                               'max_work': a.max_work, 'max_excess': a.max_excess, 'min_gain': a.min_gain},
                               tools=_tools(a, 'abpoa'), extra={'summary': summary}, started=started)
     _print(summary)
 
@@ -181,7 +182,8 @@ def cmd_run(a):
                                   abpoa=a.abpoa, ref_sample=a.ref_sample, drop_samples=drop_samples_of(a),
                                   scores=scores_of(a), max_cells=a.max_cells,
                                   min_share=a.min_share, centre=a.centre, max_work=a.max_work,
-                                  max_excess=a.max_excess or None, max_internal_bp=a.max_internal_bp,
+                                  max_excess=a.max_excess or None, min_gain=a.min_gain,
+                                  max_internal_bp=a.max_internal_bp,
                                   id_start=a.id_start, do_qc=not a.no_qc, max_memory=a.max_memory,
                                   log=lambda m: print(m, file=sys.stderr))
     _print(summary)
@@ -217,7 +219,7 @@ def cmd_project(a):
 def main(argv=None):
     from .memory import default_gb
     from .prepare import DROP_SAMPLES
-    from .realign import CENTRES, MAX_ALIGNMENT, MAX_CELLS, MAX_EXCESS, MAX_WORK, MIN_SHARE
+    from .realign import CENTRES, MAX_ALIGNMENT, MAX_CELLS, MAX_EXCESS, MAX_WORK, MIN_GAIN, MIN_SHARE
     from .star import SCORES
     default_drop = ','.join(DROP_SAMPLES) or 'none'
     default_memory = default_gb()
@@ -318,12 +320,16 @@ def main(argv=None):
     c.add_argument('--centre', choices=CENTRES, default='ref',
                    help="the allele every other is aligned to: the reference allele, where the region has one and "
                         "--max-excess allows, or the medoid; or, with parsimony, the star around each where the "
-                        "region has a reference allele, keeping the one whose alleles hold fewer records against "
-                        "it, counted once per haplotype, the reference's on a tie [ref]")
+                        "region has a reference allele, keeping the medoid's where its alleles hold --min-gain "
+                        "fewer records against the reference allele, counted once per haplotype [ref]")
     c.add_argument('--max-excess', type=float, default=MAX_EXCESS or 0, metavar='FRACTION',
                    help="with --centre ref, take the medoid instead where more than this share of the haplotypes' "
                         "bases lie beyond the reference allele's length, as where most carry an expansion it lacks; "
                         "0 takes the reference allele whatever [%g]" % (MAX_EXCESS or 0))
+    c.add_argument('--min-gain', type=float, default=MIN_GAIN, metavar='FRACTION',
+                   help="with --centre parsimony, keep the medoid's star only where its alleles hold fewer than 1 - "
+                        "this times the records the reference allele's star holds; 0 keeps it wherever they hold "
+                        "fewer [%g]" % MIN_GAIN)
     c.add_argument('--max-work', type=float, default=MAX_WORK,
                    help='leave a region as it is (too_big) when its alignments would fill more than this many '
                         'dynamic-programming cells, by its package; 0 sets no limit [%.3g]' % MAX_WORK)
@@ -405,6 +411,8 @@ def main(argv=None):
     c.add_argument('--centre', choices=CENTRES, default='ref', help='as for realign [ref]')
     c.add_argument('--max-excess', type=float, default=MAX_EXCESS or 0, metavar='FRACTION',
                    help='as for realign [%g]' % (MAX_EXCESS or 0))
+    c.add_argument('--min-gain', type=float, default=MIN_GAIN, metavar='FRACTION',
+                   help='as for realign [%g]' % MIN_GAIN)
     c.add_argument('--max-work', type=float, default=MAX_WORK, help='as for realign [%.3g]' % MAX_WORK)
     c.add_argument('--max-internal-bp', type=int, default=200000, help='as for extract [200000]')
     c.add_argument('--id-start', type=int, help="replace's first node id [the contig's smallest id]")

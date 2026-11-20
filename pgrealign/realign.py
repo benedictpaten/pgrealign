@@ -17,15 +17,17 @@ lie beyond the reference allele's length (`excess`), but by default it is off, s
 accurate around the reference there too (MAX_EXCESS). `centre` 'medoid' keeps the medoid always.
 
 `centre` 'parsimony' builds the star around the reference allele, as 'ref' without `max_excess`, and where
-the medoid is another allele, around the medoid too, and keeps the one whose alleles hold fewer records
-against the reference allele (star.variant_records): each allele's maximal runs of columns that differ from
-the reference's row, about the records a VCF decomposed against the reference holds for it, counted once
-per haplotype that carries it. The reference's star is kept on a tie. Its optimal pairwise alignments
-usually hold the fewest, but in a tandem repeat they can place each allele's copies of the unit out of
-register with the reference's, so that what one indel around the medoid describes becomes many
-substitutions (docs/method.md). The medoid's star is built only within the limits that admit the
-reference's (`medoid_too`), so 'parsimony' aligns the regions 'ref' aligns, and is not kept where it cannot
-be built for the region's sake (not_homologous, aligner_failed).
+the medoid is another allele, around the medoid too, and keeps the medoid's where its alleles hold at least
+`min_gain` (MIN_GAIN, a tenth) fewer records against the reference allele (star.variant_records): each
+allele's maximal runs of columns that differ from the reference's row, about the records a VCF decomposed
+against the reference holds for it, counted once per haplotype that carries it. The reference's optimal
+pairwise alignments usually hold the fewest, but in a tandem repeat they can place an allele's copies of the
+unit out of register with the reference's, so that what one indel around the medoid describes becomes many
+substitutions (docs/method.md). The medoid's star is built only where no more than PARSIMONY_EXCESS of the
+haplotypes' bases lie beyond the reference allele's length, where the VCF was worse around the medoid
+(MAX_EXCESS), and within the limits that admit the reference's (`medoid_too`), so 'parsimony' aligns the
+regions 'ref' aligns; it is not kept where it cannot be built for the region's sake (not_homologous,
+aligner_failed).
 
 **Limits.** Every limit is a size of the alignment, as a window and a band are in cactus's own, never a
 size of the machine. abPOA's alignment of two sequences fills a matrix of cells, one per pair of their
@@ -74,8 +76,9 @@ would take (memory.schedule_seconds), so that a caller can ask for them.
   `centre` 'parsimony', where the region has a reference allele, `parsimony`: `records` {'ref': n,
   'medoid': m}, the two stars' variant_records, the medoid's where it was built; `medoid`, the medoid's id,
   where it was sought; and `skipped`, why its star was not built or not compared: 'fewest' (the reference's
-  star holds one record per haplotype of each other allele, the fewest any can), 'same' (the medoid is the
-  reference allele), 'too_big' (medoid_too), 'not_homologous' or 'aligner_failed';
+  star holds too few records for any star to hold `min_gain` fewer: every other allele holds one at least),
+  'same' (the medoid is the reference allele), 'too_big' (medoid_too: over the limits, or over
+  PARSIMONY_EXCESS), 'not_homologous' or 'aligner_failed';
 - otherwise `message`.
 """
 import collections
@@ -117,6 +120,19 @@ REGION_SECONDS = 0.25
 # 19,639 more errors against the dipcall truths of 14 samples, and 1,787 more against HG002's GIAB structural variants,
 # and no threshold gains on errors over none (docs/method.md). So there is no limit by default.
 MAX_EXCESS = None
+# With centre 'parsimony', the medoid's star is kept only where its alleles hold fewer than 1 - MIN_GAIN times the
+# records of the reference allele's (variant_records), and built only where no more than PARSIMONY_EXCESS of the
+# haplotypes' bases lie beyond the reference allele's length (`excess`). On chr12, chr20 and chr21 of the HPRC CHM13
+# graph (91,017 regions, 41,108 with a medoid other than the reference allele), these take the medoid in 227, all of
+# them tandem repeats. In the 222 of those whose alleles an earlier build aligned around the same medoid, that build has
+# 20,282 fewer dipcall errors (231 samples) than the reference allele's star, 13,850 of them at chr21:11.99M; 32 of the
+# regions have fewer errors around the medoid and 32 more. Strictly fewer records (MIN_GAIN 0) takes the medoid in 1,280
+# and removes 10,114: the 1,042 regions where the medoid's star holds fewer, but not a tenth fewer, have 7,806 more
+# errors around it. PARSIMONY_EXCESS is MAX_EXCESS's threshold, above which the 30-way graph's VCF was worse around the
+# medoid; here it keeps 11 regions on the reference allele, with 2,362 fewer errors than around the medoid
+# (docs/method.md).
+MIN_GAIN = 0.1
+PARSIMONY_EXCESS = 0.1
 # Failures of the machine rather than of the region, which `run` never records (see the module docstring)
 MACHINE_FAILURES = ('reservation_refused', 'aligner_killed', 'out_of_memory')
 # Measured on a 1 Mbp allele: its k-mer counts hold 74 bytes per base, 85 at most while they grow, and
@@ -179,13 +195,15 @@ def centre_of(pkg, centre='ref', max_excess=MAX_EXCESS):
 def medoid_too(pkg, centre='parsimony', max_cells=MAX_CELLS, max_work=MAX_WORK):
     """Whether realign_package builds the star of `pkg` around its medoid as well as around its reference
     allele, decided from the package alone: with `centre` 'parsimony', where the region has a reference allele
-    (centre_of), and the medoid's star keeps within the limits that admit the reference's, its largest
-    alignment within MAX_ALIGNMENT times `max_cells` cells (largest_alignment) and its work within `max_work`
-    (0 or None: no limit). Each star is held to `max_work` on its own, so a region takes up to twice it in all:
+    (centre_of), no more than PARSIMONY_EXCESS of the haplotypes' bases lie beyond its length (`excess`), and
+    the medoid's star keeps within the limits that admit the reference's, its largest alignment within
+    MAX_ALIGNMENT times `max_cells` cells (largest_alignment) and its work within `max_work` (0 or None: no
+    limit). Each star is held to `max_work` on its own, so a region takes up to twice it in all:
     the regions where the reference's star fails most are among the largest, as at chr20:26.30M, whose stars
     take about 1.4 x 10^11 cells each. The medoid is not known before the region runs, so the estimates take
     any allele as it, and this does not ask whether it is the reference allele."""
-    if centre != 'parsimony' or centre_of(pkg, centre) is None:
+    ref = centre_of(pkg, centre) if centre == 'parsimony' else None
+    if ref is None or excess(pkg, ref) > PARSIMONY_EXCESS:
         return False
     if largest_alignment(pkg, 'medoid', max_cells) > MAX_ALIGNMENT * max_cells:
         return False
@@ -322,18 +340,19 @@ def refusal(pkg, max_cells=MAX_CELLS, centre='ref', max_work=MAX_WORK, max_exces
     return r and r[1]
 
 
-def _parsimonious(msa, alleles, fragments, align, max_cells, min_share, scores):
+def _parsimonious(msa, alleles, fragments, align, max_cells, min_share, scores, min_gain=MIN_GAIN):
     """(the star to keep, `parsimony`): of `msa`, the star around the reference allele, and the star around
-    the medoid, the one whose alleles hold fewer records against the reference allele, each counted once per
-    haplotype (star.variant_records), the reference's on a tie; and what was compared (module docstring).
-    Every other allele differs from the reference allele in one record at least, in any star, so where the
-    reference's star holds no more, the medoid is not sought (`skipped` 'fewest'); nor is its star built where
-    it is the reference allele ('same'), nor kept where it cannot be built for the region's sake (its status:
-    'not_homologous', 'aligner_failed'). A failure of the machine is raised, as for the reference's star."""
+    the medoid, the medoid's where its alleles hold fewer than 1 - `min_gain` times the records of the
+    reference's against the reference allele, each counted once per haplotype (star.variant_records), and
+    otherwise the reference's; and what was compared (module docstring). Every other allele differs from the
+    reference allele in one record at least, in any star, so where the medoid's star could not hold few enough,
+    the medoid is not sought (`skipped` 'fewest'); nor is its star built where it is the reference allele
+    ('same'), nor kept where it cannot be built for the region's sake (its status: 'not_homologous',
+    'aligner_failed'). A failure of the machine is raised, as for the reference's star."""
     weights = [(a[0], a[2]) for a in alleles]
     ref_records = variant_records(msa.rows, weights, msa.centre)
     out = {'records': {'ref': ref_records}}
-    if ref_records <= sum(w for a, w in weights if w > 0 and a != msa.centre):
+    if (1 - min_gain) * ref_records <= sum(w for a, w in weights if w > 0 and a != msa.centre):
         out['skipped'] = 'fewest'
         return msa, out
     mid = out['medoid'] = medoid_of(alleles)
@@ -349,17 +368,17 @@ def _parsimonious(msa, alleles, fragments, align, max_cells, min_share, scores):
         out['skipped'] = e.status
         return msa, out
     medoid_records = out['records']['medoid'] = variant_records(other.rows, weights, msa.centre)
-    return (other if medoid_records < ref_records else msa), out
+    return (other if medoid_records < (1 - min_gain) * ref_records else msa), out
 
 
 def realign_package(pkg, abpoa='abpoa', max_cells=MAX_CELLS, workdir=None, scores=SCORES, min_share=MIN_SHARE,
-                    centre='ref', max_work=MAX_WORK, max_excess=MAX_EXCESS):
+                    centre='ref', max_work=MAX_WORK, max_excess=MAX_EXCESS, min_gain=MIN_GAIN):
     """The star alignment of one region package, as the dict described in the module docstring.
     `min_share` 0 or None aligns the region however little its alleles share with the centre; `max_work` 0 or
     None sets no limit on its work. `centre` 'parsimony' builds the star around the reference allele, and
-    where medoid_too, around the medoid as well, and keeps the more parsimonious (_parsimonious); `max_excess`
-    applies to 'ref' only. A failure of the machine gives one of the statuses MACHINE_FAILURES, which `run`
-    does not record."""
+    where medoid_too, around the medoid as well, and keeps the medoid's where it holds at least `min_gain` fewer
+    records (_parsimonious); `max_excess` applies to 'ref' only. A failure of the machine gives one of the
+    statuses MACHINE_FAILURES, which `run` does not record."""
     t0 = time.time()
     res = {'id': pkg['id'], 'method': 'medoid_star'}
     alleles = [(a['id'], a['seq'], a['weight']) for a in pkg['alleles']]
@@ -376,7 +395,7 @@ def realign_package(pkg, abpoa='abpoa', max_cells=MAX_CELLS, workdir=None, score
             msa = star_msa(alleles, fragments, align=align, centre=centre_of(pkg, centre, max_excess),
                            max_cells=max_cells, min_share=min_share, scores=scores)
             if medoid_too(pkg, centre, max_cells, max_work):
-                msa, choice = _parsimonious(msa, alleles, fragments, align, max_cells, min_share, scores)
+                msa, choice = _parsimonious(msa, alleles, fragments, align, max_cells, min_share, scores, min_gain)
             elif centre == 'parsimony' and centre_of(pkg, centre) is not None:
                 choice = {'records': {'ref': variant_records(msa.rows, [(a[0], a[2]) for a in alleles],
                                                              msa.centre)}, 'skipped': 'too_big'}

@@ -417,7 +417,8 @@ being the member's sequence with gap characters (`-`) inserted. A column is one 
 the rows.
 
 The method is a star alignment around one allele, called the centre: the region's reference allele,
-where it has one, or else a medoid, the allele with the least weighted distance to the others:
+where it has one, or else a medoid, the allele with the least weighted distance to the others
+(`--centre parsimony` chooses between the two, see Choosing the centre by parsimony):
 1. Centre. The reference allele, or the medoid of the alleles (see The centre).
 2. Pairwise alignment. Every other allele is aligned to the centre alone.
 3. Left normalisation. Each pairwise alignment's indels are moved as far left as they can go without
@@ -520,6 +521,92 @@ errors around the medoid, so no threshold does better than none for the VCF: at 
 the medoid would keep 1,259 regions and 177 of the blow-ups, and the regions back on the reference
 would take back 11,231 of the dipcall errors and 1,204 of GIAB's. There is therefore no limit by
 default; `--max-excess` remains for a smaller graph at that cost.
+
+### Choosing the centre by parsimony
+
+`--centre parsimony` builds the star around the reference allele, as `--centre ref` does, and where
+the medoid is another allele, around the medoid too, and keeps the medoid's where its alleles hold
+at least `--min-gain` (a tenth, `realign.MIN_GAIN`) fewer records against the reference allele. An
+allele's records are the maximal runs of columns in which its row differs from the reference
+allele's, the columns where both rows have a gap left out: one run for each difference in their
+projected pairwise alignment, about one record each in a VCF decomposed against the reference. Each
+allele's records count once for every haplotype that carries it. Every other allele differs from the
+reference allele in one record at least, in any star, so where the reference allele's star holds too
+few for any star to hold a tenth fewer, the medoid is not sought. Nor is the medoid's star built
+where more than 0.1 of the haplotypes' bases lie beyond the reference allele's length (`excess`,
+`realign.PARSIMONY_EXCESS`), the regions in which the 30-way graph's VCF was worse around the medoid
+(see The centre).
+
+Around the reference allele, each allele's alignment to it is optimal under the scores, and usually
+holds the fewest records too, but not in every tandem repeat. The scores make a substitution cheaper
+than a gap as long as a copy of the repeat's unit, so an allele whose copies are arranged otherwise
+than the reference allele's, with a copy in one place that the reference allele lacks and without
+one that it has in another, aligns best to it base by base, as many substitutions where one
+insertion and one deletion would do. Around a medoid that carries both copies, that allele aligns to
+it with one deletion and the reference allele with another, so their composed alignment keeps the
+units in register.
+
+At chr21:11.99M in the HPRC CHM13 graph, a VNTR of 638 bp units with a 4,228 bp reference allele,
+85 of the 459 haplotypes carry such an allele, as long as the reference allele. Around the reference
+allele each of them holds 206 records, 170 of them substitutions; around the medoid, of 4,864 bp, a
+630 bp insertion, a 644 bp deletion and 18 records more. The 233 haplotypes that carry the extra
+copy hold 24 records each around either centre:
+
+| centre | variant columns | records | of them substitutions | edited columns against the reference allele |
+|---|---|---|---|---|
+| reference allele | 2,913 | 23,322 | 19,396 | 177,184 |
+| medoid | 3,649 | 7,463 | 6,262 | 267,007 |
+
+The medoid's star edits more columns against the reference allele, since a copy inserted or deleted
+whole is some 640 columns where a copy aligned base by base is a few dozen substitutions, but it
+holds a third of the records. nov9's VCF, built around the reference allele, has 13,850 more dipcall errors
+there (231 samples) than an earlier build of the same alleles around the same medoid, nearly all
+false positives, and `--centre parsimony` keeps the medoid's star.
+
+Fewer records do not explain every region whose VCF was better around the medoid. At chr20:26.30M,
+an alpha satellite of 171 bp units with a 36,549 bp reference allele and 462 haplotypes, nov9 has
+29,989 more errors than the earlier build (from nearly the same alleles: 313 against 314), but the
+medoid's star holds more records, 312,408 against 240,886, more variant columns, 68,532 against
+54,885, and more edited columns, and `--centre parsimony` keeps the reference allele's. Of the other
+measures compared below, only the distinct records (by position and alleles) and the edits of the
+column consensus favour the medoid there, and each of them takes the medoid in thousands of
+regions with more errors in all.
+
+To choose the rule, every region of chr12, chr20 and chr21 of the HPRC CHM13 graph (91,017) was
+aligned around its medoid as well, where that is another allele and its star could be built
+(41,108), and its dipcall errors in nov9, around the reference allele, compared with those of the
+earlier build in the 39,907 of them whose alleles and weights were the same and whose centre there
+was the same medoid. Taking the medoid's star where each rule takes it:
+
+| rule | regions on the medoid | records | dipcall errors | regions with fewer / more | errors outside chr21:11.99M |
+|---|---|---|---|---|---|
+| fewer records | 1,280 | -294,715 | -10,114 | 95 / 126 | +3,736 |
+| fewer records, excess at most 0.1 | 1,241 | -251,892 | -16,114 | 85 / 113 | -2,264 |
+| a twentieth fewer | 419 | -268,005 | -16,546 | 55 / 55 | -2,696 |
+| a tenth fewer | 238 | -236,764 | -17,920 | 36 / 36 | -4,070 |
+| a tenth fewer, excess at most 0.1 (the default) | 227 | -200,419 | -20,282 | 32 / 32 | -6,432 |
+| a fifth fewer | 86 | -181,156 | -15,425 | 17 / 18 | -1,575 |
+
+The records are those of all 91,017 regions (57,443,756 around the reference allele) and the errors
+those of the regions compared. The regions whose medoid's star holds fewer records, but not a tenth
+fewer, are worse around the medoid in each band of that gain: by 3,995 errors below 2%, 2,437 from
+2% to 5% and 1,374 from 5% to 10%, and better above it. The excess limit keeps 11 regions on the
+reference allele, which would have had 2,362 more errors around the medoid, 2,394 of them at
+chr12:34.57M (excess 0.31). The default takes the medoid in 0.25% of the regions, all of them
+tandem repeats, at a median gain of 17%. Of the 39,907 regions compared, 825 have 97,239 fewer errors
+around the reference allele and 380 have 56,625 more: the default gives back 2,998 of the first and
+takes back 23,280 of the second. Its regions with fewer errors are as many as those with more, so
+most of its gain is a few regions', and 13,850 of it chr21:11.99M's. The other measures, each
+taking the medoid where it is lower: variant columns (+20,745 errors), sites (-4,088), alleles per
+site (+1,102), the column consensus's edits (+31,756), sum of pairs (+25,972), bases of the graph
+(+2,830), substitution records (+3,079), edited columns against the reference allele (+626) and
+distinct records (+14,331).
+
+Building both stars costs time. On these chromosomes the default builds the medoid's star in 35,961
+regions, whose alignments fill about four fifths as many cells as the reference allele's stars of
+all 91,017, and the medoid's stars of all 41,108 took 1.25 times the seconds of nov9's realignment
+of the three chromosomes: `--centre parsimony` takes about twice as long as `--centre ref`, in the
+same memory, since the two stars are built one after the other.
 
 ### The medoid
 
