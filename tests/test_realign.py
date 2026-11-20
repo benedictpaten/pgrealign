@@ -49,6 +49,35 @@ class TestRealignPackage(unittest.TestCase):
         longer = [('a1', 'GATTACA' + unit * 6 + 'CCGG', 1)] + alleles[1:]
         self.assertEqual(realign.realign_package(pkg('R', longer, ref='a1'))['centre'], 'a1')
 
+    def test_parsimony_centre(self):
+        # a2 and a3 each differ from a1, the reference allele, in two substitutions, and a3 in a third: nine records
+        # for a2's five haplotypes and a3's four, around a1 or around a2, the medoid, so a1's star is kept
+        rng = random.Random(3)
+        x = ''.join(rng.choice('ACGT') for _ in range(300))
+        snp = lambda s, i: s[:i] + 'ACGT'[('ACGT'.index(s[i]) + 1) % 4] + s[i + 1:]
+        a2 = snp(snp(x, 60), 150)
+        alleles = [('a1', x, 1), ('a2', a2, 5), ('a3', snp(a2, 240), 4)]
+        p = pkg('S', alleles, ref='a1')
+        r = realign.realign_package(p, centre='parsimony')
+        self.assertEqual((r['status'], r['centre']), ('ok', 'a1'))
+        self.assertEqual(r['parsimony'], {'records': {'ref': 5 * 2 + 4 * 3, 'medoid': 22}, 'medoid': 'a2'})
+        self.assertEqual(r['rows'], realign.realign_package(p)['rows'])
+        self.assertNotIn('parsimony', realign.realign_package(p))
+        # where the medoid is the reference allele, one star; with no reference allele, the medoid's, as for 'ref'
+        r = realign.realign_package(pkg('S', alleles, ref='a2'), centre='parsimony')
+        self.assertEqual((r['centre'], r['parsimony']),
+                         ('a2', {'records': {'ref': 6}, 'medoid': 'a2', 'skipped': 'same'}))
+        r = realign.realign_package(pkg('S', alleles), centre='parsimony')
+        self.assertEqual(r['centre'], 'a2')
+        self.assertNotIn('parsimony', r)
+        # in test_reference_centre's region, a2 and a3 each differ from a1 in one record, the fewest any star can
+        # hold, so the medoid is not sought
+        unit = 'ACGTTGCAAGT'
+        repeat = [('a1', 'GATTACA' + unit * 2 + 'CCGG', 1), ('a2', 'GATTACA' + unit * 4 + 'CCGG', 5),
+                  ('a3', 'GATTACA' + unit * 5 + 'CCGG', 4)]
+        r = realign.realign_package(pkg('R', repeat, ref='a1'), centre='parsimony')
+        self.assertEqual((r['centre'], r['parsimony']), ('a1', {'records': {'ref': 9}, 'skipped': 'fewest'}))
+
     def test_statuses(self):
         two = [('a1', 'ACGTACGT', 1), ('a2', 'ACGTTCGT', 1)]
         # 64 cells unbanded, over max_cells, and banded too (the band spans the whole row), over 7 x 5
@@ -80,6 +109,46 @@ class TestEstimates(unittest.TestCase):
         self.assertIsNone(realign.centre_of(pkg('R', [('a1', 'ACGT', 0), ('a2', 'ACGA', 3)], ref='a1')))
         with self.assertRaises(ValueError):
             realign.centre_of(pkg('R', alleles), 'longest')
+
+    def test_parsimony_estimates(self):
+        # with 'parsimony', the reference allele's star and, within the limits that admit it, the medoid's: the
+        # work of both, the memory of the larger, and the refusals of the reference's alone
+        p = pkg('R', [('r', 'A' * 10000, 1), ('x', 'C' * 100000, 2), ('y', 'G' * 30000, 1)], ref='r')
+        self.assertEqual(realign.centre_of(p, 'parsimony'), 'r')
+        self.assertEqual(realign.centre_of(p, 'parsimony', max_excess=0.1), 'r')     # max_excess is for 'ref'
+        ref = dict(max_excess=None)
+        ref_work, medoid_work = realign.work(p, **ref), realign.work(p, 'medoid')
+        self.assertTrue(realign.medoid_too(p))
+        self.assertEqual(realign.work(p, 'parsimony'), ref_work + medoid_work)
+        self.assertEqual(realign.seconds(p, 'parsimony'),
+                         realign.REGION_SECONDS + (ref_work + medoid_work) / realign.CELLS_PER_SECOND)
+        self.assertEqual(realign.peak_bytes(p, centre='parsimony'),
+                         max(realign.peak_bytes(p, **ref), realign.peak_bytes(p, centre='medoid')))
+        self.assertEqual(realign.largest_alignment(p, 'parsimony'), realign.largest_alignment(p, **ref))
+        # the medoid's star only where its own work keeps within max_work: each star is held to it on its own
+        self.assertGreater(medoid_work, ref_work)
+        self.assertTrue(realign.medoid_too(p, max_work=medoid_work))
+        self.assertGreater(realign.work(p, 'parsimony', max_work=medoid_work), medoid_work)
+        self.assertFalse(realign.medoid_too(p, max_work=medoid_work - 1))
+        self.assertEqual(realign.work(p, 'parsimony', max_work=medoid_work - 1), ref_work)
+        self.assertEqual(realign.peak_bytes(p, centre='parsimony', max_work=medoid_work - 1),
+                         realign.peak_bytes(p, **ref))
+        # and the reference's star alone decides which regions are refused, as for 'ref'
+        for limit in (ref_work, ref_work - 1, medoid_work, 10 ** 15):
+            self.assertEqual(realign.refusal(p, centre='parsimony', max_work=limit),
+                             realign.refusal(p, max_work=limit, **ref))
+        self.assertIsNone(realign.refusal(p, centre='parsimony', max_work=ref_work))
+        # and its largest alignment within MAX_ALIGNMENT times max_cells: around the medoid, any allele may be the
+        # centre, and 100 kb x 30 kb is over 7 x 4 x 10^8 cells, where the reference's star keeps within it
+        cells = 400_000_000
+        self.assertGreater(realign.largest_alignment(p, 'medoid', cells), realign.MAX_ALIGNMENT * cells)
+        self.assertIsNone(realign.refusal(p, cells, 'parsimony'))
+        self.assertFalse(realign.medoid_too(p, max_cells=cells))
+        self.assertEqual(realign.work(p, 'parsimony', cells), realign.work(p, 'ref', cells, None))
+        # one star, as for 'ref', with no reference allele, and never with another centre
+        self.assertFalse(realign.medoid_too(pkg('R', [('x', 'ACGT', 1), ('y', 'ACGA', 1)])))
+        self.assertFalse(realign.medoid_too(p, 'ref'))
+        self.assertFalse(realign.medoid_too(p, 'medoid'))
 
     def test_placed_fragments_are_not_aligned(self):
         # a fragment that occurs in an allele takes that allele's row and is never aligned, so it adds no work
@@ -141,6 +210,79 @@ class TestEstimates(unittest.TestCase):
         self.assertEqual(realign.largest_alignment(q, **ref), 1000 * 100000)   # x to r, unbanded
         self.assertEqual(realign.peak_bytes(q, **ref), memory.BASE + realign.KMER_BYTES * 102200 +
                          realign.COMPARE_BYTES * 100000 + 20 * 1000 * 100000)    # x to r, unbanded
+
+
+class TestParsimony(unittest.TestCase):
+    """Which of the two stars 'parsimony' keeps, with stars made up here (no abPOA: abpoa='false' would fail any
+    alignment)."""
+
+    def setUp(self):
+        self.p = pkg('P', [('r', 'AACGTT', 1), ('m', 'ATCGTA', 3), ('x', 'ATCGTCA', 1)], ref='r')
+        # around the reference r, m and x each differ from it in two places, the two ends of the stretch they
+        # share; around the medoid m, each in one longer stretch, as one record
+        self.stars = {'r': {'r': 'AACGTT-', 'm': 'ATCGTA-', 'x': 'ATCGTCA'},
+                      'm': {'r': 'AACGTT------', 'm': 'A-----TCGTA-', 'x': 'A-----TCGTCA'}}
+        self.built = []
+
+    def fake(self, alleles, fragments=(), align=None, centre=None, **kw):
+        self.built.append(centre)
+        return star.StarMSA(dict(self.stars[centre]), centre, 0, 0, 0)
+
+    def run_with(self, star_msa, medoid='m', **kw):
+        with mock.patch.object(realign, 'star_msa', side_effect=star_msa), \
+                mock.patch.object(realign, 'medoid_of', return_value=medoid):
+            return realign.realign_package(self.p, abpoa='false', centre='parsimony', **kw)
+
+    def test_fewer_records_win(self):
+        r = self.run_with(self.fake)
+        self.assertEqual((r['status'], r['centre'], r['rows']), ('ok', 'm', self.stars['m']))
+        self.assertEqual(r['parsimony'], {'records': {'ref': 3 * 2 + 2, 'medoid': 3 + 1}, 'medoid': 'm'})
+        self.assertEqual(self.built, ['r', 'm'])
+
+    def test_the_reference_wins_a_tie(self):
+        self.stars['m'] = self.stars['r']
+        r = self.run_with(self.fake)
+        self.assertEqual((r['centre'], r['parsimony']['records']), ('r', {'ref': 8, 'medoid': 8}))
+
+    def test_one_star_where_the_medoid_is_the_reference(self):
+        r = self.run_with(self.fake, medoid='r')
+        self.assertEqual((r['centre'], r['parsimony'], self.built),
+                         ('r', {'records': {'ref': 8}, 'medoid': 'r', 'skipped': 'same'}, ['r']))
+
+    def test_no_medoid_where_the_reference_holds_the_fewest(self):
+        # with one record per haplotype of each other allele, no star can hold fewer: the medoid is not sought
+        self.stars['r'] = {'r': 'AACGTT-', 'm': 'ATCGTT-', 'x': 'ATCGTCA'}    # m one record, x two
+        self.p['alleles'][2]['weight'] = 0                                     # and x counts for nothing
+        with mock.patch.object(realign, 'medoid_of', side_effect=AssertionError('sought')):
+            with mock.patch.object(realign, 'star_msa', side_effect=self.fake):
+                r = realign.realign_package(self.p, abpoa='false', centre='parsimony')
+        self.assertEqual((r['centre'], r['parsimony'], self.built), ('r', {'records': {'ref': 3}, 'skipped': 'fewest'},
+                                                                     ['r']))
+
+    def test_the_reference_where_the_medoid_has_no_star(self):
+        # refused for the region's sake, the medoid's star is not kept; failed by the machine, the region is not
+        # recorded (MACHINE_FAILURES), as when the reference's star fails so
+        for exc, status in ((star.NotHomologous('unrelated'), 'not_homologous'),
+                            (star.AlignerFailed('exited with 1'), 'aligner_failed'),
+                            (star.ReservationRefused('posix_memalign fail'), 'reservation_refused'),
+                            (star.AlignerKilled('signal 9'), 'aligner_killed')):
+            def built(alleles, fragments=(), align=None, centre=None, **kw):
+                if centre == 'm':
+                    raise exc
+                return self.fake(alleles, fragments, align, centre)
+            r = self.run_with(built)
+            if status in realign.MACHINE_FAILURES:
+                self.assertEqual(r['status'], status)
+            else:
+                self.assertEqual((r['status'], r['centre'], r['parsimony']),
+                                 ('ok', 'r', {'records': {'ref': 8}, 'medoid': 'm', 'skipped': status}))
+        # and over the limits, it is not built: around a medoid, not known in advance, x, the longest, stands in,
+        # and its star's work, 7 x 6 x 2 cells, is over that of the reference's, 6 x 6 + 6 x 7
+        self.built = []
+        self.assertEqual((realign.work(self.p, 'ref', max_excess=None), realign.work(self.p, 'medoid')), (78, 84))
+        r = self.run_with(self.fake, max_work=78)
+        self.assertEqual((r['centre'], r['parsimony'], self.built), ('r', {'records': {'ref': 8}, 'skipped': 'too_big'},
+                                                                     ['r']))
 
 
 class TestHomology(unittest.TestCase):

@@ -159,7 +159,7 @@ Options that control the same thing in several stages:
 | `--drop-sample`, `--keep-all-samples` | prepare, run | the samples `prepare` removes ([Dropped samples](#dropped-samples)) |
 | `--scores` | realign, qc, run | abPOA's scores |
 | `--max-cells` | realign, qc, run | the largest pairwise alignment run unbanded, and through it the largest alignment of any kind, 7 times as many cells, beyond which `realign` leaves a region as it is and `qc` skips a pair ([Limits](#limits), [qc](#qc)) |
-| `--centre`, `--max-excess` | realign, run | the allele each star is built around: the reference allele, or the medoid; with `--max-excess`, the medoid where too much of the haplotypes' sequence lies beyond the reference allele's length ([realign](#realign)) |
+| `--centre`, `--max-excess` | realign, run | the allele each star is built around: the reference allele, or the medoid; with `--max-excess`, the medoid where too much of the haplotypes' sequence lies beyond the reference allele's length; with `--centre parsimony`, whichever of the two gives the alleles fewer records against the reference allele ([realign](#realign)) |
 | `--max-work` | realign, run | the largest region `realign` aligns, by the cells its alignments fill in all, decided from its package ([Limits](#limits)) |
 | `--min-share` | realign, run | the least share of an allele's 15-mers with the centre for its region to be aligned ([Limits](#limits)) |
 | `--max-internal-bp` | extract, run | the longest anchor-free walk `extract` records ([Statuses](#statuses)) |
@@ -371,7 +371,14 @@ of positive weight, and around the medoid of its alleles otherwise. `--max-exces
 where more than that share of the haplotypes' bases lie beyond the reference allele's length; by
 default (`realign.MAX_EXCESS`, None, and 0 on the command line) it is off, since the VCF is more
 accurate around the reference. `--centre medoid` takes the medoid always
-([method.md](method.md#the-centre)).
+([method.md](method.md#the-centre)). `--centre parsimony` builds the star around the reference allele
+and, where the medoid is another allele, around the medoid too, and keeps the one whose alleles hold
+fewer records against the reference allele, each allele's maximal runs of columns that differ from the
+reference's row counted once per haplotype that carries it, and the reference's on a tie
+([method.md](method.md#choosing-the-centre-by-parsimony)). It aligns the regions that `--centre ref`
+aligns: the medoid's star is built only where it keeps within the limits that admit the reference's,
+each star's work within `--max-work` on its own, so that a region may take up to twice it
+([Limits](#limits)), and `--max-excess` does not apply.
 
 It aligns the packages whose status is `ok` and that `--select` selects; its summary lists the rest
 of its shard ([below](#parallel-runs-and-resuming)) as `skipped`, by status or as `not_selected`.
@@ -941,6 +948,7 @@ file, including gzip files concatenated with `cat`.
 | `banded_pairs` | `ok` | the number of alignments to the centre that would exceed `--max-cells` unbanded, aligned instead with a band and seeded ([limits](#limits)) |
 | `seeded_pairs` | `ok` | the number of those for which the seeded alignment scored higher and was kept |
 | `refined_windows` | `ok` | the number of windows in which refinement improved a kept seeded alignment |
+| `parsimony` | `ok`, with `--centre parsimony` where the region has a reference allele | `records`, `{"ref": n, "medoid": m}`, the alleles' records against the reference allele in each star, the medoid's where it was built; `medoid`, the medoid's id, where it was sought; and `skipped`, why the medoid's star was not built or not compared: `fewest` (the reference allele's star holds one record per haplotype of every other allele, the fewest any star can), `same` (the medoid is the reference allele), `too_big`, `not_homologous` or `aligner_failed` |
 | `message` | not `ok` | why the region was not aligned |
 | `projected_from` | after `project` | the number of rows in the union's MSA |
 

@@ -338,6 +338,20 @@ def medoid(seqs, weights, k=K, max_work=MEDOID_WORK, counts=None):
     return best[1]
 
 
+def alignable(seq):
+    """`seq` as the aligner and the centre's choice see it: upper-cased, with any character other than A, C,
+    G, T or N as N."""
+    seq = seq.upper()
+    return seq if set(seq) <= _ALIGNABLE else ''.join(c if c in _ALIGNABLE else 'N' for c in seq)
+
+
+def medoid_of(alleles, k=K, counts=None):
+    """The id of the allele star_msa takes as the centre when it is not given one (`medoid`). `alleles` are
+    (id, sequence, weight), as star_msa takes them; `counts` their alignable sequences' kmer_counts, if made
+    already."""
+    return alleles[medoid([alignable(a[1]) for a in alleles], [a[2] for a in alleles], k, counts=counts)][0]
+
+
 def share(a, b):
     """The distinct k-mers that two kmer_counts `a` and `b` share, as a fraction of the distinct k-mers of
     whichever has fewer, or None if either has none. A sequence that is the other plus an insertion, or
@@ -658,3 +672,29 @@ def star_msa(alleles, fragments=(), align=None, centre=None, k=K, max_cells=None
         if r.replace('-', '') != orig[m]:
             raise ValueError('row %s does not spell its sequence' % m)
     return StarMSA(rows, cid, slot_alignments, len(exact), len(unplaced), len(big), seeded, refined)
+
+
+# ----------------------------------------------------------------------------- comparing stars
+
+def records(ref_row, row):
+    """The records of `row` against `ref_row`, two rows of one alignment: the maximal runs of columns in which
+    they differ, the columns in which both have a gap left out, so that each run is one difference in their
+    pairwise alignment, as a VCF decomposed against the reference holds one record for it."""
+    if row == ref_row:
+        return 0
+    n, run = 0, False
+    for x, y in zip(ref_row, row):
+        if x == y:
+            if x != '-':
+                run = False
+        elif not run:
+            n, run = n + 1, True
+    return n
+
+
+def variant_records(rows, alleles, ref):
+    """The records (`records`) of every allele against the reference allele `ref` in the alignment `rows`
+    {id: row}, each counted once for every haplotype that carries it: the sum over `alleles`, (id, weight),
+    of weight times the allele's records. Fragments, and alleles of weight 0 or less, count for nothing."""
+    ref_row = rows[ref]
+    return sum(w * records(ref_row, rows[a]) for a, w in alleles if w > 0 and a != ref)

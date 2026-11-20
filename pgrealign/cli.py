@@ -317,7 +317,9 @@ def main(argv=None):
     c.add_argument('--abpoa', default='abpoa', help='abPOA binary [abpoa on PATH]')
     c.add_argument('--centre', choices=CENTRES, default='ref',
                    help="the allele every other is aligned to: the reference allele, where the region has one and "
-                        "--max-excess allows, or the medoid [ref]")
+                        "--max-excess allows, or the medoid; or, with parsimony, the star around each where the "
+                        "region has a reference allele, keeping the one whose alleles hold fewer records against "
+                        "it, counted once per haplotype, the reference's on a tie [ref]")
     c.add_argument('--max-excess', type=float, default=MAX_EXCESS or 0, metavar='FRACTION',
                    help="with --centre ref, take the medoid instead where more than this share of the haplotypes' "
                         "bases lie beyond the reference allele's length, as where most carry an expansion it lacks; "

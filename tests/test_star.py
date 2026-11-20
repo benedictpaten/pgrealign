@@ -91,6 +91,33 @@ class TestPieces(unittest.TestCase):
     def test_respell(self):
         self.assertEqual(star.respell('A-CN-G', 'ARYG'), 'A-RY-G')
 
+    def test_medoid_of(self):
+        # the centre star_msa takes when given none, from upper-cased sequences
+        alleles = [('a', 'ACGTACGTAC' * 3, 1), ('b', 'acgtacgtac' * 4, 1), ('c', 'ACGTACGTAC' * 5, 1),
+                   ('d', 'TTTTGGGGCC' * 3, 1)]
+        self.assertEqual(star.medoid_of(alleles, k=5), 'b')
+        self.assertEqual(star.star_msa(alleles, align=FakeAligner(), k=5).centre, 'b')
+        self.assertEqual(star.medoid_of([(a, s, w) for a, s, w in alleles[:3]] + [('d', 'TTTTGGGGCC' * 3, 10)], k=5),
+                         'd')
+
+    def test_records(self):
+        self.assertEqual(star.records('ACGT', 'ACGT'), 0)
+        self.assertEqual(star.records('ACGT', 'ACTT'), 1)                 # a substitution
+        self.assertEqual(star.records('ACGTACGT', 'AGTTACGA'), 2)         # two adjacent ones are one record
+        self.assertEqual(star.records('AC--GT', 'ACTTGT'), 1)             # an insertion
+        self.assertEqual(star.records('ACGT', 'A--T'), 1)                 # a deletion
+        self.assertEqual(star.records('A-CG', 'GTCG'), 1)                 # a substitution next to an insertion
+        self.assertEqual(star.records('ACGT-', '-CGTA'), 2)
+        # a column where both rows have a gap, another row's insertion, neither cuts a record nor makes one
+        self.assertEqual(star.records('A-C-GT', 'G-T-GT'), 1)
+        self.assertEqual(star.records('A-CGT', 'A-CGT'), 0)
+
+    def test_variant_records(self):
+        rows = {'r': 'ACGT', 'a': 'ACTT', 'b': 'TCTT', 'z': 'TTTT', 'f': 'GG--'}
+        # a: one record, b: two; z, of weight 0, and the fragment f, which is not an allele, count for nothing
+        self.assertEqual(star.variant_records(rows, [('r', 1), ('a', 3), ('b', 2), ('z', 0)], 'r'), 3 * 1 + 2 * 2)
+        self.assertEqual(star.variant_records(rows, [('r', 5)], 'r'), 0)
+
 
 class FakeAligner:
     """Pads every sequence with gaps on the right: a valid, if poor, global alignment."""

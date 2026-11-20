@@ -16,6 +16,17 @@ than around the medoid; `max_excess` takes the medoid where more than that share
 lie beyond the reference allele's length (`excess`), but by default it is off, since the VCF is more
 accurate around the reference there too (MAX_EXCESS). `centre` 'medoid' keeps the medoid always.
 
+`centre` 'parsimony' builds the star around the reference allele, as 'ref' without `max_excess`, and where
+the medoid is another allele, around the medoid too, and keeps the one whose alleles hold fewer records
+against the reference allele (star.variant_records): each allele's maximal runs of columns that differ from
+the reference's row, about the records a VCF decomposed against the reference holds for it, counted once
+per haplotype that carries it. The reference's star is kept on a tie. Its optimal pairwise alignments
+usually hold the fewest, but in a tandem repeat they can place each allele's copies of the unit out of
+register with the reference's, so that what one indel around the medoid describes becomes many
+substitutions (docs/method.md). The medoid's star is built only within the limits that admit the
+reference's (`medoid_too`), so 'parsimony' aligns the regions 'ref' aligns, and is not kept where it cannot
+be built for the region's sake (not_homologous, aligner_failed).
+
 **Limits.** Every limit is a size of the alignment, as a window and a band are in cactus's own, never a
 size of the machine. abPOA's alignment of two sequences fills a matrix of cells, one per pair of their
 bases, at 20 bytes a cell, so `max_cells` cells take about 8 GB. An alignment to the centre whose matrix
@@ -59,7 +70,12 @@ would take (memory.schedule_seconds), so that a caller can ask for them.
 - `id`, `method` ('medoid_star'), `status`, `seconds`;
 - for `ok`: `centre` (the centre allele's id), `rows` {member id: row}, one per allele and fragment,
   all the same length, `columns`, `slot_alignments`, `fragments_exact`, `fragments_aligned`,
-  `banded_pairs`, `seeded_pairs` and `refined_windows` (star.StarMSA);
+  `banded_pairs`, `seeded_pairs` and `refined_windows` (star.StarMSA), of the star kept; and with
+  `centre` 'parsimony', where the region has a reference allele, `parsimony`: `records` {'ref': n,
+  'medoid': m}, the two stars' variant_records, the medoid's where it was built; `medoid`, the medoid's id,
+  where it was sought; and `skipped`, why its star was not built or not compared: 'fewest' (the reference's
+  star holds one record per haplotype of each other allele, the fewest any can), 'same' (the medoid is the
+  reference allele), 'too_big' (medoid_too), 'not_homologous' or 'aligner_failed';
 - otherwise `message`.
 """
 import collections
@@ -71,11 +87,12 @@ import os
 import time
 
 from . import memory
-from .star import Abpoa, RealignError, SCORES, TooBig, band_width, star_msa
+from .star import (Abpoa, AlignerFailed, AlignerKilled, NotHomologous, RealignError, ReservationRefused, SCORES,
+                   TooBig, band_width, medoid_of, star_msa, variant_records)
 
 MAX_CELLS = 450_000_000
 MAX_TOTAL_BP = 40_000_000     # choosing the centre holds every allele's k-mer counts: KMER_BYTES per base
-CENTRES = ('ref', 'medoid')
+CENTRES = ('ref', 'medoid', 'parsimony')
 ESTIMATE_PAGE = memory.ESTIMATE_PAGE     # the page size peak_bytes assumes: macOS on Apple silicon's, 4x Linux's
 # Of the 1.12 million regions realigned in the HPRC CHM13 graph, MIN_SHARE 0.5 refuses 2,794 (0.6% of their
 # span): every region of the chrX and chr15 loci where unrelated or inverted alleles had been threaded
@@ -144,18 +161,35 @@ def excess(pkg, aid):
 
 
 def centre_of(pkg, centre='ref', max_excess=MAX_EXCESS):
-    """The id of the allele the star of `pkg` is built around: its reference allele when `centre` is 'ref', it
-    has one of positive weight, and no more than `max_excess` of the haplotypes' bases lie beyond its length
-    (`excess`; None sets no limit); otherwise None, for the medoid."""
+    """The id of the allele the star of `pkg` is built around: its reference allele when `centre` is 'ref' or
+    'parsimony' and it has one of positive weight, and, for 'ref', no more than `max_excess` of the haplotypes'
+    bases lie beyond its length (`excess`; None sets no limit); otherwise None, for the medoid. With
+    'parsimony', the star around the medoid may be kept instead (medoid_too, realign_package)."""
     if centre not in CENTRES:
         raise ValueError('centre must be one of %s, not %r' % (', '.join(CENTRES), centre))
-    if centre == 'ref':
+    if centre in ('ref', 'parsimony'):
         for a in pkg['alleles']:
             if a['id'] == pkg.get('ref') and a['weight'] > 0:
-                if max_excess is not None and excess(pkg, a['id']) > max_excess:
+                if centre == 'ref' and max_excess is not None and excess(pkg, a['id']) > max_excess:
                     return None
                 return a['id']
     return None
+
+
+def medoid_too(pkg, centre='parsimony', max_cells=MAX_CELLS, max_work=MAX_WORK):
+    """Whether realign_package builds the star of `pkg` around its medoid as well as around its reference
+    allele, decided from the package alone: with `centre` 'parsimony', where the region has a reference allele
+    (centre_of), and the medoid's star keeps within the limits that admit the reference's, its largest
+    alignment within MAX_ALIGNMENT times `max_cells` cells (largest_alignment) and its work within `max_work`
+    (0 or None: no limit). Each star is held to `max_work` on its own, so a region takes up to twice it in all:
+    the regions where the reference's star fails most are among the largest, as at chr20:26.30M, whose stars
+    take about 1.4 x 10^11 cells each. The medoid is not known before the region runs, so the estimates take
+    any allele as it, and this does not ask whether it is the reference allele."""
+    if centre != 'parsimony' or centre_of(pkg, centre) is None:
+        return False
+    if largest_alignment(pkg, 'medoid', max_cells) > MAX_ALIGNMENT * max_cells:
+        return False
+    return not max_work or work(pkg, 'medoid', max_cells) <= max_work
 
 
 def _placed(frag, side, alleles):
@@ -192,17 +226,21 @@ def _slots(c, others):
     return sorted((n - c for n in others if n > c), reverse=True)
 
 
-def work(pkg, centre='ref', max_cells=MAX_CELLS, max_excess=MAX_EXCESS):
+def work(pkg, centre='ref', max_cells=MAX_CELLS, max_excess=MAX_EXCESS, max_work=MAX_WORK):
     """About how many cells of dynamic-programming matrices aligning `pkg` fills, the measure of its run time
     (docs/method.md): each allele and fragment aligned to the centre, the product of the two lengths, or
     long_pair_cells where that exceeds `max_cells`; and the insertion slots, each member's excess over the
     centre aligned, banded, to the longest such (_slots). Around a medoid, which is not known in advance,
-    the longest allele stands in for it, and the slots, like choosing the medoid, are not counted."""
+    the longest allele stands in for it, and the slots, like choosing the medoid, are not counted. With
+    `centre` 'parsimony', the reference allele's star, and the medoid's too where medoid_too, under
+    `max_work`, builds it, so that it may exceed `max_work`, up to twice it."""
     c, others, cid = _centre_and_others(pkg, centre, max_excess)
     total = sum(pair_cells(c, n, max_cells) for n in others if c and n)
     if cid is not None:
         slots = _slots(c, others)
         total += sum(banded_cells(slots[0], e) for e in slots[1:])
+    if medoid_too(pkg, centre, max_cells, max_work):
+        total += work(pkg, 'medoid', max_cells)
     return total
 
 
@@ -210,7 +248,9 @@ def largest_alignment(pkg, centre='ref', max_cells=MAX_CELLS, max_excess=MAX_EXC
     """About how many cells the largest of `pkg`'s alignments fills: its alignments to the centre
     (pair_cells), and around a reference centre the slots' as `work` takes them. Around a medoid, which is
     not known in advance, any two of its alleles and fragments in either order, and the longest sequence
-    banded against one of the same length, the bound taken for the slots."""
+    banded against one of the same length, the bound taken for the slots. With `centre` 'parsimony', the
+    reference allele's star's, so that it refuses the regions 'ref' refuses; the medoid's star is built
+    only where it keeps within the same limit (medoid_too)."""
     c, others, cid = _centre_and_others(pkg, centre, max_excess)
     if cid is None:
         aligned = sorted(set([c] + others))
@@ -222,12 +262,13 @@ def largest_alignment(pkg, centre='ref', max_cells=MAX_CELLS, max_excess=MAX_EXC
                [banded_cells(slots[0], e) for e in slots[1:]], default=0)
 
 
-def seconds(pkg, centre='ref', max_cells=MAX_CELLS, max_excess=MAX_EXCESS):
+def seconds(pkg, centre='ref', max_cells=MAX_CELLS, max_excess=MAX_EXCESS, max_work=MAX_WORK):
     """An estimate of the seconds realign_package takes for `pkg`, from its work."""
-    return REGION_SECONDS + work(pkg, centre, max_cells, max_excess) / CELLS_PER_SECOND
+    return REGION_SECONDS + work(pkg, centre, max_cells, max_excess, max_work) / CELLS_PER_SECOND
 
 
-def peak_bytes(pkg, max_cells=MAX_CELLS, page=ESTIMATE_PAGE, centre='ref', max_excess=MAX_EXCESS):
+def peak_bytes(pkg, max_cells=MAX_CELLS, page=ESTIMATE_PAGE, centre='ref', max_excess=MAX_EXCESS,
+               max_work=MAX_WORK):
     """An upper bound in practice on the memory, in bytes, that realign_package takes for `pkg`: memory.BASE;
     the k-mer counts the region's alleles take, which the worker may still hold while abPOA runs; and abPOA's
     worst alignment. Around a reference centre, whose alignments are known in advance, that is the worst of
@@ -235,11 +276,14 @@ def peak_bytes(pkg, max_cells=MAX_CELLS, page=ESTIMATE_PAGE, centre='ref', max_e
     it is the worst pair of the region's alleles and fragments in either order (memory.any_pair_bytes), or
     the longest sequence banded against one of the same length, the bound taken for the slots. A region
     that realign_package refuses for its size before aligning anything takes memory.BASE. The page size is
-    fixed, ESTIMATE_PAGE, so the estimate is the same on every machine."""
+    fixed, ESTIMATE_PAGE, so the estimate is the same on every machine. With `centre` 'parsimony', the
+    larger of the two stars' where medoid_too builds both, one after the other."""
     alleles = [len(a['seq']) for a in pkg['alleles']]
     if not alleles or sum(alleles) > MAX_TOTAL_BP or \
             largest_alignment(pkg, centre, max_cells, max_excess) > MAX_ALIGNMENT * max_cells:
         return memory.BASE
+    if medoid_too(pkg, centre, max_cells, max_work):
+        return max(peak_bytes(pkg, max_cells, page, 'ref', None), peak_bytes(pkg, max_cells, page, 'medoid'))
     c, others, cid = _centre_and_others(pkg, centre, max_excess)
     if cid is None:
         aligned = [c] + others                  # every allele, and the fragments found in none
@@ -253,7 +297,10 @@ def peak_bytes(pkg, max_cells=MAX_CELLS, page=ESTIMATE_PAGE, centre='ref', max_e
 
 
 def _refusal(pkg, max_cells, centre, max_work, max_excess=MAX_EXCESS):
-    """(the limit `pkg` exceeds, why), or None: see refusal."""
+    """(the limit `pkg` exceeds, why), or None: see refusal. With `centre` 'parsimony', the reference allele's
+    star's, as for 'ref' (medoid_too)."""
+    if centre == 'parsimony':
+        centre, max_excess = 'ref', None
     lens = [len(a['seq']) for a in pkg['alleles']]
     if not lens:
         return None             # no_alleles, in realign_package
@@ -275,12 +322,44 @@ def refusal(pkg, max_cells=MAX_CELLS, centre='ref', max_work=MAX_WORK, max_exces
     return r and r[1]
 
 
+def _parsimonious(msa, alleles, fragments, align, max_cells, min_share, scores):
+    """(the star to keep, `parsimony`): of `msa`, the star around the reference allele, and the star around
+    the medoid, the one whose alleles hold fewer records against the reference allele, each counted once per
+    haplotype (star.variant_records), the reference's on a tie; and what was compared (module docstring).
+    Every other allele differs from the reference allele in one record at least, in any star, so where the
+    reference's star holds no more, the medoid is not sought (`skipped` 'fewest'); nor is its star built where
+    it is the reference allele ('same'), nor kept where it cannot be built for the region's sake (its status:
+    'not_homologous', 'aligner_failed'). A failure of the machine is raised, as for the reference's star."""
+    weights = [(a[0], a[2]) for a in alleles]
+    ref_records = variant_records(msa.rows, weights, msa.centre)
+    out = {'records': {'ref': ref_records}}
+    if ref_records <= sum(w for a, w in weights if w > 0 and a != msa.centre):
+        out['skipped'] = 'fewest'
+        return msa, out
+    mid = out['medoid'] = medoid_of(alleles)
+    if mid == msa.centre:
+        out['skipped'] = 'same'
+        return msa, out
+    try:
+        other = star_msa(alleles, fragments, align=align, centre=mid, max_cells=max_cells, min_share=min_share,
+                         scores=scores)
+    except (ReservationRefused, AlignerKilled):
+        raise
+    except (NotHomologous, AlignerFailed) as e:
+        out['skipped'] = e.status
+        return msa, out
+    medoid_records = out['records']['medoid'] = variant_records(other.rows, weights, msa.centre)
+    return (other if medoid_records < ref_records else msa), out
+
+
 def realign_package(pkg, abpoa='abpoa', max_cells=MAX_CELLS, workdir=None, scores=SCORES, min_share=MIN_SHARE,
                     centre='ref', max_work=MAX_WORK, max_excess=MAX_EXCESS):
     """The star alignment of one region package, as the dict described in the module docstring.
     `min_share` 0 or None aligns the region however little its alleles share with the centre; `max_work` 0 or
-    None sets no limit on its work. A failure of the machine gives one of the statuses MACHINE_FAILURES, which
-    `run` does not record."""
+    None sets no limit on its work. `centre` 'parsimony' builds the star around the reference allele, and
+    where medoid_too, around the medoid as well, and keeps the more parsimonious (_parsimonious); `max_excess`
+    applies to 'ref' only. A failure of the machine gives one of the statuses MACHINE_FAILURES, which `run`
+    does not record."""
     t0 = time.time()
     res = {'id': pkg['id'], 'method': 'medoid_star'}
     alleles = [(a['id'], a['seq'], a['weight']) for a in pkg['alleles']]
@@ -292,14 +371,22 @@ def realign_package(pkg, abpoa='abpoa', max_cells=MAX_CELLS, workdir=None, score
         why = refusal(pkg, max_cells, centre, max_work, max_excess)
         if why:
             raise TooBig(why)
+        choice = None
         with Abpoa(abpoa, scores, workdir) as align:
             msa = star_msa(alleles, fragments, align=align, centre=centre_of(pkg, centre, max_excess),
                            max_cells=max_cells, min_share=min_share, scores=scores)
+            if medoid_too(pkg, centre, max_cells, max_work):
+                msa, choice = _parsimonious(msa, alleles, fragments, align, max_cells, min_share, scores)
+            elif centre == 'parsimony' and centre_of(pkg, centre) is not None:
+                choice = {'records': {'ref': variant_records(msa.rows, [(a[0], a[2]) for a in alleles],
+                                                             msa.centre)}, 'skipped': 'too_big'}
         rows = msa.rows
         res.update(status='ok', centre=msa.centre, rows=rows, columns=len(next(iter(rows.values()), '')),
                    slot_alignments=msa.slot_alignments, fragments_exact=msa.fragments_exact,
                    fragments_aligned=msa.fragments_aligned, banded_pairs=msa.banded_pairs,
                    seeded_pairs=msa.seeded_pairs, refined_windows=msa.refined_windows)
+        if choice is not None:
+            res['parsimony'] = choice
     except RealignError as e:
         res.update(status=e.status, message=str(e))
     except MemoryError:
@@ -360,12 +447,12 @@ def plan(packages_path, select='any', shard=(0, 1), max_cells=MAX_CELLS, centre=
             too_big[r[0]] += 1
             continue
         admitted += 1
-        cells += work(p, centre, max_cells, max_excess)
-        b = peak_bytes(p, max_cells, centre=centre, max_excess=max_excess)
+        cells += work(p, centre, max_cells, max_excess, max_work)
+        b = peak_bytes(p, max_cells, centre=centre, max_excess=max_excess, max_work=max_work)
         if b > need:
             need, largest = b, p['id']
         costs.append(b)
-        secs.append(seconds(p, centre, max_cells, max_excess))
+        secs.append(seconds(p, centre, max_cells, max_excess, max_work))
     wall = memory.schedule_seconds(costs, secs, jobs, max(memory.budget(max_memory), need))
     return {'admitted': admitted, 'too_big': dict(too_big), 'skipped': dict(skipped), 'work': cells,
             'need_gb': math.ceil(need / memory.GB * 100) / 100, 'largest': largest,
@@ -413,7 +500,7 @@ def run(packages_path, out_path, select='any', shard=(0, 1), jobs=1, max_memory=
             if rid in done:
                 f.write(done[rid])
     os.replace(partial + '.tmp', partial)
-    need = [peak_bytes(p, max_cells, centre=centre, max_excess=max_excess) for p in todo]
+    need = [peak_bytes(p, max_cells, centre=centre, max_excess=max_excess, max_work=limits[0]) for p in todo]
     over = [k for k in range(len(todo)) if need[k] > limit]
     if over:
         k = max(over, key=lambda k: need[k])
