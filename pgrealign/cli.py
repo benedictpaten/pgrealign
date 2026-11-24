@@ -90,13 +90,17 @@ def cmd_extract(a):
         raise SystemExit('pgrealign extract: --exit-edges needs --ref-dir')
     if a.keep_fragments and not a.exit_edges:
         raise SystemExit('pgrealign extract: --keep-fragments needs --exit-edges')
+    if a.trim_targets and not a.keep_fragments:
+        raise SystemExit('pgrealign extract: --trim-targets needs --keep-fragments')
     summary = extract.extract(a.graph, rs, a.out, vg=a.vg, threads=a.threads, ref_sample=a.ref_sample,
                               max_internal_bp=a.max_internal_bp, allow_inversions=a.allow_inversions,
-                              exit_edges=a.exit_edges, ref_dir=a.ref_dir, keep_fragments=a.keep_fragments)
+                              exit_edges=a.exit_edges, ref_dir=a.ref_dir, keep_fragments=a.keep_fragments,
+                              trim_targets=a.trim_targets, trim_margin=a.trim_margin)
     provenance.write_manifest(os.path.join(a.out, 'extract'), 'extract', {'graph': a.graph, 'regions': a.regions},
                               {'ref_sample': a.ref_sample, 'max_internal_bp': a.max_internal_bp,
                                'allow_inversions': a.allow_inversions, 'exit_edges': a.exit_edges,
-                               'ref_dir': a.ref_dir, 'keep_fragments': a.keep_fragments},
+                               'ref_dir': a.ref_dir, 'keep_fragments': a.keep_fragments,
+                               'trim_targets': a.trim_targets, 'trim_margin': a.trim_margin},
                               tools=_tools(a, 'vg'), extra={'summary': summary}, started=started)
     _print(summary)
 
@@ -326,6 +330,12 @@ def main(argv=None):
     c.add_argument('--keep-fragments', action='store_true',
                    help="with --exit-edges, record only the spanning runs, and leave every other run (the "
                         "fragments) and every anchor-free walk on its own nodes, which stay in the graph")
+    c.add_argument('--trim-targets', metavar='TARGETS',
+                   help="with --keep-fragments, the targets file regions read: cut each run down to the "
+                        "haplotype's own copy of each target, found by the target's k-mers on the reference, "
+                        "and leave the rest on its nodes")
+    c.add_argument('--trim-margin', type=int, default=20000,
+                   help='bp of sequence kept on either side of a copy of a target, with --trim-targets [20000]')
     vg_arg(c)
     c.add_argument('-t', '--threads', type=int, default=4)
     c.set_defaults(func=cmd_extract)

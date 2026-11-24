@@ -336,6 +336,41 @@ class TestReplace(unittest.TestCase):
                     self.assertTrue(res['ok'], res)
                     self.assertEqual(res['paths'], len(walks))
 
+    def test_trim_targets(self):
+        # only the arrays are replaced: the flanks of every run stay on their nodes, as do h3's suffix and
+        # h5's run, and h2's array, in a prefix run, is replaced too
+        from unittest import mock
+        from test_extract import TRIM_S, TRIM_WALKS, TRIM_TUNING, trim_fixture
+        with mock.patch.multiple(extract, **TRIM_TUNING):
+            g, region, bed = trim_fixture(self.d)
+            x = os.path.join(self.d, 'x')
+            extract.extract(g, [region], x, exit_edges=True, ref_dir=self.d, keep_fragments=True,
+                            allow_inversions=True, trim_targets=bed, trim_margin=0)
+        pkg = next(extract.read_packages(os.path.join(x, 'packages.jsonl.gz')))
+        msas = os.path.join(self.d, 'msas.jsonl.gz')
+        with gzip.open(msas, 'wt') as f:
+            f.write(json.dumps(naive_msa(pkg)) + '\n')
+        for mode, start in (('dense', None), ('reuse', 100)):
+            with self.subTest(mode=mode):
+                out = os.path.join(self.d, 'out.%s.gfa' % mode)
+                st = replace.replace(g, x, msas, out, id_start=start, id_mode=mode)
+                self.assertEqual((st['nodes_removed'], st['nodes_kept']), (4, 0))
+                seq1, walks1 = self.check_roundtrip(g, out)
+                self.assert_edges_once(out)
+                if mode == 'reuse':
+                    self.assertEqual({n: seq1[n] for n in (3, 5, 9, 11)}, {n: TRIM_S[n] for n in (3, 5, 9, 11)})
+                    self.assertEqual(walks1['h5#1'], [('>', n) for n in (1, 2, 3, 5, 6, 7)])
+                    self.assertEqual(walks1['h3#1'], [('>', n) for n in (1, 2, 3, 11)])
+                    self.assertEqual(walks1['h2#1'][0], ('>', 9))
+                    self.assertEqual(walks1['CHM13#0'][:3] + walks1['CHM13#0'][-3:],
+                                     [('>', n) for n in (1, 2, 3, 5, 6, 7)])
+                if shutil.which('vg'):
+                    gbz = os.path.join(self.d, 'out.%s.gbz' % mode)
+                    replace.to_gbz(out, gbz, keep_gfa=True)
+                    res = verify.verify(g, gbz)
+                    self.assertTrue(res['ok'], res)
+                    self.assertEqual(res['paths'], len(TRIM_WALKS))
+
     def test_modes(self):
         fx = Fixture(self.d, paths=PATHS)
         for mode, start in (('reuse', 1000), ('dense', None), ('dense', 500)):

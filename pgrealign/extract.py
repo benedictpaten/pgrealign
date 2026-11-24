@@ -69,6 +69,28 @@ on its nodes, which stay with the edges between them. The interior is then the n
 those of its nodes that fragments visit are `kept`. A region's fragments are not realigned, but it
 gains no unaligned copy of them either.
 
+**Trimming to the targets** (`trim_targets`, with keep_fragments). A region's anchors can lie far from
+its targets, so its runs can carry much more than the targets. With trim_targets, the targets file that
+regions read, each run is cut down to the haplotype's own copy of each of the region's targets, its
+core, found by sequence (find_cores):
+- A target's k-mers are those that occur at least twice in the reference's sequence of it, in no other
+  target of the region, and `CORE_ENRICHMENT` times more densely in it than in the reference's sequence
+  of the region outside its targets.
+- A run's k-mers are sampled, and counted in windows. A window is dense for a target when enough of its
+  samples are that target's k-mers, and dense windows close together make a stretch.
+- A run's core for a target is its stretch with the most hits, out to the hits in the windows on either
+  side, then by `trim_margin` on each side, within the run, and out to whole steps (cut_steps). A step
+  that would add more than `trim_margin` again, such as a long node of a contig's unaligned sequence, is
+  left out unless the core starts or ends in it. Overlapping cores of two targets are one core.
+- A core with a step of its walk on either side is recorded as a spanning run, an allele, whatever the
+  type of the run it is in. A core that reaches a walk's end may be a truncated copy, and is not.
+- A core is read in the orientation in which its k-mers read as the reference's, so its allele is in
+  the region's forward orientation. A core of a spanning run whose k-mers give no clear orientation
+  takes its run's. One of another run is not recorded.
+Everything else stays on its nodes, as a fragment does: the rest of a run with a core, and every run
+without one. So a fragment that holds a whole copy of a target, such as a contig that begins between
+the target and its anchor, is realigned too.
+
 **Status.** Each region has one:
 - `complex`: a walk's run is complex, runs visit an interior node both ways (above, unless
   `allow_inversions`), an anchor-free walk uses the interiors of more than one region or runs both ways
@@ -97,12 +119,21 @@ Outputs, in the output directory:
     `kept_nodes` and `kept_bp` (the interior nodes that stay, as walks visit them outside every run);
   - with keep_fragments, `kept_fragments` and `kept_fragment_bp`: the runs left on their nodes, and the
     bp they spell, counted per run;
+  - with trim_targets, `trim`: `margin`, the cores recorded (`cores`), those of them in runs other
+    than spanning ones (`cores_in_fragments`), the spanning runs without a core (`no_core`), the cores
+    not recorded as they reach a walk's end (`at_end`) or have no orientation (`no_orient`), and the bp
+    of the runs with a recorded core that stay on their nodes (`trimmed_bp`). The runs without a core
+    count in kept_fragments.
 - `occurrences.tsv.gz`: one row per run: walk, region, type, orient, the run's interior as step
   indices [first, end) in the W line, and the allele or fragment it spells; with exit edges, also the
   steps before and after the run in its walk ('.' at a walk's end), which replace links it to.
   `replace` rewrites these.
 - `interiors.tsv.gz`: region, and the ids of the nodes its runs visit. These are the nodes `replace`
   removes, except those of a third column, with exit edges, which stay.
+- with trim_targets, `cores.tsv.gz`: one row per core found, and per spanning run without one: walk,
+  region, targets, the type of the run it is in, status (`core`, `at_end`, `no_orient` or `no_core`),
+  orient, the core as step indices [first, end), contig, and in the contig's coordinates the core's
+  stretch of hits and the core.
 - `summary.json`: the walks and regions read, the regions of each status, the anchor-free walks held
   whole (`internal_candidates`), the regions an anchor-free walk longer than `max_internal_bp`
   made complex (`internal_too_long`), the regions whose runs visit a node both ways (`both_ways`), and
@@ -111,11 +142,115 @@ Outputs, in the output directory:
 import bisect
 import collections
 import gzip
+import itertools
 import json
 import os
 from array import array
 
-from .graph import GfaStream, parse_w, spell, walk_key, STEP
+from .graph import GfaStream, parse_w, revcomp, spell, walk_key, STEP
+
+# trimming to the targets (find_cores)
+CORE_K = 21             # k-mer length
+CORE_STRIDE = 32        # a run's k-mers are sampled one every this many bases
+CORE_WINDOW = 10000     # in windows of this many bases
+CORE_DENSITY = 0.3      # a window is dense for a target when at least this share of its samples are its k-mers
+CORE_GAP = 200000       # dense windows of a target at most this far apart make one stretch
+CORE_ENRICHMENT = 10    # a target's k-mer is at least this many times denser in it than in the rest of the region
+
+
+class TargetKmers:
+    """The k-mers by which find_cores finds a region's targets (see Trimming to the targets): `fwd` and
+    `rev` map each k-mer, and its reverse complement, to its target's index in `ids`. `targets` is
+    [(id, the reference's sequence of it)] and `outside` [the reference's sequences of the region outside
+    its targets]. A k-mer that is at most `enrichment` times as dense in its target as in `outside` is
+    left out, so that a satellite of the flanks that shares the target's k-mers is not taken for it, but
+    a few copies of the target's repeat past its end, as the edge of an array can have, do not count."""
+
+    def __init__(self, targets, outside, k=CORE_K, enrichment=CORE_ENRICHMENT):
+        self.k, self.ids = k, [t for t, _ in targets]
+        owner, bad = {}, set()      # k-mer -> (target, count in it)
+        for ti, (_, s) in enumerate(targets):
+            s = s.upper()
+            counts = collections.Counter(s[i:i + k] for i in range(len(s) - k + 1))
+            for km, c in counts.items():
+                if c < 2 or 'N' in km:
+                    continue
+                if owner.setdefault(km, (ti, c))[0] != ti:
+                    bad.add(km)
+        out_counts = collections.Counter()
+        out_bp = sum(len(s) for s in outside)
+        for s in outside:
+            s = s.upper()
+            for i in range(len(s) - k + 1):
+                km = s[i:i + k]
+                if km in owner:
+                    out_counts[km] += 1
+        target_bp = [max(1, len(s)) for _, s in targets]
+        for km, n in out_counts.items():
+            ti, c = owner[km]
+            if c / target_bp[ti] <= enrichment * n / out_bp:
+                bad.add(km)
+        fwd = {km: ti for km, (ti, _) in owner.items() if km not in bad}
+        # a k-mer whose reverse complement is one too reads both ways, so says nothing of orientation
+        self.fwd = {km: ti for km, ti in fwd.items() if revcomp(km) not in fwd}
+        self.rev = {revcomp(km): ti for km, ti in self.fwd.items()}
+
+
+def find_cores(seq, tk, stride=CORE_STRIDE, window=CORE_WINDOW, density=CORE_DENSITY, gap=CORE_GAP):
+    """Each target's core in `seq` (upper case), from the k-mers of `tk` (TargetKmers), before any
+    margin: [(target index, start, end, stretch start, stretch end, strand)], [start, end) out to the
+    hits in the windows on either side of the stretch, and strand '+' or '-' when at least two thirds of
+    those hits read that way, else None."""
+    k = tk.k
+    last = len(seq) - k
+    if last < 0:
+        return []
+    fwd, rev = tk.fwd, tk.rev
+    hits = collections.defaultdict(list)    # target -> [(position, +1 forward or -1 reverse)], in order
+    for i in range(0, last + 1, stride):
+        km = seq[i:i + k]
+        t = fwd.get(km)
+        if t is not None:
+            hits[t].append((i, 1))
+            continue
+        t = rev.get(km)
+        if t is not None:
+            hits[t].append((i, -1))
+
+    def samples(w):
+        lo, hi = w * window, min((w + 1) * window, last + 1)
+        return -(-hi // stride) - -(-lo // stride)
+
+    out = []
+    for t, hs in sorted(hits.items()):
+        per = collections.Counter(p // window for p, _ in hs)
+        dense = sorted(w for w, c in per.items() if c >= density * samples(w))
+        if not dense:
+            continue
+        stretches = [[dense[0], dense[0]]]
+        for w in dense[1:]:
+            if (w - stretches[-1][1] - 1) * window <= gap:
+                stretches[-1][1] = w
+            else:
+                stretches.append([w, w])
+        pos = [p for p, _ in hs]
+
+        def span(lo, hi):
+            return bisect.bisect_left(pos, lo), bisect.bisect_left(pos, hi)
+        best = None
+        for s0, s1 in stretches:
+            a, b = span(s0 * window, (s1 + 1) * window)
+            if best is None or b - a > best[0]:
+                best = (b - a, s0, s1)
+        _, w0, w1 = best
+        a, b = span(w0 * window, (w1 + 1) * window)
+        sa, sb = pos[a], pos[b - 1] + k
+        a, b = span((w0 - 1) * window, (w1 + 2) * window)
+        f = sum(1 for _, s in hs[a:b] if s > 0)
+        r = (b - a) - f
+        strand = '+' if f >= 2 * r else '-' if r >= 2 * f else None
+        out.append((t, pos[a], pos[b - 1] + k, sa, sb, strand))
+    return out
 
 
 def flip(steps):
@@ -128,7 +263,7 @@ FWD, REV = 1, 2         # the ways a run visits an interior node, in the region'
 class RegionRuns:
     """Everything one region collects during the pass."""
     __slots__ = ('alleles', 'fragments', 'interior', 'complex', 'n_runs', 'ref', 'both_ways', 'allow_inversions',
-                 'exit_runs', 'kept_runs', 'kept_run_bp')
+                 'exit_runs', 'kept_runs', 'kept_run_bp', 'trim')
 
     def __init__(self, allow_inversions=False):
         self.ref = None         # the allele the reference sample's walk spells
@@ -142,6 +277,7 @@ class RegionRuns:
         self.exit_runs = 0      # exit edges: the runs with a bound off the anchors
         self.kept_runs = 0      # keep_fragments: the fragment runs left on their nodes, and their bp
         self.kept_run_bp = 0
+        self.trim = collections.Counter()   # trim_targets: the counts of the package's `trim`
 
     def visit(self, key, steps):
         """Record the interior nodes of walk `key`'s run, `steps` in the region's forward orientation. A
@@ -342,18 +478,81 @@ class RefIndex:
         return 'o' if st < r.ref_start else 'O' if st >= r.ref_end else 'i'
 
 
+TRIM_COUNTS = ('cores', 'cores_in_fragments', 'no_core', 'at_end', 'no_orient', 'trimmed_bp')
+
+
+def target_kmers(regs, ref_indexes, seq, trim_targets, targets_of):
+    """{region: TargetKmers} for the regions `regs`, from the targets file `trim_targets` and the
+    reference's sequence, its indexes {contig: read_ref_index} and the node sequences `seq`."""
+    out = {}
+    for rid, r in regs.items():
+        index = ref_indexes[r.contig]
+        starts = [x[2] for x in index]
+        ids = set(r.targets.split(','))
+        ts = sorted((t.start, t.end, t.id) for t in targets_of(trim_targets, r.contig) if t.id in ids)
+        if {t[2] for t in ts} != ids:
+            raise ValueError('region %s: targets %s are not in %s' % (rid, ','.join(sorted(ids - {t[2] for t in ts})),
+                                                                     trim_targets))
+        targets = [(i, ref_spell(index, starts, seq, max(s, r.ref_start), min(e, r.ref_end))) for s, e, i in ts]
+        outside, pos = [], r.ref_start
+        for s, e, _ in ts:
+            if s > pos:
+                outside.append(ref_spell(index, starts, seq, pos, min(s, r.ref_end)))
+            pos = max(pos, e)
+        if pos < r.ref_end:
+            outside.append(ref_spell(index, starts, seq, pos, r.ref_end))
+        out[rid] = TargetKmers(targets, outside, CORE_K, CORE_ENRICHMENT)
+    return out
+
+
+def cut_steps(off, cs, ce, margin, start):
+    """Where a core [cs, ce) of a run is cut, as an index into the run's step offsets `off` (off[j] the
+    start of step j, off[-1] the run's length): at the start (`start`) or end, the step boundary `margin`
+    out from the core, or past it; or, where the step there reaches more than `margin` further out, as an
+    unaligned stretch of a contig can be one long node, the next boundary in, if that is still outside
+    the core."""
+    if start:
+        x = max(0, cs - margin)
+        j = bisect.bisect_right(off, x) - 1
+        if x - off[j] > margin and off[j + 1] <= cs:
+            j += 1
+    else:
+        x = min(off[-1], ce + margin)
+        j = bisect.bisect_left(off, x)
+        if off[j] - x > margin and off[j - 1] >= ce:
+            j -= 1
+    return j
+
+
+def ref_spell(index, starts, seq, lo, hi):
+    """The reference's sequence of [lo, hi), from its index (prepare's <contig>.ref.tsv.gz, read by
+    read_ref_index; `starts` its starts) and the node sequences `seq`."""
+    out = []
+    for n, o, st, en in index[max(0, bisect.bisect_right(starts, lo) - 1):bisect.bisect_left(starts, hi)]:
+        if en > lo:
+            s = seq[n] if o == '+' else revcomp(seq[n])
+            out.append(s[max(lo - st, 0):min(hi, en) - st])
+    return ''.join(out)
+
+
 def extract(graph, regions, out_dir, vg=None, threads=4, max_internal_bp=200000, ref_sample='CHM13',
-            allow_inversions=False, exit_edges=False, ref_dir=None, keep_fragments=False):
+            allow_inversions=False, exit_edges=False, ref_dir=None, keep_fragments=False, trim_targets=None,
+            trim_margin=20000):
     """Run the pass over `graph` (a GBZ or GFA) for the `regions` (regions.Region) with status 'ok'; the
     others get no package. A package's `ref` is the allele that a walk of `ref_sample` spells. An
     anchor-free walk longer than `max_internal_bp` that uses an interior makes its region complex.
     `allow_inversions` keeps a region whose runs visit a node both ways (see Orientation). `exit_edges`
     finds the runs as exit_runs_of_walk does (see Exit edges), from the reference indexes
     <contig>.ref.tsv.gz that prepare wrote in `ref_dir`. `keep_fragments`, with exit edges, records only
-    the spanning runs and leaves the fragments on their nodes (see Keeping fragments)."""
+    the spanning runs and leaves the fragments on their nodes (see Keeping fragments). `trim_targets`, the
+    targets file regions read, with keep_fragments, cuts each run down to its cores, `trim_margin` bp
+    either side of the haplotype's copy of each target (see Trimming to the targets)."""
     from .prepare import read_ref_index
+    from .regions import targets_of
     if keep_fragments and not exit_edges:
         raise ValueError('keeping fragments needs exit edges')
+    if trim_targets is not None and not keep_fragments:
+        raise ValueError('trimming to the targets needs keep_fragments')
     os.makedirs(out_dir, exist_ok=True)
     regs = {r.id: r for r in regions if r.status == 'ok'}
     anchor_of = collections.defaultdict(list)     # node -> [(region id, 'L'|'R')]
@@ -379,6 +578,12 @@ def extract(graph, regions, out_dir, vg=None, threads=4, max_internal_bp=200000,
                         anchor_of[str(n)].append((r.id, 'i'))
     runs = {rid: RegionRuns(allow_inversions) for rid in regs}
     seq = {}
+    tks = None            # trim_targets: region -> TargetKmers, once the node sequences are read
+    cores_out = None
+    if trim_targets is not None:
+        cores_out = gzip.open(os.path.join(out_dir, 'cores.tsv.gz'), 'wt')
+        cores_out.write('#walk\tregion\ttargets\ttype\tstatus\torient\tfirst\tend\tcontig\tstretch_start\t'
+                        'stretch_end\tcore_start\tcore_end\n')
     used = None           # exit edges: the nodes that walks visit outside every run
     occ_out = gzip.open(os.path.join(out_dir, 'occurrences.tsv.gz'), 'wt')
     occ_out.write('#walk\tregion\ttype\torient\tfirst\tend\tmember%s\n' % ('\tbefore\tafter' if exit_edges else ''))
@@ -413,6 +618,54 @@ def extract(graph, regions, out_dir, vg=None, threads=4, max_internal_bp=200000,
             row += '\t%s\t%s' % (''.join(toks[a - 1]) if a > 0 else '.', ''.join(toks[b]) if b < len(toks) else '.')
         occ_out.write(row + '\n')
 
+    def trim_run(rid, rr, key, w, toks, typ, orient, a, b):
+        """The cores of the run [a, b) of walk `key`, which has type `typ` and orient `orient`, as
+        [(first, end, orient)]; the rest of the run stays on its nodes (see Trimming to the targets)."""
+        steps = toks[a:b]
+        off = list(itertools.accumulate((len(seq[int(n)]) for _, n in steps), initial=0))
+        s = ''.join(seq[int(n)] if o == '>' else revcomp(seq[int(n)]) for o, n in steps).upper()
+        tk = tks[rid]
+        found = []
+        for t, cs, ce, ss, se, strand in find_cores(s, tk, CORE_STRIDE, CORE_WINDOW, CORE_DENSITY, CORE_GAP):
+            found.append([a + cut_steps(off, cs, ce, trim_margin, True), a + cut_steps(off, cs, ce, trim_margin, False),
+                          {tk.ids[t]}, {strand}, ss, se])
+        found.sort()
+        merged = []
+        for c in found:
+            if merged and c[0] < merged[-1][1]:
+                m = merged[-1]
+                m[1], m[4], m[5] = max(m[1], c[1]), min(m[4], c[4]), max(m[5], c[5])
+                m[2] |= c[2]
+                m[3] |= c[3]
+            else:
+                merged.append(c)
+        base = (int(w.start) if w.start.isdigit() else 0) + sum(len(seq[int(n)]) for _, n in toks[:a])
+        cores = []
+        for first, end, ids, strands, ss, se in merged:
+            strand = strands.pop() if len(strands) == 1 else None
+            if first == 0 or end == len(toks):
+                status = 'at_end'
+            elif strand is None and typ != 'spanning':
+                status = 'no_orient'
+            else:
+                status = 'core'
+                cores.append((first, end, strand or orient))
+            rr.trim['cores' if status == 'core' else status] += 1
+            cores_out.write('%s\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%s\t%d\t%d\t%d\t%d\n' % (
+                key, rid, ','.join(sorted(ids)), typ, status, cores[-1][2] if status == 'core' else '.', first, end,
+                w.contig, base + ss, base + se, base + off[first - a], base + off[end - a]))
+        if typ == 'spanning' and not merged:
+            rr.trim['no_core'] += 1
+            cores_out.write('%s\t%s\t.\t%s\tno_core\t.\t%d\t%d\t%s\t.\t.\t%d\t%d\n' % (
+                key, rid, typ, a, b, w.contig, base, base + off[-1]))
+        if cores:
+            rr.trim['cores_in_fragments'] += len(cores) if typ != 'spanning' else 0
+            rr.trim['trimmed_bp'] += off[-1] - sum(off[e - a] - off[f - a] for f, e, _ in cores)
+        else:
+            rr.kept_runs += 1
+            rr.kept_run_bp += off[-1]
+        return cores
+
     with GfaStream(graph, vg, threads) as f:
         for line in f:
             t = line[0]
@@ -426,6 +679,8 @@ def extract(graph, regions, out_dir, vg=None, threads=4, max_internal_bp=200000,
                 max_id = max(seq) if seq else 0
                 ref_of = {c: RefIndex(index, max_id) for c, index in ref_indexes.items()}
                 used = bytearray(max(len(ri.start) for ri in ref_of.values()) if ref_of else max_id + 1)
+                if trim_targets is not None:
+                    tks = target_kmers(regs, ref_indexes, seq, trim_targets, targets_of)
             n_walks += 1
             w = parse_w(line)
             toks = STEP.findall(w.steps)
@@ -468,6 +723,14 @@ def extract(graph, regions, out_dir, vg=None, threads=4, max_internal_bp=200000,
                     for typ, orient, a, b, ex in exit_runs_of_walk(toks, lo, hi, kinds):
                         if typ == 'complex':
                             rr.complex.append('%s: %s' % (key, orient))
+                            continue
+                        if tks is not None:
+                            # only the cores are runs: the rest stays on its nodes
+                            cores = trim_run(rid, rr, key, w, toks, typ, orient, a, b)
+                            for ca, cb, co in cores:
+                                record(rr, rid, key, w, toks, 'spanning', co, ca, cb)
+                                spans.append((ca, cb, rid))
+                            rr.exit_runs += bool(ex and cores)
                             continue
                         if keep_fragments and typ != 'spanning':
                             # outside every run, so its nodes stay for it
@@ -537,6 +800,8 @@ def extract(graph, regions, out_dir, vg=None, threads=4, max_internal_bp=200000,
         occ_out.write('%s\t%s\tinternal\t%s\t0\t%d\t%s%s\n' % (key, rid, orient, len(toks), mid,
                                                              '\t.\t.' if exit_edges else ''))
     occ_out.close()
+    if cores_out is not None:
+        cores_out.close()
     # the longer anchor-free walks have no run, so a region whose interior one uses is left as it is
     n_long = 0
     if long_at:
@@ -574,6 +839,8 @@ def extract(graph, regions, out_dir, vg=None, threads=4, max_internal_bp=200000,
                             'kept_bp': sum(len(seq[n]) for n in kept)})
             if keep_fragments:
                 pkg.update({'kept_fragments': rr.kept_runs, 'kept_fragment_bp': rr.kept_run_bp})
+            if trim_targets is not None:
+                pkg['trim'] = dict({k: rr.trim[k] for k in TRIM_COUNTS}, margin=trim_margin)
             pk.write(json.dumps(pkg, separators=(',', ':')) + '\n')
             it.write('%s\t%s%s\n' % (rid, ','.join(str(n) for n in sorted(rr.interior)),
                                       '\t' + ','.join(str(n) for n in kept) if exit_edges else ''))
@@ -584,6 +851,8 @@ def extract(graph, regions, out_dir, vg=None, threads=4, max_internal_bp=200000,
         summary['exit_runs'] = sum(rr.exit_runs for rr in runs.values())
     if keep_fragments:
         summary['kept_fragments'] = sum(rr.kept_runs for rr in runs.values())
+    if trim_targets is not None:
+        summary['trim'] = {k: sum(rr.trim[k] for rr in runs.values()) for k in TRIM_COUNTS}
     path = os.path.join(out_dir, 'summary.json')
     with open(path + '.tmp', 'w') as f:
         json.dump(summary, f, indent=1)
