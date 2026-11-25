@@ -73,15 +73,17 @@ gains no unaligned copy of them either.
 its targets, so its runs can carry much more than the targets. With trim_targets, the targets file that
 regions read, each run is cut down to the haplotype's own copy of each of the region's targets, its
 core, found by sequence (find_cores):
-- A target's k-mers are those that occur at least twice in the reference's sequence of it, in no other
-  target of the region, and `CORE_ENRICHMENT` times more densely in it than in the reference's sequence
-  of the region outside its targets.
-- A run's k-mers are sampled, and counted in windows. A window is dense for a target when enough of its
-  samples are that target's k-mers, and dense windows close together make a stretch.
-- A run's core for a target is its stretch with the most hits, out to the hits in the windows on either
-  side, then by `trim_margin` on each side, within the run, and out to whole steps (cut_steps). A step
-  that would add more than `trim_margin` again, such as a long node of a contig's unaligned sequence, is
-  left out unless the core starts or ends in it. Overlapping cores of two targets are one core.
+- The k-mers of a region's targets are those that occur at least twice in the reference's sequence of
+  one of them, and `CORE_ENRICHMENT` times more densely in the targets than in the reference's sequence
+  of the region outside them. The targets are taken together, as two can be pieces of one array, which
+  share most of their k-mers.
+- A run's k-mers are sampled, and counted in windows. A window is dense when enough of its samples are
+  the targets' k-mers, and dense windows close together make a stretch.
+- A run's core is its stretch with the most hits, out to the hits in the windows on either side, then by
+  `trim_margin` on each side, within the run, and out to whole steps (cut_steps). In a region with
+  several targets, every other stretch of at least `CORE_MIN_STRETCH` bp is a core too. A step that
+  would add more than `trim_margin` again, such as a long node of a contig's unaligned sequence, is left
+  out unless the core starts or ends in it. Overlapping cores are one core.
 - A core with a step of its walk on either side is recorded as a spanning run, an allele, whatever the
   type of the run it is in. A core that reaches a walk's end may be a truncated copy, and is not.
 - A core is read in the orientation in which its k-mers read as the reference's, so its allele is in
@@ -153,103 +155,99 @@ from .graph import GfaStream, parse_w, revcomp, spell, walk_key, STEP
 CORE_K = 21             # k-mer length
 CORE_STRIDE = 32        # a run's k-mers are sampled one every this many bases
 CORE_WINDOW = 10000     # in windows of this many bases
-CORE_DENSITY = 0.3      # a window is dense for a target when at least this share of its samples are its k-mers
-CORE_GAP = 200000       # dense windows of a target at most this far apart make one stretch
-CORE_ENRICHMENT = 10    # a target's k-mer is at least this many times denser in it than in the rest of the region
+CORE_DENSITY = 0.3      # a window is dense when at least this share of its samples are the targets' k-mers
+CORE_GAP = 200000       # dense windows at most this far apart make one stretch
+CORE_ENRICHMENT = 10    # a target k-mer is at least this many times denser in the targets than outside them
+CORE_MIN_STRETCH = 100000   # in a region with several targets, a stretch at least this long is a core
 
 
 class TargetKmers:
     """The k-mers by which find_cores finds a region's targets (see Trimming to the targets): `fwd` and
-    `rev` map each k-mer, and its reverse complement, to its target's index in `ids`. `targets` is
-    [(id, the reference's sequence of it)] and `outside` [the reference's sequences of the region outside
-    its targets]. A k-mer that is at most `enrichment` times as dense in its target as in `outside` is
-    left out, so that a satellite of the flanks that shares the target's k-mers is not taken for it, but
-    a few copies of the target's repeat past its end, as the edge of an array can have, do not count."""
+    `rev` are the k-mers, and their reverse complements, of all of them, and `ids` the targets' ids.
+    `targets` is [(id, the reference's sequence of it)] and `outside` [the reference's sequences of the
+    region outside its targets]. A k-mer that is at most `enrichment` times as dense in the targets as in
+    `outside` is left out, so that a satellite of the flanks that shares the targets' k-mers is not taken
+    for one, but a few copies of a target's repeat past its end, as the edge of an array can have, do not
+    count."""
 
     def __init__(self, targets, outside, k=CORE_K, enrichment=CORE_ENRICHMENT):
         self.k, self.ids = k, [t for t, _ in targets]
-        owner, bad = {}, set()      # k-mer -> (target, count in it)
-        for ti, (_, s) in enumerate(targets):
+        counts = collections.Counter()      # k-mer -> its copies in the targets
+        for _, s in targets:
             s = s.upper()
-            counts = collections.Counter(s[i:i + k] for i in range(len(s) - k + 1))
-            for km, c in counts.items():
-                if c < 2 or 'N' in km:
-                    continue
-                if owner.setdefault(km, (ti, c))[0] != ti:
-                    bad.add(km)
+            for km, c in collections.Counter(s[i:i + k] for i in range(len(s) - k + 1)).items():
+                if c >= 2 and 'N' not in km:
+                    counts[km] += c
         out_counts = collections.Counter()
         out_bp = sum(len(s) for s in outside)
         for s in outside:
             s = s.upper()
             for i in range(len(s) - k + 1):
                 km = s[i:i + k]
-                if km in owner:
+                if km in counts:
                     out_counts[km] += 1
-        target_bp = [max(1, len(s)) for _, s in targets]
-        for km, n in out_counts.items():
-            ti, c = owner[km]
-            if c / target_bp[ti] <= enrichment * n / out_bp:
-                bad.add(km)
-        fwd = {km: ti for km, (ti, _) in owner.items() if km not in bad}
+        target_bp = max(1, sum(len(s) for _, s in targets))
+        kms = {km for km, c in counts.items()
+               if km not in out_counts or c / target_bp > enrichment * out_counts[km] / out_bp}
         # a k-mer whose reverse complement is one too reads both ways, so says nothing of orientation
-        self.fwd = {km: ti for km, ti in fwd.items() if revcomp(km) not in fwd}
-        self.rev = {revcomp(km): ti for km, ti in self.fwd.items()}
+        self.fwd = {km for km in kms if revcomp(km) not in kms}
+        self.rev = {revcomp(km) for km in self.fwd}
 
 
-def find_cores(seq, tk, stride=CORE_STRIDE, window=CORE_WINDOW, density=CORE_DENSITY, gap=CORE_GAP):
-    """Each target's core in `seq` (upper case), from the k-mers of `tk` (TargetKmers), before any
-    margin: [(target index, start, end, stretch start, stretch end, strand)], [start, end) out to the
-    hits in the windows on either side of the stretch, and strand '+' or '-' when at least two thirds of
-    those hits read that way, else None."""
+def find_cores(seq, tk, stride=CORE_STRIDE, window=CORE_WINDOW, density=CORE_DENSITY, gap=CORE_GAP,
+               min_stretch=CORE_MIN_STRETCH):
+    """The cores in `seq` (upper case) of the targets of `tk` (TargetKmers), before any margin:
+    [(start, end, stretch start, stretch end, strand)] in order, [start, end) out to the hits in the
+    windows on either side of the stretch, and strand '+' or '-' when at least two thirds of those hits
+    read that way, else None. A core is the stretch with the most hits and, when `tk` has several targets,
+    each other stretch of at least `min_stretch` bp."""
     k = tk.k
     last = len(seq) - k
     if last < 0:
         return []
-    fwd, rev = tk.fwd, tk.rev
-    hits = collections.defaultdict(list)    # target -> [(position, +1 forward or -1 reverse)], in order
+    hits = []       # [(position, +1 forward or -1 reverse)], in order
     for i in range(0, last + 1, stride):
         km = seq[i:i + k]
-        t = fwd.get(km)
-        if t is not None:
-            hits[t].append((i, 1))
-            continue
-        t = rev.get(km)
-        if t is not None:
-            hits[t].append((i, -1))
+        if km in tk.fwd:
+            hits.append((i, 1))
+        elif km in tk.rev:
+            hits.append((i, -1))
 
     def samples(w):
         lo, hi = w * window, min((w + 1) * window, last + 1)
         return -(-hi // stride) - -(-lo // stride)
 
-    out = []
-    for t, hs in sorted(hits.items()):
-        per = collections.Counter(p // window for p, _ in hs)
-        dense = sorted(w for w, c in per.items() if c >= density * samples(w))
-        if not dense:
-            continue
-        stretches = [[dense[0], dense[0]]]
-        for w in dense[1:]:
-            if (w - stretches[-1][1] - 1) * window <= gap:
-                stretches[-1][1] = w
-            else:
-                stretches.append([w, w])
-        pos = [p for p, _ in hs]
+    per = collections.Counter(p // window for p, _ in hits)
+    dense = sorted(w for w, c in per.items() if c >= density * samples(w))
+    if not dense:
+        return []
+    stretches = [[dense[0], dense[0]]]
+    for w in dense[1:]:
+        if (w - stretches[-1][1] - 1) * window <= gap:
+            stretches[-1][1] = w
+        else:
+            stretches.append([w, w])
+    pos = [p for p, _ in hits]
 
-        def span(lo, hi):
-            return bisect.bisect_left(pos, lo), bisect.bisect_left(pos, hi)
-        best = None
-        for s0, s1 in stretches:
-            a, b = span(s0 * window, (s1 + 1) * window)
-            if best is None or b - a > best[0]:
-                best = (b - a, s0, s1)
-        _, w0, w1 = best
+    def span(lo, hi):
+        return bisect.bisect_left(pos, lo), bisect.bisect_left(pos, hi)
+
+    def n_hits(stretch):
+        a, b = span(stretch[0] * window, (stretch[1] + 1) * window)
+        return b - a
+
+    best = max(stretches, key=n_hits)
+    out = []
+    for w0, w1 in stretches:
+        if [w0, w1] != best and (len(tk.ids) < 2 or (w1 - w0 + 1) * window < min_stretch):
+            continue
         a, b = span(w0 * window, (w1 + 1) * window)
         sa, sb = pos[a], pos[b - 1] + k
         a, b = span((w0 - 1) * window, (w1 + 2) * window)
-        f = sum(1 for _, s in hs[a:b] if s > 0)
+        f = sum(1 for _, s in hits[a:b] if s > 0)
         r = (b - a) - f
         strand = '+' if f >= 2 * r else '-' if r >= 2 * f else None
-        out.append((t, pos[a], pos[b - 1] + k, sa, sb, strand))
+        out.append((pos[a], pos[b - 1] + k, sa, sb, strand))
     return out
 
 
@@ -626,9 +624,10 @@ def extract(graph, regions, out_dir, vg=None, threads=4, max_internal_bp=200000,
         s = ''.join(seq[int(n)] if o == '>' else revcomp(seq[int(n)]) for o, n in steps).upper()
         tk = tks[rid]
         found = []
-        for t, cs, ce, ss, se, strand in find_cores(s, tk, CORE_STRIDE, CORE_WINDOW, CORE_DENSITY, CORE_GAP):
+        for cs, ce, ss, se, strand in find_cores(s, tk, CORE_STRIDE, CORE_WINDOW, CORE_DENSITY, CORE_GAP,
+                                                 CORE_MIN_STRETCH):
             found.append([a + cut_steps(off, cs, ce, trim_margin, True), a + cut_steps(off, cs, ce, trim_margin, False),
-                          {tk.ids[t]}, {strand}, ss, se])
+                          set(tk.ids), {strand}, ss, se])
         found.sort()
         merged = []
         for c in found:

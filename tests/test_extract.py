@@ -359,11 +359,13 @@ TRIM_WALKS = [
 STEP_RE = extract.STEP
 FLIP = {'>': '<', '<': '>'}
 # tuned to the small graph: every k-mer sampled, in windows of 30
-TRIM_TUNING = {'CORE_K': 11, 'CORE_STRIDE': 1, 'CORE_WINDOW': 30, 'CORE_GAP': 60}
+TRIM_TUNING = {'CORE_K': 11, 'CORE_STRIDE': 1, 'CORE_WINDOW': 30, 'CORE_GAP': 60, 'CORE_MIN_STRETCH': 200}
 
 
-def trim_fixture(d, walks=TRIM_WALKS):
-    """The trimming graph in `d`, with its reference index and targets BED; returns (graph, region, BED)."""
+def trim_fixture(d, walks=TRIM_WALKS, seqs=TRIM_S, targets=((4, 'X'),), n_ref=7):
+    """The trimming graph in `d`, with its reference index and targets BED; returns (graph, region, BED).
+    The reference walks nodes 1 to `n_ref`, the region's anchors are its second and second-last node, and
+    each target is a whole reference node."""
     g = os.path.join(d, 'g.gfa')
     edges = set()
     for _, _, walk in walks:
@@ -373,19 +375,21 @@ def trim_fixture(d, walks=TRIM_WALKS):
             edges.add(min(e, r))
     with open(g, 'w') as f:
         f.write('H\tVN:Z:1.1\n')
-        f.writelines('S\t%d\t%s\n' % kv for kv in TRIM_S.items())
+        f.writelines('S\t%d\t%s\n' % kv for kv in seqs.items())
         f.writelines('L\t%d\t%s\t%d\t%s\t0M\n' % (a, '+' if oa == '>' else '-', b, '+' if ob == '>' else '-')
                      for a, oa, b, ob in sorted(edges))
         f.writelines('W\t%s\t%s\tchrT\t0\t0\t%s\n' % w for w in walks)
     prepare.write_ref_index(g, 'CHM13', 'chrT', os.path.join(d, 'chrT.ref.tsv.gz'))
     pos, at = 0, {}
-    for n in range(1, 8):
-        at[n] = (pos, pos + len(TRIM_S[n]))
-        pos += len(TRIM_S[n])
+    for n in range(1, n_ref + 1):
+        at[n] = (pos, pos + len(seqs[n]))
+        pos += len(seqs[n])
     bed = os.path.join(d, 'targets.bed')
     with open(bed, 'w') as f:
-        f.write('chrT\t%d\t%d\tX\n' % at[4])
-    region = regions.Region('X', 'chrT', 2, 6, at[2][1], at[6][0], at[6][1] - at[2][0], 'X', '.', 'ok', '')
+        f.writelines('chrT\t%d\t%d\t%s\n' % (at[n] + (t,)) for n, t in targets)
+    r = n_ref - 1
+    region = regions.Region('X', 'chrT', 2, r, at[2][1], at[r][0], at[r][1] - at[2][0],
+                            ','.join(t for _, t in targets), '.', 'ok', '')
     return g, region, bed
 
 
@@ -406,14 +410,14 @@ class TestTrim(unittest.TestCase):
         kw = dict(stride=1, window=30, gap=60)
         flank = _flank(400)
         seq = flank + _array(8) + flank
-        self.assertEqual(extract.find_cores(seq, tk, **kw), [(0, 400, 880, 400, 880, '+')])
-        self.assertEqual(extract.find_cores(revcomp(seq), tk, **kw), [(0, 400, 880, 400, 880, '-')])
+        self.assertEqual(extract.find_cores(seq, tk, **kw), [(400, 880, 400, 880, '+')])
+        self.assertEqual(extract.find_cores(revcomp(seq), tk, **kw), [(400, 880, 400, 880, '-')])
         self.assertEqual(extract.find_cores(flank, tk, **kw), [])
         # a short copy far from the array is a stretch of its own, and the array has more hits
         seq = _array(2) + _flank(300) + _array(8) + flank
-        self.assertEqual(extract.find_cores(seq, tk, **kw), [(0, 420, 900, 420, 900, '+')])
+        self.assertEqual(extract.find_cores(seq, tk, **kw), [(420, 900, 420, 900, '+')])
         # with sparser samples the core still ends within a stride of the array
-        t, a, b, _, _, st = extract.find_cores(flank + _array(8) + flank, tk, stride=7, window=60, gap=60)[0]
+        a, b, _, _, st = extract.find_cores(flank + _array(8) + flank, tk, stride=7, window=60, gap=60)[0]
         self.assertTrue(400 <= a < 407 and 873 < b <= 880 and st == '+', (a, b))
 
     def test_needs_keep_fragments(self):
@@ -453,6 +457,48 @@ class TestTrim(unittest.TestCase):
                                                    '370', '970', '370', '970'])
         self.assertEqual(cores['h3#1#chrT#0'][2:4], ['suffix', 'at_end'])
         self.assertEqual(cores['h5#1#chrT#0'][2:4], ['spanning', 'no_core'])
+
+    def test_several_targets(self):
+        # two targets that are pieces of one array (4 and 6), whose k-mers they share, on the reference
+        # with a flank between them. a target's own k-mers would be none
+        S = {1: _rand(50), 2: _rand(20), 3: _flank(300), 4: _array(10), 5: _flank(500), 6: _array(8),
+             7: _flank(300), 8: _rand(20), 9: _rand(50), 10: _array(9, 200), 11: _array(2)}
+        walks = [
+            ('CHM13', '0', '>1>2>3>4>5>6>7>8>9'),
+            ('h1', '1', '>1>2>3>4>5>10>7>8>9'),      # a longer second array
+            ('h2', '1', '>1>2>3>4>7>8>9'),           # only the first
+            ('h3', '1', '>1>2>3>4>5>11>7>8>9'),      # the first, and a short copy of the unit, which stays
+            ('h4', '1', '<9<8<7<10<5<4<3<2<1'),      # reverse
+        ]
+        tk = extract.TargetKmers([('X', S[4]), ('Y', S[6])], [S[3], S[5], S[7]], k=11)
+        self.assertEqual((tk.ids, len(tk.fwd)), (['X', 'Y'], 60))
+        kw = dict(stride=1, window=30, gap=60, min_stretch=200)
+        seq = S[3] + S[4] + S[5] + S[10] + S[7]
+        self.assertEqual(extract.find_cores(seq, tk, **kw),
+                         [(300, 900, 300, 900, '+'), (1400, 1940, 1400, 1940, '+')])
+        self.assertEqual(extract.find_cores(revcomp(seq), tk, **kw),
+                         [(300, 840, 300, 840, '-'), (1340, 1940, 1340, 1940, '-')])
+        # only the best stretch, without several targets, and for one that is too short
+        one = extract.TargetKmers([('X', S[4])], [S[3], S[5], S[7]], k=11)
+        self.assertEqual(extract.find_cores(seq, one, **kw), [(300, 900, 300, 900, '+')])
+        self.assertEqual(extract.find_cores(S[3] + S[4] + S[5] + S[11] + S[7], tk, **kw),
+                         [(300, 900, 300, 900, '+')])
+        g, region, bed = trim_fixture(self.d, walks, S, ((4, 'X'), (6, 'Y')), 9)
+        x = os.path.join(self.d, 'x')
+        s = extract.extract(g, [region], x, exit_edges=True, ref_dir=self.d, keep_fragments=True,
+                            allow_inversions=True, trim_targets=bed, trim_margin=0)
+        self.assertEqual(s['status'], {'ok': 1})
+        self.assertEqual((s['trim']['cores'], s['trim']['no_core'], s['trim']['at_end']), (8, 0, 0))
+        pk = next(extract.read_packages(os.path.join(x, 'packages.jsonl.gz')))
+        self.assertEqual({a['seq']: a['weight'] for a in pk['alleles']}, {S[4]: 5, S[6]: 1, S[10]: 2})
+        self.assertEqual(pk['n_runs'], {'spanning': 8})
+        with gzip.open(os.path.join(x, 'occurrences.tsv.gz'), 'rt') as f:
+            occ = [l.rstrip('\n').split('\t') for l in f if not l.startswith('#')]
+        self.assertEqual([r[4:6] for r in occ if r[0] == 'CHM13#0#chrT#0'], [['3', '4'], ['5', '6']])
+        self.assertEqual([r[4:6] for r in occ if r[0] == 'h2#1#chrT#0'], [['3', '4']])
+        with gzip.open(os.path.join(x, 'cores.tsv.gz'), 'rt') as f:
+            cores = [l.rstrip('\n').split('\t') for l in f if not l.startswith('#')]
+        self.assertEqual([c[2:5] for c in cores if c[0] == 'h3#1#chrT#0'], [['X,Y', 'spanning', 'core']])
 
     def test_cut_steps(self):
         off = [0, 100, 5000, 5100, 6000]       # steps of 100, 4900, 100 and 900 bp; a core at [5000, 5100)
