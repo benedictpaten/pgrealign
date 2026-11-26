@@ -68,9 +68,16 @@ def cmd_prepare(a):
 def cmd_regions(a):
     from . import provenance, regions
     started = time.time()
-    summary = regions.build(a.targets, a.contig, a.snarls, a.ref, a.out, vg=a.vg, pad=a.pad, max_span=a.max_span)
-    provenance.write_manifest(a.out, 'regions', {'targets': a.targets, 'snarls': a.snarls, 'ref': a.ref},
-                              {'contig': a.contig, 'pad': a.pad, 'max_span': a.max_span}, tools=_tools(a, 'vg'),
+    if a.max_bypass is None and a.snarls is None:
+        raise SystemExit('pgrealign regions: --snarls is needed without --max-bypass')
+    if a.max_bypass is not None and a.graph is None:
+        raise SystemExit('pgrealign regions: --max-bypass needs --graph')
+    summary = regions.build(a.targets, a.contig, a.snarls, a.ref, a.out, vg=a.vg, pad=a.pad, max_span=a.max_span,
+                            graph=a.graph, max_bypass=a.max_bypass, ref_sample=a.ref_sample, threads=a.threads)
+    inputs = {'targets': a.targets, 'snarls': a.snarls, 'ref': a.ref, 'graph': a.graph}
+    provenance.write_manifest(a.out, 'regions', {k: v for k, v in inputs.items() if v is not None},
+                              {'contig': a.contig, 'pad': a.pad, 'max_span': a.max_span, 'max_bypass': a.max_bypass},
+                              tools=_tools(a, 'vg'),
                               extra={'summary': summary}, started=started)
     _print(summary)
 
@@ -79,10 +86,21 @@ def cmd_extract(a):
     from . import extract, provenance, regions
     started = time.time()
     rs = list(regions.read_regions(a.regions))
+    if a.exit_edges and a.ref_dir is None:
+        raise SystemExit('pgrealign extract: --exit-edges needs --ref-dir')
+    if a.keep_fragments and not a.exit_edges:
+        raise SystemExit('pgrealign extract: --keep-fragments needs --exit-edges')
+    if a.trim_targets and not a.keep_fragments:
+        raise SystemExit('pgrealign extract: --trim-targets needs --keep-fragments')
     summary = extract.extract(a.graph, rs, a.out, vg=a.vg, threads=a.threads, ref_sample=a.ref_sample,
-                              max_internal_bp=a.max_internal_bp)
+                              max_internal_bp=a.max_internal_bp, allow_inversions=a.allow_inversions,
+                              exit_edges=a.exit_edges, ref_dir=a.ref_dir, keep_fragments=a.keep_fragments,
+                              trim_targets=a.trim_targets, trim_margin=a.trim_margin)
     provenance.write_manifest(os.path.join(a.out, 'extract'), 'extract', {'graph': a.graph, 'regions': a.regions},
-                              {'ref_sample': a.ref_sample, 'max_internal_bp': a.max_internal_bp},
+                              {'ref_sample': a.ref_sample, 'max_internal_bp': a.max_internal_bp,
+                               'allow_inversions': a.allow_inversions, 'exit_edges': a.exit_edges,
+                               'ref_dir': a.ref_dir, 'keep_fragments': a.keep_fragments,
+                               'trim_targets': a.trim_targets, 'trim_margin': a.trim_margin},
                               tools=_tools(a, 'vg'), extra={'summary': summary}, started=started)
     _print(summary)
 
@@ -278,13 +296,20 @@ def main(argv=None):
     c = sub.add_parser('regions', help="anchor every target in the contig's snarls, and merge those that touch")
     c.add_argument('--targets', required=True, help='catalogue or BED of target intervals')
     c.add_argument('--contig', required=True)
-    c.add_argument('--snarls', required=True, help='<contig>.snarls.pb from prepare')
+    c.add_argument('--snarls', help='<contig>.snarls.pb from prepare (not read with --max-bypass)')
     c.add_argument('--ref', required=True, help='<contig>.ref.tsv.gz from prepare')
     c.add_argument('-o', '--out', required=True, help='regions.tsv(.gz)')
     c.add_argument('--pad', type=int, default=200, help='pad each target by this many bp [200]')
     c.add_argument('--max-span', type=int, default=100000,
                    help='leave a region whose anchors are further apart than this as it is [100000]')
+    c.add_argument('--max-bypass', type=float, metavar='FRACTION',
+                   help="anchor each target on the nearest reference nodes that at most this fraction of the "
+                        "haplotypes' walks go around, instead of on the snarls; extract then needs --exit-edges")
+    c.add_argument('--graph', help="the contig's graph, for --max-bypass: prepare's <contig>.gbz, prepare --graph's "
+                                   "graph, or a GFA")
+    c.add_argument('--ref-sample', default='CHM13', help='the reference sample, for --max-bypass [CHM13]')
     vg_arg(c)
+    c.add_argument('-t', '--threads', type=int, default=4)
     c.set_defaults(func=cmd_regions)
 
     c = sub.add_parser('extract', help="every walk's run through every region, in one streaming pass")
@@ -295,6 +320,23 @@ def main(argv=None):
     c.add_argument('--max-internal-bp', type=int, default=200000,
                    help="an anchor-free walk longer than this inside a region's interior makes the region complex, "
                         "left as it is [200000]")
+    c.add_argument('--allow-inversions', action='store_true',
+                   help="keep a region whose runs visit a node both ways, as at an inversion, instead of making "
+                        "it complex: the inverted allele is realigned as the forward sequence it spells")
+    c.add_argument('--exit-edges', action='store_true',
+                   help="let runs begin and end at reference nodes other than the anchors, for regions whose "
+                        "anchors walks go around (regions --max-bypass); needs --ref-dir")
+    c.add_argument('--ref-dir', help="prepare's output directory, whose <contig>.ref.tsv.gz --exit-edges reads")
+    c.add_argument('--keep-fragments', action='store_true',
+                   help="with --exit-edges, record only the spanning runs, and leave every other run (the "
+                        "fragments) and every anchor-free walk on its own nodes, which stay in the graph")
+    c.add_argument('--trim-targets', metavar='TARGETS',
+                   help="with --keep-fragments, the targets file regions read: cut each run down to the "
+                        "haplotype's own copy of the targets, found by the targets' k-mers on the reference "
+                        "(from the first to the last of a region's several targets), and leave the rest on "
+                        "its nodes")
+    c.add_argument('--trim-margin', type=int, default=20000,
+                   help='bp of sequence kept on either side of a copy of a target, with --trim-targets [20000]')
     vg_arg(c)
     c.add_argument('-t', '--threads', type=int, default=4)
     c.set_defaults(func=cmd_extract)

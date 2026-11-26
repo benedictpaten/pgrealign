@@ -5,7 +5,9 @@
   first W line, as `vg convert -f` writes them.
 - The `extract` outputs: `packages.jsonl.gz`, `occurrences.tsv.gz` and `interiors.tsv.gz`.
 - The `realign` outputs: one `msas.jsonl.gz`, or several, such as one per shard. A region may appear in
-  only one of them.
+  only one of them. In place of `rows`, a record may name a GFA (`gfa`, relative to its msas file): an
+  alignment of the region made by another aligner, such as centrolign, with a P line for every member
+  of the package except an empty allele (alignment_graph).
 
 Only regions whose package is `ok` and whose MSA is `ok` are replaced. Every other region keeps its
 subgraph.
@@ -25,6 +27,11 @@ subgraph.
   the edges to the anchors: L->first for an allele or a left fragment, last->R for an allele or a
   right fragment, and L->R for an empty allele (one that deletes the whole interior) unless the input
   has it already.
+- **Exit edges.** A region that extract found with exit edges (its package's `exit_edges`) has runs
+  that can begin or end at other reference nodes than its anchors, so instead of the edges to the
+  anchors, each run gets edges from the step before it and to the step after it in its walk. Its
+  interior's nodes that walks also visit outside every run (interiors.tsv.gz's `kept`) stay, with the
+  edges they have to nodes that stay.
 - **Walks (W lines).** Every run recorded in `occurrences.tsv.gz` is rewritten to its row's walk:
   forward for orient '+', reversed and flipped for '-'.
   - A spanning run replaces the steps between the anchors.
@@ -74,6 +81,8 @@ def load_plan(extract_dir, msas):
                         m['id'], found[m['id']], path))
                 found[m['id']] = path
                 if m.get('status') == 'ok':
+                    if 'gfa' in m:
+                        m['gfa'] = os.path.join(os.path.dirname(path), m['gfa'])
                     ok[m['id']] = m
     plan = {}
     for p in read_packages(os.path.join(extract_dir, 'packages.jsonl.gz'), status={'ok'}):
@@ -83,31 +92,40 @@ def load_plan(extract_dir, msas):
 
 
 def read_interiors(path, keep):
-    """{region: its interior's node ids} for the regions in `keep`."""
+    """{region: (its interior's node ids, the set of those that stay)} for the regions in `keep`. With
+    exit edges, extract keeps the interior nodes that walks also visit outside every run."""
     out = {}
     with gzip.open(path, 'rt') as f:
         for line in f:
             if line.startswith('#'):
                 continue
-            rid, nodes = line.rstrip('\n').split('\t')
-            if rid in keep:
-                out[rid] = [int(x) for x in nodes.split(',')] if nodes else []
+            x = line.rstrip('\n').split('\t')
+            if x[0] in keep:
+                nodes = [int(n) for n in x[1].split(',')] if x[1] else []
+                kept = {int(n) for n in x[2].split(',')} if len(x) > 2 and x[2] else set()
+                out[x[0]] = (nodes, kept)
     return out
 
 
 def read_occurrences(path, keep):
-    """{walk key: [(first, end, region, type, orient, member)]} for the regions in `keep`, sorted."""
+    """({walk key: [(first, end, region, type, orient, member)]} for the regions in `keep`, sorted;
+    [(region, member, orient, step before, step after)] of every such run, each step as (orient, node)
+    or None at a walk's end)."""
     by_walk = collections.defaultdict(list)
+    ends = []
     with gzip.open(path, 'rt') as f:
         for line in f:
             if line.startswith('#'):
                 continue
-            w, rid, typ, orient, a, b, mid = line.rstrip('\n').split('\t')
+            x = line.rstrip('\n').split('\t')
+            w, rid, typ, orient, a, b, mid = x[:7]
             if rid in keep:
                 by_walk[w].append((int(a), int(b), rid, typ, orient, mid))
+                if len(x) > 7:
+                    ends.append((rid, mid, orient) + tuple(None if t == '.' else (t[0], int(t[1:])) for t in x[7:9]))
     for v in by_walk.values():
         v.sort()
-    return by_walk
+    return by_walk, ends
 
 
 def old_node_ids(graph, vg=None, threads=4):
@@ -134,22 +152,45 @@ class RegionGraph:
         self.seq, self.edges, self.walks = seq, edges, walks
 
 
-def region_graph(pkg, rows):
-    """The graph that replaces the interior of the region `pkg`, from its MSA `rows` {member: row}:
-    - `seq`: {node: sequence} of the induced graph (induce.py). Its nodes are numbered -1, -2, ... in
-      topological order, so they cannot be mistaken for the anchors, which keep the input's ids.
+def alignment_graph(pkg, msa):
+    """The induced graph (induce.py) of region `pkg`'s alignment `msa`: of its `rows`, or of the GFA it
+    names (`gfa`), unchopped and chopped the same way. The GFA has a P line for each member of the
+    package, except that an empty allele may have none, and each member's walk spells its sequence."""
+    if 'gfa' not in msa:
+        return induce_mod.induce(msa['rows'])
+    g = induce_mod.normalize(induce_mod.read_gfa(msa['gfa']))
+    members = pkg['alleles'] + pkg['fragments']
+    extra = set(g.walks) - {x['id'] for x in members}
+    if extra:
+        raise ValueError('%s: region %s has no member %s' % (msa['gfa'], pkg['id'], ', '.join(sorted(extra))))
+    for x in members:
+        if x['id'] not in g.walks and x['seq']:
+            raise ValueError('%s: no P line for %s of region %s' % (msa['gfa'], x['id'], pkg['id']))
+        if ''.join(g.seq[n] for n in g.walks.setdefault(x['id'], [])) != x['seq'].upper():
+            raise ValueError('%s: the walk of %s does not spell its sequence in region %s' % (
+                msa['gfa'], x['id'], pkg['id']))
+    return g
+
+
+def region_graph(pkg, g):
+    """The graph that replaces the interior of the region `pkg`, from `g`, the induced graph of its
+    alignment (alignment_graph):
+    - `seq`: {node: sequence} of `g`. Its nodes are numbered -1, -2, ... in topological order, so they
+      cannot be mistaken for the anchors, which keep the input's ids.
     - `edges`: {(from, from_orient, to, to_orient)}, all forward: the induced graph's edges, plus L->first
       for an allele or a left fragment, last->R for an allele or a right fragment, and L->R for an
-      empty allele.
+      empty allele. With exit edges (the package's `exit_edges`), a run can be bounded by other nodes
+      than the anchors, so these edges come from the runs instead (Splice.add_run_edges).
     - `walks`: {member: [node, ...]}, in the region's forward orientation. An empty member's is empty."""
-    g = induce_mod.induce(rows)
-    ids = {n: -(i + 1) for i, n in enumerate(sorted(g.seq))}
+    ids ={n: -(i + 1) for i, n in enumerate(sorted(g.seq))}
     L, R = pkg['L'], pkg['R']
     side = {f['id']: f['side'] for f in pkg['fragments']}
     edges = {(ids[a], '+', ids[b], '+') for a, b in g.edges}
     walks = {}
     for m, w in g.walks.items():
         gw = walks[m] = [ids[n] for n in w]
+        if pkg.get('exit_edges'):
+            continue
         sd = side.get(m, 'spanning')
         if not gw:
             if sd == 'spanning':
@@ -224,13 +265,16 @@ class Splice:
     - `walks` {(region, member): [node, ...]} and `spelling` {(region, member): sequence}: each member's
       new walk, and the sequence it and every run recorded for it must spell, region-forward;
     - `removed`: {node: region} for the replaced interiors' nodes, in the input's ids;
+    - `spelled`: the input nodes the old runs visit, which are `removed` and the interior nodes kept;
     - `runs`: {walk key: [(first, end, region, type, orient, member)]}, from read_occurrences;
     - `renumber`: {input id: output id} for the nodes that stay, or None when they keep their ids."""
-    __slots__ = ('seq', 'edges', 'walks', 'spelling', 'removed', 'runs', 'renumber')
+    __slots__ = ('seq', 'edges', 'walks', 'spelling', 'removed', 'runs', 'renumber', 'spelled')
 
-    def __init__(self, removed, runs, renumber):
+    def __init__(self, removed, runs, renumber, spelled=None):
         self.seq, self.edges, self.walks, self.spelling = {}, set(), {}, {}
         self.removed, self.runs, self.renumber = removed, runs, renumber
+        # the input nodes whose sequences spell the old runs: the interiors, kept nodes included
+        self.spelled = removed if spelled is None else spelled
 
     def add(self, rid, pkg, rg, ids):
         """Add region `rid`'s graph `rg` (region_graph), whose node -i gets the id ids[i - 1]."""
@@ -246,6 +290,32 @@ class Splice:
             self.walks[(rid, m)] = [out_id(n) for n in w]
         for x in pkg['alleles'] + pkg['fragments']:
             self.spelling[(rid, x['id'])] = x['seq'].upper()
+
+    def add_run_edges(self, ends):
+        """The edges between each run's new walk and the steps that bound it in its walk, for the
+        regions with exit edges: `ends` is [(region, member, orient, step before, step after)]."""
+        for rid, mid, orient, before, after in ends:
+            w = self.walks[(rid, mid)]
+            if not w:
+                raise ValueError('an empty run of member %s of region %s, which has exit edges' % (mid, rid))
+            # the run's first and last steps in its walk, which reads the member's walk backward for '-'
+            first, last = (('+', w[0]), ('+', w[-1])) if orient == '+' else (('-', w[-1]), ('-', w[0]))
+            if before is not None:
+                self.add_edge(('+' if before[0] == '>' else '-', self.out_old(before[1])), first)
+            if after is not None:
+                self.add_edge(last, ('+' if after[0] == '>' else '-', self.out_old(after[1])))
+
+    def add_edge(self, a, b):
+        """The edge from step a to step b, each (orient, node), in one of its two spellings."""
+        e = (a[1], a[0], b[1], b[0])
+        r = (b[1], FLIP[b[0]], a[1], FLIP[a[0]])
+        self.edges.add(min(e, r))
+
+    def out_old(self, n):
+        """An input node's id in the output."""
+        if n in self.removed:
+            raise ValueError('node %d next to a run is in the interior of region %s' % (n, self.removed[n]))
+        return n if self.renumber is None else self.renumbered(n)
 
     def renumbered(self, n):
         """Input node `n`'s id in the output, under `renumber`. old_node_ids gave every node whose S line
@@ -345,7 +415,7 @@ def rewrite(graph, out_gfa, sp, vg=None, threads=4):
     line, every W line rewritten by rewrite_walk, and every other line that names a node renumbered when
     `sp.renumber` is set. Returns the counts of edges removed, runs rewritten and walks rewritten. On a
     failure, nothing is left at `out_gfa`."""
-    renumber, removed = sp.renumber, sp.removed
+    renumber, removed, spelled = sp.renumber, sp.removed, sp.spelled
     # an empty allele's L->R edge is usually in the input already, from the walks that spelled the
     # allele; then the input's line is the one written
     new_edges = set(sp.edges)
@@ -363,8 +433,9 @@ def rewrite(graph, out_gfa, sp, vg=None, threads=4):
                 if t == 'S':
                     x = line.split('\t', 3)
                     n = int(x[1])
-                    if n in removed:
+                    if n in spelled:
                         old_seq[n] = x[2].rstrip('\n').upper()
+                    if n in removed:
                         continue
                     if renumber is not None:
                         out.write('S\t%d\t%s' % (renumber[n], x[2] if len(x) == 3 else x[2] + '\t' + x[3]))
@@ -434,9 +505,12 @@ def replace(graph, extract_dir, msas, out_gfa, id_start=None, vg=None, threads=4
         raise ValueError("id_mode 'reuse' needs id_start")
     plan = load_plan(extract_dir, msas)
     interiors = read_interiors(os.path.join(extract_dir, 'interiors.tsv.gz'), plan)
-    occ = read_occurrences(os.path.join(extract_dir, 'occurrences.tsv.gz'), plan)
+    occ, ends = read_occurrences(os.path.join(extract_dir, 'occurrences.tsv.gz'), plan)
+    exit_regions = {rid for rid, (pkg, _) in plan.items() if pkg.get('exit_edges')}
+    ends = [e for e in ends if e[0] in exit_regions]
 
-    removed = {n: rid for rid in plan for n in interiors[rid]}
+    removed = {n: rid for rid in plan for n in interiors[rid][0] if n not in interiors[rid][1]}
+    spelled = {n for rid in plan for n in interiors[rid][0]}
     for rid, (pkg, _) in plan.items():
         for anchor in (pkg['L'], pkg['R']):
             if anchor in removed:
@@ -446,9 +520,10 @@ def replace(graph, extract_dir, msas, out_gfa, id_start=None, vg=None, threads=4
     stats = collections.Counter()
     graphs = {}
     for rid, (pkg, msa) in plan.items():
-        graphs[rid] = region_graph(pkg, msa['rows'])
+        graphs[rid] = region_graph(pkg, alignment_graph(pkg, msa))
         stats['regions'] += 1
-        stats['nodes_removed'] += len(interiors[rid])
+        stats['nodes_removed'] += len(interiors[rid][0]) - len(interiors[rid][1])
+        stats['nodes_kept'] += len(interiors[rid][1])
         stats['nodes_added'] += len(graphs[rid].seq)
     if id_mode == 'dense':
         renumber, new_ids, id_range = number_dense(
@@ -457,13 +532,15 @@ def replace(graph, extract_dir, msas, out_gfa, id_start=None, vg=None, threads=4
         stats['id_range'] = list(id_range)
     else:
         renumber = None
-        new_ids, next_id = number_reuse([(rid, len(graphs[rid].seq)) for rid in plan], interiors, id_start)
+        freed = {rid: [n for n in interiors[rid][0] if n not in interiors[rid][1]] for rid in plan}
+        new_ids, next_id = number_reuse([(rid, len(graphs[rid].seq)) for rid in plan], freed, id_start)
         if next_id > id_start:
             stats['ids_above_start'] = next_id - id_start
         stats['next_id'] = next_id
-    sp = Splice(removed, occ, renumber)
+    sp = Splice(removed, occ, renumber, spelled)
     for rid, (pkg, _) in plan.items():
         sp.add(rid, pkg, graphs[rid], new_ids[rid])
+    sp.add_run_edges(ends)
     stats.update(rewrite(graph, out_gfa, sp, vg, threads))
     stats['id_mode'] = id_mode
     return dict(stats)

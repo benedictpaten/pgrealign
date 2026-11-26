@@ -160,5 +160,90 @@ class TestFiles(unittest.TestCase):
         self.assertEqual(list(regions.read_regions(out)), [])
 
 
+class TestBypass(unittest.TestCase):
+    """Anchors that at most so many walks go around, on extract's exit-edge graph."""
+
+    def setUp(self):
+        from test_extract import EXIT_S, EXIT_WALKS
+        from pgrealign import prepare
+        self.d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.d, ignore_errors=True)
+        self.g = os.path.join(self.d, 'g.gfa')
+        with open(self.g, 'w') as f:
+            f.writelines('S\t%d\t%s\n' % kv for kv in EXIT_S.items())
+            f.writelines('W\t%s\t%s\tchrT\t0\t0\t%s\n' % w for w in EXIT_WALKS)
+        self.ref = os.path.join(self.d, 'chrT.ref.tsv.gz')
+        prepare.write_ref_index(self.g, 'CHM13', 'chrT', self.ref)
+        self.index = prepare.read_ref_index(self.ref)
+
+    def test_counts(self):
+        cands, counts, haps, links = regions.bypass_counts(self.g, self.index, [(0, 10 ** 6)])
+        self.assertEqual([c[2] for c in cands], list(range(1, 10)))
+        # 2: s2, s4, s7 (back from 3 to 1) and s9; 3: s2, s4, s9; 4-6: s4; 7 and 8: s3, s4
+        self.assertEqual(dict(zip(range(1, 10), counts)), {1: 0, 2: 4, 3: 3, 4: 1, 5: 1, 6: 1, 7: 2, 8: 2, 9: 0})
+        self.assertEqual(haps, 10)
+        # only the candidates within the windows
+        st = {n: (a, b) for n, _, a, b in self.index}
+        cands, counts, _, _ = regions.bypass_counts(self.g, self.index, [(st[4][0], st[6][1])])
+        self.assertEqual([c[2] for c in cands], [4, 5, 6])
+        self.assertEqual(counts, [1, 1, 1])
+
+    def test_anchors(self):
+        cands, counts, _, _ = regions.bypass_counts(self.g, self.index, [(0, 10 ** 6)])
+        st = {n: (a, b) for n, _, a, b in self.index}
+        a0, b0 = st[5]
+        self.assertEqual([x[2] for x in regions.BypassAnchors(cands, counts, 2).query(a0, b0, 10 ** 6)], [4, 6])
+        self.assertEqual([x[2] for x in regions.BypassAnchors(cands, counts, 0).query(a0, b0, 10 ** 6)], [1, 9])
+        self.assertRaises(regions.AnchorError, regions.BypassAnchors(cands, counts, 0).query, a0, b0, 20)
+
+    def test_build(self):
+        st = {n: (a, b) for n, _, a, b in self.index}
+        bed = os.path.join(self.d, 't.bed')
+        with open(bed, 'w') as f:
+            f.write('chrT\t%d\t%d\tcen\n' % st[5])
+        out = os.path.join(self.d, 'regions.tsv')
+        s = regions.build(bed, 'chrT', None, self.ref, out, pad=0, max_span=10 ** 6, graph=self.g, max_bypass=0.2)
+        self.assertEqual((s['haplotypes'], s['max_bypass_walks'], s['status']), (10, 2, {'ok': 1}))
+        r = list(regions.read_regions(out))[0]
+        self.assertEqual((r.L, r.R, r.ref_start, r.ref_end, r.note), (4, 6, st[4][1], st[6][0], 'walks around L 1, R 1'))
+        regions.build(bed, 'chrT', None, self.ref, out, pad=0, max_span=10 ** 6, graph=self.g, max_bypass=0)
+        r = list(regions.read_regions(out))[0]
+        self.assertEqual((r.L, r.R), (1, 9))
+
+    def test_links(self):
+        from test_extract import EXIT_S, EXIT_WALKS
+        st = {n: (a, b) for n, _, a, b in self.index}
+        # s11 goes from 3 to 7 through 12, off the reference
+        g = os.path.join(self.d, 'g11.gfa')
+        with open(g, 'w') as f:
+            f.writelines('S\t%d\t%s\n' % kv for kv in EXIT_S.items())
+            f.writelines('W\t%s\t%s\tchrT\t0\t0\t%s\n' % w for w in EXIT_WALKS + [('s11', '1', '>1>2>3>12>7>8>9')])
+        self.assertEqual(regions.bypass_counts(self.g, self.index, [(0, 10 ** 6)])[3], [])
+        cands, counts, _, links = regions.bypass_counts(g, self.index, [(0, 10 ** 6)], gaps=[(st[3][1], st[7][0])])
+        self.assertEqual(dict(zip(range(1, 10), counts)), {1: 0, 2: 4, 3: 3, 4: 2, 5: 2, 6: 2, 7: 2, 8: 2, 9: 0})
+        # only the jumps around 4, 5 or 6: s4's from 1 to 9 and s11's from 3 to 7
+        self.assertEqual(links, [(st[1][0], st[9][0]), (st[3][0], st[7][0])])
+        bed = os.path.join(self.d, 't.bed')
+        with open(bed, 'w') as f:
+            f.write('chrT\t%d\t%d\ta\nchrT\t%d\t%d\tb\n' % (st[3] + st[7]))
+        out = os.path.join(self.d, 'regions.tsv')
+        # at most 2 walks: a alone is anchored on 1 and 4, b on 6 and 8, and without s11 they stay apart
+        s = regions.build(bed, 'chrT', None, self.ref, out, pad=0, max_span=10 ** 6, graph=self.g, max_bypass=0.2)
+        self.assertEqual((s['max_bypass_walks'], s['links']), (2, 1))
+        self.assertEqual([(r.L, r.R, r.targets) for r in regions.read_regions(out)], [(1, 4, 'a'), (6, 8, 'b')])
+        # s11 links a's interior to b's, so they merge
+        s = regions.build(bed, 'chrT', None, self.ref, out, pad=0, max_span=10 ** 6, graph=g, max_bypass=0.2)
+        self.assertEqual((s['max_bypass_walks'], s['links'], s['status']), (2, 2, {'ok': 1}))
+        r = list(regions.read_regions(out))[0]
+        self.assertEqual((r.L, r.R, r.targets, r.note), (1, 8, 'a,b', 'merged 2 targets; walks around L 0, R 2'))
+        # a link merges a region with every region between
+        A = regions.BypassAnchors(cands, counts, 2)
+        ts = [Target('a', st[3][0], st[3][1], 'cen'), Target('c', st[5][0], st[5][1], 'cen'),
+              Target('b', st[7][0], st[7][1], 'cen')]
+        self.assertEqual([(r.L, r.R) for r in regions.assign(ts, A, 'chrT', pad=0)], [(1, 4), (4, 6), (6, 8)])
+        rs = regions.assign(ts, A, 'chrT', pad=0, links=links)
+        self.assertEqual([(r.L, r.R, r.targets) for r in rs], [(1, 8, 'a,c,b')])
+
+
 if __name__ == '__main__':
     unittest.main()

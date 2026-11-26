@@ -6,7 +6,7 @@ import shutil
 import tempfile
 import unittest
 
-from pgrealign import extract, regions, replace, verify
+from pgrealign import extract, induce, prepare, regions, replace, verify
 from pgrealign.graph import revcomp
 
 UNIT = 'ACGTTGCAAGT'
@@ -42,7 +42,7 @@ def parse_steps(w):
     return [(x[0], int(x[1:])) for x in w.replace('>', ' >').replace('<', ' <').split()]
 
 
-def write_gfa(path, walks=WALKS, paths=()):
+def write_gfa(path, walks=WALKS, paths=(), seq=None):
     edges = set()
     for _, _, w in walks:
         st = parse_steps(w)
@@ -50,7 +50,7 @@ def write_gfa(path, walks=WALKS, paths=()):
             edges.add(canonical((a, '+' if oa == '>' else '-', b, '+' if ob == '>' else '-')))
     with open(path, 'w') as f:
         f.write('H\tVN:Z:1.1\tRS:Z:CHM13\n')
-        for n, s in S.items():
+        for n, s in (S if seq is None else seq).items():
             f.write('S\t%d\t%s\n' % (n, s))
         for a, ao, b, bo in sorted(edges):
             f.write('L\t%d\t%s\t%d\t%s\t0M\n' % (a, ao, b, bo))
@@ -95,6 +95,21 @@ def naive_msa(pkg):
                                                       for m in members}}
 
 
+def write_alignment_gfa(path, rows):
+    """The alignment `rows` as another aligner might write it: one base per node, a P line per member but
+    an empty one."""
+    g = induce.columns(rows, sorted(rows))
+    with open(path, 'w') as f:
+        f.write('H\tVN:Z:1.0\n')
+        for n in sorted(g.seq):
+            f.write('S\t%d\t%s\n' % (n, g.seq[n].lower()))
+        for a, b in sorted(g.edges):
+            f.write('L\t%d\t+\t%d\t+\t0M\n' % (a, b))
+        for m, w in sorted(g.walks.items()):
+            if w:
+                f.write('P\t%s\t%s\t*\n' % (m, ','.join('%d+' % n for n in w)))
+
+
 def ref_interval(L, R):
     pos, at = 0, {}
     for _, n in parse_steps(WALKS[0][2]):
@@ -136,7 +151,7 @@ class TestPieces(unittest.TestCase):
     ROWS = {'a1': 'ACGT', 'a2': '----', 'f1': 'AC--', 'f2': '--GT', 'f3': '-CG-'}
 
     def test_region_graph(self):
-        rg = replace.region_graph(self.PKG, self.ROWS)
+        rg = replace.region_graph(self.PKG, induce.induce(self.ROWS))
         self.assertEqual(rg.seq, {-1: 'A', -2: 'C', -3: 'G', -4: 'T'})
         self.assertEqual(rg.walks, {'a1': [-1, -2, -3, -4], 'a2': [], 'f1': [-1, -2], 'f2': [-3, -4],
                                     'f3': [-2, -3]})
@@ -146,6 +161,39 @@ class TestPieces(unittest.TestCase):
                          {(1, '+', -1, '+'), (-4, '+', 9, '+'), (1, '+', 9, '+')})
         self.assertEqual({e for e in rg.edges if e[0] < 0 and e[2] < 0},
                          {(-1, '+', -2, '+'), (-2, '+', -3, '+'), (-3, '+', -4, '+')})
+
+    def test_alignment_graph_from_gfa(self):
+        d = tempfile.mkdtemp()
+        try:
+            gfa = os.path.join(d, 'aln.gfa')
+            write_alignment_gfa(gfa, self.ROWS)
+            g = replace.alignment_graph(self.PKG, {'id': 'R', 'status': 'ok', 'gfa': gfa})
+            want = induce.induce(self.ROWS)
+            self.assertEqual((g.seq, g.edges, g.walks), (want.seq, want.edges, want.walks))
+            # each edit maps a line's fields to its new fields, or to None to drop it
+            def drop_f1(t):
+                return None if t[:2] == ['P', 'f1'] else t
+
+            def rename_f1(t):
+                return ['P', 'zz'] + t[2:] if t[:2] == ['P', 'f1'] else t
+
+            def change_base(t):                 # node 1 is a1's first base
+                return ['S', '1', 'T'] if t[:2] == ['S', '1'] else t
+
+            def reverse_link(t):
+                return t[:4] + ['-'] + t[5:] if t[:2] == ['L', '1'] else t
+
+            for edit, regex in ((drop_f1, 'no P line for f1'), (rename_f1, 'no member zz'),
+                                (change_base, 'walk of a1 does not spell'), (reverse_link, 'is not forward')):
+                with open(gfa) as f:
+                    lines = [edit(line.rstrip('\n').split('\t')) for line in f]
+                bad = os.path.join(d, 'bad.gfa')
+                with open(bad, 'w') as f:
+                    f.writelines('\t'.join(t) + '\n' for t in lines if t is not None)
+                with self.assertRaisesRegex(ValueError, regex):
+                    replace.alignment_graph(self.PKG, {'id': 'R', 'status': 'ok', 'gfa': bad})
+        finally:
+            shutil.rmtree(d)
 
     def test_number_dense(self):
         regs = [('R1', 1, 3), ('R2', 5, 1)]
@@ -220,6 +268,109 @@ class TestReplace(unittest.TestCase):
         edges = read_gfa(gfa)[1]
         self.assertEqual(len({canonical(e) for e in edges}), len(edges))
 
+    def test_exit_edges(self):
+        # extract's exit-edge graph: runs bounded by reference nodes off the anchors, and a node (10) that a
+        # walk uses outside every run, which stays
+        from test_extract import EXIT_S, EXIT_WALKS, exit_region
+        g = os.path.join(self.d, 'g.gfa')
+        write_gfa(g, EXIT_WALKS, seq=EXIT_S)
+        prepare.write_ref_index(g, 'CHM13', 'chrT', os.path.join(self.d, 'chrT.ref.tsv.gz'))
+        x = os.path.join(self.d, 'x')
+        self.assertEqual(extract.extract(g, [exit_region()], x, exit_edges=True, ref_dir=self.d)['status'], {'ok': 1})
+        pkg = next(extract.read_packages(os.path.join(x, 'packages.jsonl.gz')))
+        msas = os.path.join(self.d, 'msas.jsonl.gz')
+        with gzip.open(msas, 'wt') as f:
+            f.write(json.dumps(naive_msa(pkg)) + '\n')
+        for mode, start in (('dense', None), ('reuse', 100)):
+            with self.subTest(mode=mode):
+                out = os.path.join(self.d, 'out.%s.gfa' % mode)
+                st = replace.replace(g, x, msas, out, id_start=start, id_mode=mode)
+                self.assertEqual((st['nodes_removed'], st['nodes_kept']), (8, 1))
+                seq1, walks1 = self.check_roundtrip(g, out)
+                self.assert_edges_once(out)
+                if mode == 'reuse':
+                    # 10 stays for s5, which visits it outside every run; s2's run no longer does
+                    self.assertEqual(seq1[10], EXIT_S[10])
+                    self.assertEqual(walks1['s5#1'], [('>', 9), ('>', 10)])
+                    self.assertNotIn(10, {n for _, n in walks1['s2#1']})
+                    self.assertEqual(walks1['s4#1'], [('>', 1), ('>', 12), ('>', 9)])
+                if shutil.which('vg'):
+                    gbz = os.path.join(self.d, 'out.%s.gbz' % mode)
+                    replace.to_gbz(out, gbz, keep_gfa=True)
+                    res = verify.verify(g, gbz)
+                    self.assertTrue(res['ok'], res)
+                    self.assertEqual(res['paths'], len(EXIT_WALKS))
+
+    def test_keep_fragments(self):
+        # the exit-edge graph without s8 and s10, so that only 4 and s3's 11 are the alleles' alone: those
+        # go, and the nodes that s6's prefix and s7's U-turn visit stay, with the walks on them
+        from test_extract import EXIT_S, EXIT_WALKS, exit_region
+        walks = [w for w in EXIT_WALKS if w[0] not in ('s8', 's10')]
+        g = os.path.join(self.d, 'g.gfa')
+        write_gfa(g, walks, seq={n: s for n, s in EXIT_S.items() if n != 13})
+        prepare.write_ref_index(g, 'CHM13', 'chrT', os.path.join(self.d, 'chrT.ref.tsv.gz'))
+        x = os.path.join(self.d, 'x')
+        extract.extract(g, [exit_region()], x, exit_edges=True, ref_dir=self.d, keep_fragments=True)
+        pkg = next(extract.read_packages(os.path.join(x, 'packages.jsonl.gz')))
+        self.assertEqual((pkg['fragments'], pkg['kept_fragments']), ([], 2))
+        msas = os.path.join(self.d, 'msas.jsonl.gz')
+        with gzip.open(msas, 'wt') as f:
+            f.write(json.dumps(naive_msa(pkg)) + '\n')
+        for mode, start in (('dense', None), ('reuse', 100)):
+            with self.subTest(mode=mode):
+                out = os.path.join(self.d, 'out.%s.gfa' % mode)
+                st = replace.replace(g, x, msas, out, id_start=start, id_mode=mode)
+                self.assertEqual((st['nodes_removed'], st['nodes_kept']), (2, 5))
+                seq1, walks1 = self.check_roundtrip(g, out)
+                self.assert_edges_once(out)
+                if mode == 'reuse':
+                    self.assertEqual(walks1['s6#1'], [('>', 5), ('>', 6), ('>', 7), ('>', 8), ('>', 9)])
+                    self.assertEqual(walks1['s7#1'], [('>', 1), ('>', 2), ('>', 3), ('>', 14), ('>', 1)])
+                    self.assertEqual({n: seq1[n] for n in (3, 5, 6, 7)}, {n: EXIT_S[n] for n in (3, 5, 6, 7)})
+                    # the reference's allele moved to the new nodes
+                    self.assertFalse({3, 5, 6, 7} & {n for _, n in walks1['CHM13#0']})
+                if shutil.which('vg'):
+                    gbz = os.path.join(self.d, 'out.%s.gbz' % mode)
+                    replace.to_gbz(out, gbz, keep_gfa=True)
+                    res = verify.verify(g, gbz)
+                    self.assertTrue(res['ok'], res)
+                    self.assertEqual(res['paths'], len(walks))
+
+    def test_trim_targets(self):
+        # only the arrays are replaced: the flanks of every run stay on their nodes, as do h3's suffix and
+        # h5's run, and h2's array, in a prefix run, is replaced too
+        from unittest import mock
+        from test_extract import TRIM_S, TRIM_WALKS, TRIM_TUNING, trim_fixture
+        with mock.patch.multiple(extract, **TRIM_TUNING):
+            g, region, bed = trim_fixture(self.d)
+            x = os.path.join(self.d, 'x')
+            extract.extract(g, [region], x, exit_edges=True, ref_dir=self.d, keep_fragments=True,
+                            allow_inversions=True, trim_targets=bed, trim_margin=0)
+        pkg = next(extract.read_packages(os.path.join(x, 'packages.jsonl.gz')))
+        msas = os.path.join(self.d, 'msas.jsonl.gz')
+        with gzip.open(msas, 'wt') as f:
+            f.write(json.dumps(naive_msa(pkg)) + '\n')
+        for mode, start in (('dense', None), ('reuse', 100)):
+            with self.subTest(mode=mode):
+                out = os.path.join(self.d, 'out.%s.gfa' % mode)
+                st = replace.replace(g, x, msas, out, id_start=start, id_mode=mode)
+                self.assertEqual((st['nodes_removed'], st['nodes_kept']), (4, 0))
+                seq1, walks1 = self.check_roundtrip(g, out)
+                self.assert_edges_once(out)
+                if mode == 'reuse':
+                    self.assertEqual({n: seq1[n] for n in (3, 5, 9, 11)}, {n: TRIM_S[n] for n in (3, 5, 9, 11)})
+                    self.assertEqual(walks1['h5#1'], [('>', n) for n in (1, 2, 3, 5, 6, 7)])
+                    self.assertEqual(walks1['h3#1'], [('>', n) for n in (1, 2, 3, 11)])
+                    self.assertEqual(walks1['h2#1'][0], ('>', 9))
+                    self.assertEqual(walks1['CHM13#0'][:3] + walks1['CHM13#0'][-3:],
+                                     [('>', n) for n in (1, 2, 3, 5, 6, 7)])
+                if shutil.which('vg'):
+                    gbz = os.path.join(self.d, 'out.%s.gbz' % mode)
+                    replace.to_gbz(out, gbz, keep_gfa=True)
+                    res = verify.verify(g, gbz)
+                    self.assertTrue(res['ok'], res)
+                    self.assertEqual(res['paths'], len(TRIM_WALKS))
+
     def test_modes(self):
         fx = Fixture(self.d, paths=PATHS)
         for mode, start in (('reuse', 1000), ('dense', None), ('dense', 500)):
@@ -258,6 +409,25 @@ class TestReplace(unittest.TestCase):
             self.assertEqual(a.read(), b.read())
         with self.assertRaisesRegex(ValueError, 'appears twice'):
             replace.replace(fx.graph, fx.extract, [fx.single_msas, fx.msas[1]], several)
+
+    def test_gfa_alignments(self):
+        """Regions whose alignments come as GFAs, named relative to their msas file, are replaced just as
+        the same alignments given as rows are."""
+        fx = Fixture(self.d)
+        os.makedirs(os.path.join(self.d, 'aln'))
+        gfa_msas = os.path.join(self.d, 'msas.gfa.jsonl.gz')
+        with gzip.open(gfa_msas, 'wt') as out:
+            for pkg in extract.read_packages(os.path.join(fx.extract, 'packages.jsonl.gz')):
+                write_alignment_gfa(os.path.join(self.d, 'aln', pkg['id'] + '.gfa'), naive_msa(pkg)['rows'])
+                out.write(json.dumps({'id': pkg['id'], 'status': 'ok', 'method': 'centrolign',
+                                      'gfa': os.path.join('aln', pkg['id'] + '.gfa')}) + '\n')
+        rows_out, gfa_out = os.path.join(self.d, 'rows.gfa'), os.path.join(self.d, 'gfa.gfa')
+        st1 = replace.replace(fx.graph, fx.extract, fx.single_msas, rows_out)
+        st2 = replace.replace(fx.graph, fx.extract, gfa_msas, gfa_out)
+        self.assertEqual(st1, st2)
+        with open(rows_out) as a, open(gfa_out) as b:
+            self.assertEqual(a.read(), b.read())
+        self.check_roundtrip(fx.graph, gfa_out)
 
     def test_anchor_free_walk_against_the_region(self):
         # d's anchor-free walk runs against R1: extract flips it, and replace writes it back reversed
