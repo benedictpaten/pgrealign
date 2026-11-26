@@ -332,8 +332,9 @@ def main(argv=None):
                         "fragments) and every anchor-free walk on its own nodes, which stay in the graph")
     c.add_argument('--trim-targets', metavar='TARGETS',
                    help="with --keep-fragments, the targets file regions read: cut each run down to the "
-                        "haplotype's own copies of the targets, found by the targets' k-mers on the reference, "
-                        "and leave the rest on its nodes")
+                        "haplotype's own copy of the targets, found by the targets' k-mers on the reference "
+                        "(from the first to the last of a region's several targets), and leave the rest on "
+                        "its nodes")
     c.add_argument('--trim-margin', type=int, default=20000,
                    help='bp of sequence kept on either side of a copy of a target, with --trim-targets [20000]')
     vg_arg(c)

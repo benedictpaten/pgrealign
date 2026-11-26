@@ -71,8 +71,8 @@ gains no unaligned copy of them either.
 
 **Trimming to the targets** (`trim_targets`, with keep_fragments). A region's anchors can lie far from
 its targets, so its runs can carry much more than the targets. With trim_targets, the targets file that
-regions read, each run is cut down to the haplotype's own copy of each of the region's targets, its
-core, found by sequence (find_cores):
+regions read, each run is cut down to the haplotype's own copy of the region's targets, its core, found
+by sequence (find_cores):
 - The k-mers of a region's targets are those that occur at least twice in the reference's sequence of
   one of them, and `CORE_ENRICHMENT` times more densely in the targets than in the reference's sequence
   of the region outside them. The targets are taken together, as two can be pieces of one array, which
@@ -81,7 +81,9 @@ core, found by sequence (find_cores):
   the targets' k-mers, and dense windows close together make a stretch.
 - A run's core is its stretch with the most hits, out to the hits in the windows on either side, then by
   `trim_margin` on each side, within the run, and out to whole steps (cut_steps). In a region with
-  several targets, every other stretch of at least `CORE_MIN_STRETCH` bp is a core too. A step that
+  several targets, the core runs from the first to the last of that stretch and every other stretch of
+  at least `CORE_MIN_STRETCH` bp, so it takes in what lies between pieces of one array; a stretch whose
+  own core would reach its walk's end (below) is left out of that, and is a core of its own. A step that
   would add more than `trim_margin` again, such as a long node of a contig's unaligned sequence, is left
   out unless the core starts or ends in it. Overlapping cores are one core.
 - A core with a step of its walk on either side is recorded as a spanning run, an allele, whatever the
@@ -158,7 +160,7 @@ CORE_WINDOW = 10000     # in windows of this many bases
 CORE_DENSITY = 0.3      # a window is dense when at least this share of its samples are the targets' k-mers
 CORE_GAP = 200000       # dense windows at most this far apart make one stretch
 CORE_ENRICHMENT = 10    # a target k-mer is at least this many times denser in the targets than outside them
-CORE_MIN_STRETCH = 100000   # in a region with several targets, a stretch at least this long is a core
+CORE_MIN_STRETCH = 100000   # in a region with several targets, a stretch at least this long is in the core
 
 
 class TargetKmers:
@@ -195,12 +197,14 @@ class TargetKmers:
 
 
 def find_cores(seq, tk, stride=CORE_STRIDE, window=CORE_WINDOW, density=CORE_DENSITY, gap=CORE_GAP,
-               min_stretch=CORE_MIN_STRETCH):
+               min_stretch=CORE_MIN_STRETCH, at_end=None):
     """The cores in `seq` (upper case) of the targets of `tk` (TargetKmers), before any margin:
     [(start, end, stretch start, stretch end, strand)] in order, [start, end) out to the hits in the
     windows on either side of the stretch, and strand '+' or '-' when at least two thirds of those hits
-    read that way, else None. A core is the stretch with the most hits and, when `tk` has several targets,
-    each other stretch of at least `min_stretch` bp."""
+    read that way, else None. The core is the stretch with the most hits or, when `tk` has several targets,
+    the span from the first to the last of it and the other stretches of at least `min_stretch` bp. A
+    stretch whose own core `at_end(start, end)` says reaches the walk's end is left out of that span, and
+    is a core of its own, so there is at most one other."""
     k = tk.k
     last = len(seq) - k
     if last < 0:
@@ -236,18 +240,22 @@ def find_cores(seq, tk, stride=CORE_STRIDE, window=CORE_WINDOW, density=CORE_DEN
         a, b = span(stretch[0] * window, (stretch[1] + 1) * window)
         return b - a
 
-    best = max(stretches, key=n_hits)
-    out = []
-    for w0, w1 in stretches:
-        if [w0, w1] != best and (len(tk.ids) < 2 or (w1 - w0 + 1) * window < min_stretch):
-            continue
+    def core(w0, w1):
         a, b = span(w0 * window, (w1 + 1) * window)
         sa, sb = pos[a], pos[b - 1] + k
         a, b = span((w0 - 1) * window, (w1 + 2) * window)
         f = sum(1 for _, s in hits[a:b] if s > 0)
         r = (b - a) - f
         strand = '+' if f >= 2 * r else '-' if r >= 2 * f else None
-        out.append((pos[a], pos[b - 1] + k, sa, sb, strand))
+        return (pos[a], pos[b - 1] + k, sa, sb, strand)
+
+    best = max(stretches, key=n_hits)
+    keep = [s for s in stretches if s is best or (len(tk.ids) > 1 and (s[1] - s[0] + 1) * window >= min_stretch)]
+    out = [core(*s) for s in keep]
+    whole = [s for s, c in zip(keep, out) if at_end is None or not at_end(c[0], c[1])]
+    if len(whole) > 1:
+        # the targets are pieces of one array: one core from the first whole piece to the last
+        out = sorted([c for s, c in zip(keep, out) if s not in whole] + [core(whole[0][0], whole[-1][1])])
     return out
 
 
@@ -623,9 +631,13 @@ def extract(graph, regions, out_dir, vg=None, threads=4, max_internal_bp=200000,
         off = list(itertools.accumulate((len(seq[int(n)]) for _, n in steps), initial=0))
         s = ''.join(seq[int(n)] if o == '>' else revcomp(seq[int(n)]) for o, n in steps).upper()
         tk = tks[rid]
+
+        def reaches_end(cs, ce):
+            return ((a == 0 and cut_steps(off, cs, ce, trim_margin, True) == 0) or
+                    (b == len(toks) and cut_steps(off, cs, ce, trim_margin, False) == len(steps)))
         found = []
         for cs, ce, ss, se, strand in find_cores(s, tk, CORE_STRIDE, CORE_WINDOW, CORE_DENSITY, CORE_GAP,
-                                                 CORE_MIN_STRETCH):
+                                                 CORE_MIN_STRETCH, reaches_end):
             found.append([a + cut_steps(off, cs, ce, trim_margin, True), a + cut_steps(off, cs, ce, trim_margin, False),
                           set(tk.ids), {strand}, ss, se])
         found.sort()

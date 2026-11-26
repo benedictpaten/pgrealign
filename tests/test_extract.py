@@ -469,15 +469,21 @@ class TestTrim(unittest.TestCase):
             ('h2', '1', '>1>2>3>4>7>8>9'),           # only the first
             ('h3', '1', '>1>2>3>4>5>11>7>8>9'),      # the first, and a short copy of the unit, which stays
             ('h4', '1', '<9<8<7<10<5<4<3<2<1'),      # reverse
+            ('h5', '1', '>4>5>6>7>8>9'),             # a contig that starts in the first array
         ]
         tk = extract.TargetKmers([('X', S[4]), ('Y', S[6])], [S[3], S[5], S[7]], k=11)
         self.assertEqual((tk.ids, len(tk.fwd)), (['X', 'Y'], 60))
         kw = dict(stride=1, window=30, gap=60, min_stretch=200)
+        # one core from the first array to the second, with the flank between them
         seq = S[3] + S[4] + S[5] + S[10] + S[7]
-        self.assertEqual(extract.find_cores(seq, tk, **kw),
-                         [(300, 900, 300, 900, '+'), (1400, 1940, 1400, 1940, '+')])
-        self.assertEqual(extract.find_cores(revcomp(seq), tk, **kw),
-                         [(300, 840, 300, 840, '-'), (1340, 1940, 1340, 1940, '-')])
+        self.assertEqual(extract.find_cores(seq, tk, **kw), [(300, 1940, 300, 1940, '+')])
+        self.assertEqual(extract.find_cores(revcomp(seq), tk, **kw), [(300, 1940, 300, 1940, '-')])
+        # but not from a stretch whose core reaches the walk's end
+        seq = S[4] + S[5] + S[6] + S[7]
+        self.assertEqual(extract.find_cores(seq, tk, **kw), [(0, 1580, 0, 1580, '+')])
+        self.assertEqual(extract.find_cores(seq, tk, at_end=lambda s, e: s == 0, **kw),
+                         [(0, 600, 0, 600, '+'), (1100, 1580, 1100, 1580, '+')])
+        seq = S[3] + S[4] + S[5] + S[10] + S[7]
         # only the best stretch, without several targets, and for one that is too short
         one = extract.TargetKmers([('X', S[4])], [S[3], S[5], S[7]], k=11)
         self.assertEqual(extract.find_cores(seq, one, **kw), [(300, 900, 300, 900, '+')])
@@ -488,17 +494,22 @@ class TestTrim(unittest.TestCase):
         s = extract.extract(g, [region], x, exit_edges=True, ref_dir=self.d, keep_fragments=True,
                             allow_inversions=True, trim_targets=bed, trim_margin=0)
         self.assertEqual(s['status'], {'ok': 1})
-        self.assertEqual((s['trim']['cores'], s['trim']['no_core'], s['trim']['at_end']), (8, 0, 0))
+        # h5's truncated first array is not recorded, and its second is a core of its own
+        self.assertEqual((s['trim']['cores'], s['trim']['cores_in_fragments'], s['trim']['no_core'],
+                          s['trim']['at_end']), (6, 1, 0, 1))
         pk = next(extract.read_packages(os.path.join(x, 'packages.jsonl.gz')))
-        self.assertEqual({a['seq']: a['weight'] for a in pk['alleles']}, {S[4]: 5, S[6]: 1, S[10]: 2})
-        self.assertEqual(pk['n_runs'], {'spanning': 8})
+        self.assertEqual({a['seq']: a['weight'] for a in pk['alleles']},
+                         {S[4] + S[5] + S[6]: 1, S[4] + S[5] + S[10]: 2, S[4]: 2, S[6]: 1})
+        self.assertEqual(pk['n_runs'], {'spanning': 6})
         with gzip.open(os.path.join(x, 'occurrences.tsv.gz'), 'rt') as f:
             occ = [l.rstrip('\n').split('\t') for l in f if not l.startswith('#')]
-        self.assertEqual([r[4:6] for r in occ if r[0] == 'CHM13#0#chrT#0'], [['3', '4'], ['5', '6']])
+        self.assertEqual([r[4:6] for r in occ if r[0] == 'CHM13#0#chrT#0'], [['3', '6']])
         self.assertEqual([r[4:6] for r in occ if r[0] == 'h2#1#chrT#0'], [['3', '4']])
         with gzip.open(os.path.join(x, 'cores.tsv.gz'), 'rt') as f:
             cores = [l.rstrip('\n').split('\t') for l in f if not l.startswith('#')]
         self.assertEqual([c[2:5] for c in cores if c[0] == 'h3#1#chrT#0'], [['X,Y', 'spanning', 'core']])
+        self.assertEqual([c[4:8] for c in cores if c[0] == 'h5#1#chrT#0'], [['at_end', '.', '0', '1'],
+                                                                           ['core', '+', '2', '3']])
 
     def test_cut_steps(self):
         off = [0, 100, 5000, 5100, 6000]       # steps of 100, 4900, 100 and 900 bp; a core at [5000, 5100)
