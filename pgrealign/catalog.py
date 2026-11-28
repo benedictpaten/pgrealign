@@ -55,12 +55,17 @@ region.
 **Reading.** read_catalog reads a catalogue, which it recognises by that header line ("#chrom" and
 the columns above), or any other BED of target intervals (BED3, BED6, BED12, ...). Every region it
 reads has a unique id.
+
+**Arrays.** `arrays` (build_arrays) lists a reference's long tandem arrays of one monomer, such as a
+centromere's alpha satellite (171 bp), as a BED of targets of their own: megabases each, where a
+catalogue's entries are mostly under a kilobase. find_arrays gives the rules.
 """
 import collections
 import concurrent.futures
 import gzip
 import hashlib
 import itertools
+import operator
 import os
 import platform
 import re
@@ -188,12 +193,8 @@ def fasta_records(path):
         yield name, ''.join(chunks)
 
 
-def _trfind_one(args):
-    """Run trfind on one FASTA file and return its Records (the motif is cut from the sequence)."""
-    binary, fasta, minp, maxp, contigs = args
-    seqs = {n: s.upper() for n, s in fasta_records(fasta) if contigs is None or n in contigs}
-    if not seqs:
-        return []
+def _trfind_lines(binary, seqs, minp, maxp):
+    """trfind's output lines, each split into its columns (c/trfind.c), for `seqs` {contig: sequence}."""
     with tempfile.NamedTemporaryFile('w', suffix='.fa', delete=False) as t:
         for n, s in seqs.items():
             t.write('>%s\n%s\n' % (n, s))
@@ -202,9 +203,17 @@ def _trfind_one(args):
         p = subprocess.run([binary, tmp, str(minp), str(maxp)], capture_output=True, text=True, check=True)
     finally:
         os.unlink(tmp)
+    return [line.split('\t') for line in p.stdout.splitlines()]
+
+
+def _trfind_one(args):
+    """Run trfind on one FASTA file and return its Records (the motif is cut from the sequence)."""
+    binary, fasta, minp, maxp, contigs = args
+    seqs = {n: s.upper() for n, s in fasta_records(fasta) if contigs is None or n in contigs}
+    if not seqs:
+        return []
     out = []
-    for line in p.stdout.splitlines():
-        x = line.split('\t')
+    for x in _trfind_lines(binary, seqs, minp, maxp):
         chrom, a, b, q = x[0], int(x[1]), int(x[2]), int(x[4])
         out.append(Record(chrom, a, b, 'VNTR' if q >= 7 else 'STR', q, seqs[chrom][a:a + q], 'trfind'))
     return out
@@ -501,3 +510,111 @@ def build(out, repeatmasker=None, fastas=(), gap=50, contigs=None, minp=7, maxp=
         summary['strf'] = {**(tool_build('strf') if strf is True else {'binary': prebuilt_tool('strf', strf)}),
                            'stages': stages}
     return summary
+
+
+# ----------------------------------------------------------------------------- arrays
+
+ARRAY_MAX_PERIOD = 8000      # the longest repeat unit trfind looks for
+ARRAY_WINDOW = 1000          # an array is tested on windows of this many bp,
+ARRAY_WINDOW_STEP = 10000    # one every this many bp,
+ARRAY_MIN_SHARE = 0.5        # and kept when at least this share of them have the monomer's period
+
+Array = collections.namedtuple('Array', 'chrom start end id windows share')
+
+
+def monomer_multiple(period, monomer):
+    """Whether `period` is about a whole number of monomers of `monomer` bp."""
+    return period >= 0.9 * monomer and abs(period - round(period / monomer) * monomer) <= 2 + 0.01 * period
+
+
+def base_period(seq, start, window, max_lag):
+    """The base period of seq[start:start + window] (bytes): the smallest lag, from 2 to `max_lag` bp, at
+    which it matches the sequence that far on about as well (within 5% of the window) as at the lag where
+    it matches best. None when the sequence ends before start + window + max_lag."""
+    if start + window + max_lag > len(seq):
+        return None
+    here = seq[start:start + window]
+    matches = [sum(map(operator.eq, here, seq[start + lag:start + lag + window])) for lag in range(2, max_lag + 1)]
+    enough = max(matches) - 0.05 * window
+    return next(lag for lag, m in enumerate(matches, 2) if m >= enough)
+
+
+def find_arrays(records, seqs, monomer, min_length, gap, min_share=ARRAY_MIN_SHARE):
+    """The tandem arrays of a monomer of about `monomer` bp among trfind's `records`, (contig, start,
+    end, period) with trfind's chained period, on `seqs` {contig: upper-case sequence as bytes}.
+
+    - trfind chains the 10-mers that recur at about the same distance, so a higher-order repeat array
+      comes out at the period of its repeat unit, a whole number of monomers. The records of such a
+      period (monomer_multiple) are kept, and those of a contig that overlap or lie within `gap` bp of
+      each other are one candidate. A candidate shorter than `min_length` bp is dropped.
+    - That period alone is not specific: a short satellite recurs at every multiple of its own period,
+      and so at some near every multiple of the monomer. So each candidate is tested on windows of its
+      sequence, ARRAY_WINDOW bp every ARRAY_WINDOW_STEP bp, for its base period (base_period, over
+      lags of up to two monomers): the monomer's, or two monomers' where the monomers alternate between
+      two types, to within 2.5%. A window too near the contig's end to test is left out. The candidate
+      is an array when at least `min_share` of its windows have such a base period.
+
+    Returns the Arrays in contig and coordinate order. An id is array_<contig>_<n>, n counting the
+    contig's arrays from 1."""
+    by_contig = collections.defaultdict(list)
+    for contig, start, end, period in records:
+        if contig in seqs and monomer_multiple(period, monomer):
+            by_contig[contig].append((start, end))
+    max_lag = int(2 * monomer * 1.025) + 1
+    arrays = []
+    for contig in sorted(by_contig, key=_contig_key):
+        merged = []
+        for start, end in sorted(by_contig[contig]):
+            if merged and start - merged[-1][1] <= gap:
+                merged[-1][1] = max(merged[-1][1], end)
+            else:
+                merged.append([start, end])
+        n = 0
+        for start, end in merged:
+            if end - start < min_length:
+                continue
+            periods = [base_period(seqs[contig], i, ARRAY_WINDOW, max_lag)
+                       for i in range(start, end, ARRAY_WINDOW_STEP)]
+            periods = [p for p in periods if p is not None]
+            share = sum(1 for p in periods if any(abs(p - k * monomer) <= 0.025 * k * monomer for k in (1, 2))) \
+                / max(1, len(periods))
+            if share >= min_share:
+                n += 1
+                arrays.append(Array(contig, start, end, 'array_%s_%d' % (contig, n), len(periods), share))
+    return arrays
+
+
+def _arrays_one(args):
+    """The Arrays of one FASTA file (find_arrays on trfind's records of it)."""
+    binary, fasta, contigs, monomer, min_length, gap, min_share = args
+    seqs = {n: s.upper() for n, s in fasta_records(fasta) if contigs is None or n in contigs}
+    if not seqs:
+        return []
+    records = [(x[0], int(x[1]), int(x[2]), int(x[3]))
+               for x in _trfind_lines(binary, seqs, int(0.9 * monomer), ARRAY_MAX_PERIOD)]
+    return find_arrays(records, {n: s.encode() for n, s in seqs.items()}, monomer, min_length, gap, min_share)
+
+
+def build_arrays(out, fastas, monomer=171, min_length=100000, gap=20000, min_share=ARRAY_MIN_SHARE,
+                 contigs=None, jobs=1, trfind=None):
+    """Write the arrays of a monomer of `monomer` bp on the `fastas` (find_arrays) to `out`, a BED of
+    chrom, start, end and id in the files' order, gzipped when the name ends .gz, and empty when there
+    are none. One file per contig runs trfind on them in parallel. `trfind` is a prebuilt trfind
+    (prebuilt_tool), or None to compile one on first use (tool_binary). Returns a summary dict: the
+    number of `arrays`, their `bp`, `by_array` (each one's id, place, windows tested and the share of
+    them with the monomer's period) and `trfind`, as build's."""
+    if not fastas:
+        raise ValueError('no reference FASTA files to find arrays on')
+    binary = prebuilt_tool('trfind', trfind) if trfind else tool_binary('trfind')
+    contigs = set(contigs) if contigs else None
+    arrays = []
+    with concurrent.futures.ThreadPoolExecutor(max(1, jobs)) as ex:
+        for found in ex.map(_arrays_one, [(binary, f, contigs, monomer, min_length, gap, min_share)
+                                          for f in fastas]):
+            arrays.extend(found)
+    with _open(out, 'wt') as f:
+        for a in arrays:
+            f.write('%s\t%d\t%d\t%s\n' % (a.chrom, a.start, a.end, a.id))
+    return {'arrays': len(arrays), 'bp': sum(a.end - a.start for a in arrays),
+            'by_array': [{**a._asdict(), 'share': round(a.share, 4)} for a in arrays],
+            'trfind': {'binary': binary} if trfind else tool_build('trfind')}

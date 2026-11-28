@@ -71,6 +71,7 @@ Each stage is a command that reads and writes files, so it can be run on its own
 | command | run once per | does |
 |---|---|---|
 | `catalog` | genome | lists the reference's tandem repeats: the targets |
+| `arrays` | genome | lists the reference's long arrays of one monomer, such as alpha satellite: targets for an aligner made for them |
 | `prepare` | contig | cuts the contig from the whole-genome GBZ, and indexes its snarls and reference path |
 | `regions` | contig | anchors the targets, from the catalogue or any BED, in the contig's snarls |
 | `extract` | contig | collects each region's sequences, and where every walk passes through it |
@@ -239,6 +240,37 @@ The later stages recognise a catalogue by its header line, and stop if its ids r
 other BED as plain intervals, with class `.`. A line's id is its name when no other line has that
 name, and otherwise `<name>_<chrom>_<start>`, or `R_<chrom>_<start>` without a name, with `_2`, `_3`,
 ... appended, in file order, where that would repeat an id.
+
+## Arrays
+
+`arrays` lists a reference's long tandem arrays of one monomer, such as the alpha satellite of a
+centromere, whose monomer is 171 bp ([reference.md](reference.md#arrays)). Such an array is megabases
+long, far beyond what `realign` aligns, and is a target for an aligner made for it; `arrays` writes
+them as a BED of their own.
+
+1. Candidates. trfind runs for periods from 0.9 monomers to 8,000 bp. It chains the 10-mers that
+   recur at about the same distance, so a higher-order repeat array, whose unit of several monomers
+   repeats far more exactly than its monomers do, comes out at the period of its unit. `arrays` keeps
+   the repeats whose chained period p is about a whole number of monomers of m bp: p is at least
+   0.9 m, and within 2 + 0.01 p bp of a multiple of m.
+2. Merging. The kept repeats of a contig that overlap or lie within `--gap` bp of each other are one
+   candidate, and a candidate shorter than `--min-length` is dropped.
+3. The test. A period near a multiple of the monomer is not specific: a satellite of a short unit,
+   such as the 5 bp of HSat2 and HSat3, recurs at every multiple of its unit, and so at some near
+   every multiple of 171. So each candidate is tested on windows of 1 kb, one every 10 kb. A window's
+   base period is the smallest lag, from 2 bp to two monomers, at which it matches the sequence that
+   far on about as well as at the best of those lags: within 5% of the window's length in matching
+   bases. The window passes when that is one monomer, or two, as where the monomers alternate between
+   two types, to within 2.5%. A short satellite's window matches as well at its own unit, so it
+   fails. A candidate is an array when at least `--min-share` of its windows pass.
+
+trfind's own identity and refined period cannot make this test. They compare the whole repeat with
+itself at one offset, which the first indel breaks, so they are low for a long array.
+
+On CHM13 v2.0, against its cenSat annotation, `arrays` finds 68 arrays, 82.4 Mb in all: 34 mostly
+higher-order alpha satellite and 34 mostly monomeric, with 58% to 100% of each one's windows passing,
+and none of another satellite. They hold all 26 of the active arrays, whole but for 2.4% of one,
+which a 74 kb gap splits.
 
 ## Preparing a contig
 

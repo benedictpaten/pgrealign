@@ -332,5 +332,105 @@ class TestCatalog(unittest.TestCase):
         self.assertEqual([r._replace(src='trf') for r in strf], trf)
 
 
+def mutated(seq, rate, rng):
+    return ''.join(rng.choice('ACGT'.replace(c, '')) if rng.random() < rate else c for c in seq)
+
+
+def hor_array(rng, copies, monomer=171, types=4):
+    """A higher-order repeat array: `copies` copies, each 1% diverged, of a unit of `types` monomers that
+    are each a copy of one monomer, 25% diverged."""
+    base = ''.join(rng.choice('ACGT') for _ in range(monomer))
+    unit = ''.join(mutated(base, 0.25, rng) for _ in range(types))
+    return ''.join(mutated(unit, 0.01, rng) for _ in range(copies))
+
+
+class TestArrays(unittest.TestCase):
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.d)
+        self.rng = random.Random(7)
+        self.rand = lambda n: ''.join(self.rng.choice('ACGT') for _ in range(n))
+
+    def test_monomer_multiple(self):
+        for period, want in ((171, True), (170, True), (342, True), (2057, True), (2040, True), (153, False),
+                             (150, False), (5, False), (256, False), (2100, False)):
+            self.assertEqual(catalog.monomer_multiple(period, 171), want, period)
+
+    def test_base_period(self):
+        unit = self.rand(50)
+        seq = (self.rand(300) + ''.join(mutated(unit, 0.03, self.rng) for _ in range(60))).encode()
+        self.assertEqual(catalog.base_period(seq, 300, 1000, 351), 50)
+        # two types of monomer that alternate have the period of the pair
+        pair = unit + mutated(unit, 0.3, self.rng)
+        seq = ''.join(mutated(pair, 0.03, self.rng) for _ in range(30)).encode()
+        self.assertEqual(catalog.base_period(seq, 0, 1000, 351), 100)
+        # too near the end to test
+        self.assertIsNone(catalog.base_period(seq, len(seq) - 1350, 1000, 351))
+        self.assertIsNotNone(catalog.base_period(seq, len(seq) - 1351, 1000, 351))
+
+    def test_find_arrays(self):
+        # an alpha-satellite array, a satellite of a 5 bp unit that trfind reported at two monomers, and
+        # an array too short to keep
+        alpha, short = hor_array(self.rng, 40), hor_array(self.rng, 4)
+        hsat = ''.join(mutated('AATGG', 0.1, self.rng) for _ in range(6000))
+        pad = self.rand(2000)
+        seq = pad + alpha + pad + hsat + pad + short + pad
+        at = lambda part: seq.index(part)
+        records = [('c', at(alpha), at(alpha) + 12000, 684), ('c', at(alpha) + 12500, at(alpha) + len(alpha), 171),
+                   ('c', at(alpha), at(alpha) + 5000, 37),              # no monomer's period: not part of it
+                   ('c', at(hsat), at(hsat) + len(hsat), 342),
+                   ('c', at(short), at(short) + len(short), 684),
+                   ('other', 0, 50000, 171)]                            # a contig with no sequence
+        seqs = {'c': seq.encode()}
+        found = catalog.find_arrays(records, seqs, 171, 20000, 1000)
+        self.assertEqual(found, [catalog.Array('c', at(alpha), at(alpha) + len(alpha), 'array_c_1', 3, 1.0)])
+        # the two stretches are one array only when the gap allows, and neither is long enough alone
+        self.assertEqual(catalog.find_arrays(records, seqs, 171, 20000, 400), [])
+        both = catalog.find_arrays(records, seqs, 171, 10000, 400)
+        self.assertEqual([(a.start, a.end, a.id) for a in both],
+                         [(at(alpha), at(alpha) + 12000, 'array_c_1'),
+                          (at(alpha) + 12500, at(alpha) + len(alpha), 'array_c_2')])
+        # the short satellite is long enough, and its windows never have the monomer's period
+        self.assertEqual(len(hsat), 30000)
+        self.assertEqual(catalog.find_arrays(records[3:4], seqs, 171, 20000, 1000), [])
+        self.assertEqual(len(catalog.find_arrays(records[3:4], seqs, 171, 20000, 1000, min_share=0)), 1)
+
+    @unittest.skipUnless(HAVE_CC, 'no C compiler')
+    def test_arrays_of_a_reference(self):
+        from pgrealign import cli
+        alpha = hor_array(self.rng, 40)
+        fa, other = os.path.join(self.d, 'ref.fa'), os.path.join(self.d, 'other.fa')
+        with open(fa, 'w') as f:
+            f.write('>chrT\n%s\n' % (self.rand(3000) + alpha + self.rand(3000)).lower())
+        with open(other, 'w') as f:
+            f.write('>chrU\n%s\n' % self.rand(30000))
+        out = os.path.join(self.d, 'arrays.bed')
+        with mock.patch.dict(os.environ, {'PGREALIGN_CACHE': os.path.join(self.d, 'cache')}):
+            s = catalog.build_arrays(out, [other, fa], min_length=20000, jobs=2)
+            self.assertEqual(s['trfind'], catalog.tool_build('trfind'))
+            self.assertEqual((s['arrays'], [a['id'] for a in s['by_array']]), (1, ['array_chrT_1']))
+            a = s['by_array'][0]
+            self.assertEqual((a['chrom'], a['share'], s['bp']), ('chrT', 1.0, a['end'] - a['start']))
+            self.assertLessEqual(abs(a['start'] - 3000), 684)
+            self.assertLessEqual(abs(a['end'] - 3000 - len(alpha)), 684)
+            with open(out) as f:
+                self.assertEqual(f.read(), 'chrT\t%d\t%d\tarray_chrT_1\n' % (a['start'], a['end']))
+            # any BED of targets is read the same way
+            self.assertEqual([r.id for r in catalog.read_catalog(out)], ['array_chrT_1'])
+            # a contig left out, or a reference with no array, gives an empty BED
+            gz = os.path.join(self.d, 'none.bed.gz')
+            self.assertEqual(catalog.build_arrays(gz, [fa, other], min_length=20000, contigs=['chrU'])['arrays'], 0)
+            with gzip.open(gz, 'rt') as f:
+                self.assertEqual(f.read(), '')
+            with self.assertRaisesRegex(ValueError, 'no reference'):
+                catalog.build_arrays(out, [])
+            # the command line
+            with mock.patch('sys.stdout'):
+                cli.main(['arrays', '--reference', fa, '--min-length', '20000', '-o', out])
+            with open(out) as f:
+                self.assertEqual(f.read(), 'chrT\t%d\t%d\tarray_chrT_1\n' % (a['start'], a['end']))
+            self.assertTrue(os.path.exists(out + '.manifest.json'))
+
+
 if __name__ == '__main__':
     unittest.main()
