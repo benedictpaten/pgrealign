@@ -35,6 +35,19 @@ def cmd_catalog(a):
     _print(summary)
 
 
+def cmd_arrays(a):
+    from . import catalog, provenance
+    started = time.time()
+    contigs = None if a.contigs == 'all' else a.contigs.split(',')
+    summary = catalog.build_arrays(a.out, a.reference, monomer=a.monomer, min_length=a.min_length, gap=a.gap,
+                                   min_share=a.min_share, contigs=contigs, jobs=a.jobs, trfind=a.trfind)
+    provenance.write_manifest(a.out, 'arrays', {'reference_%d' % i: f for i, f in enumerate(a.reference)},
+                              {'monomer': a.monomer, 'min_length': a.min_length, 'gap': a.gap,
+                               'min_share': a.min_share, 'contigs': contigs},
+                              extra={'summary': summary}, started=started, checksums=True)
+    _print(summary)
+
+
 def drop_samples_of(a):
     """The samples prepare removes: none with --keep-all-samples, else --drop-sample, else the default."""
     from . import prepare
@@ -233,6 +246,7 @@ def cmd_project(a):
 
 
 def main(argv=None):
+    from .catalog import ARRAY_MIN_SHARE as catalog_min_share
     from .memory import default_gb
     from .prepare import DROP_SAMPLES
     from .realign import CENTRES, MAX_ALIGNMENT, MAX_CELLS, MAX_EXCESS, MAX_WORK, MIN_SHARE
@@ -279,6 +293,23 @@ def main(argv=None):
                             "in TRF's place: compiled on first use from pgrealign/c/strf.c, or else a strf "
                             "binary built from it, as a path or a name on PATH")
     c.set_defaults(func=cmd_catalog)
+
+    c = sub.add_parser('arrays', help="a reference's tandem arrays of one monomer, such as alpha satellite")
+    c.add_argument('-o', '--out', required=True, help='output BED of the arrays (.bed or .bed.gz)')
+    c.add_argument('--reference', nargs='+', required=True, metavar='FASTA',
+                   help='reference FASTA file(s) to run trfind on (one per contig runs them in parallel)')
+    c.add_argument('--monomer', type=int, default=171, help='length of the monomer, in bp [171]')
+    c.add_argument('--min-length', type=int, default=100000, help='shortest array to report, in bp [100000]')
+    c.add_argument('--gap', type=int, default=20000,
+                   help='stretches of an array at most this many bp apart are one array [20000]')
+    c.add_argument('--min-share', type=float, default=catalog_min_share,
+                   help="least share of an array's windows with the monomer's period [%g]" % catalog_min_share)
+    c.add_argument('--contigs', default='all', help="comma-separated contigs, or 'all' [all]")
+    c.add_argument('-j', '--jobs', type=int, default=1, help='FASTA files worked on at once [1]')
+    c.add_argument('--trfind', metavar='BINARY',
+                   help='a trfind binary built from pgrealign/c/trfind.c, as a path or a name on PATH '
+                        '[compiled on first use]')
+    c.set_defaults(func=cmd_arrays)
 
     c = sub.add_parser('prepare', help='cut one contig from a whole-genome GBZ; its snarls and reference index')
     g = c.add_mutually_exclusive_group(required=True)

@@ -111,6 +111,7 @@ This section and those that follow it, up to
 | stage | works on | reads | writes |
 |---|---|---|---|
 | `catalog` | a genome | RepeatMasker BED, reference FASTA | catalogue BED |
+| `arrays` | a genome | reference FASTA | BED of arrays |
 | `prepare` | a contig | whole-genome GBZ | `<contig>.gbz`, `<contig>.snarls.pb`, `<contig>.ref.tsv.gz` |
 | `regions` | a contig | targets, snarls, reference index | `regions.tsv` |
 | `extract` | a contig | `<contig>.gbz`, `regions.tsv` | `packages.jsonl.gz`, `occurrences.tsv.gz`, `interiors.tsv.gz`, `summary.json` |
@@ -153,7 +154,7 @@ Options that control the same thing in several stages:
 | `--vg` | prepare, regions, extract, replace, verify, run, merge | the vg binary |
 | `--abpoa` | realign, qc, run | the abPOA binary |
 | `-t`, `--threads` | prepare, extract, replace, run | threads for vg |
-| `-j`, `--jobs` | catalog, realign, qc, run | the most work done in parallel |
+| `-j`, `--jobs` | catalog, arrays, realign, qc, run | the most work done in parallel |
 | `--max-memory` | realign, qc, run | the memory, in GB, that the regions worked on at once may need in all; it decides only how many run at once ([Memory](#memory)) |
 | `--ref-sample` | prepare, extract, qc, run | the reference sample, CHM13 unless set |
 | `--drop-sample`, `--keep-all-samples` | prepare, run | the samples `prepare` removes ([Dropped samples](#dropped-samples)) |
@@ -239,6 +240,38 @@ as `trfind` does.
 - `catalog` merges the records of one contig that overlap or lie within `--gap` bp of each other
   into one entry. Raise `--gap` to join repeats separated by short stretches into one entry, and so
   into one target.
+
+### arrays
+
+`arrays` lists a reference's long tandem arrays of one monomer, such as the alpha-satellite arrays of
+its centromeres, as a BED of targets. They are megabases long where most of a catalogue's entries are
+under a kilobase, and suit an aligner made for them, so they are targets of their own and not part of
+the catalogue. It reads `--reference`, FASTA files, plain or gzipped, as `catalog` does, and works on
+N files at once with `-j N`.
+
+- `--monomer`: the monomer's length in bp, 171 for alpha satellite.
+- `--gap`: stretches of an array that overlap or lie within this many bp of each other are one
+  array. Raise it to join an array across a longer insertion, such as a transposon.
+- `--min-length`: the shortest array to report, in bp.
+- `--min-share`: the least share of an array's windows that must repeat at the monomer's period.
+- `--contigs`: a comma-separated list of contig names, or `all`, the default.
+- `--trfind`: a trfind binary built elsewhere, as for `catalog`.
+
+trfind proposes the arrays, as its repeats of up to 8,000 bp whose period is about a whole number of
+monomers: a higher-order repeat array comes out at the period of its unit. That alone is not specific,
+since a satellite of a short unit recurs near every multiple of the monomer too, so `arrays` tests
+each on windows of its sequence, 1 kb every 10 kb, and keeps it when at least `--min-share` of them
+repeat at one monomer or two and at nothing shorter ([method](method.md#arrays)).
+
+It writes a BED of chrom, start, end and id to `-o`, gzipped when the name ends in `.gz`, in the
+order of the files and, within one, of the contigs and their coordinates. An id is
+`array_<contig>_<n>`, with n counting the contig's arrays from 1. A reference with no array gives an
+empty file. `regions` and `run` read it as any BED of targets
+([format](#target-beds-and-the-catalogue)).
+
+The summary holds the number of `arrays`, their total length in `bp`, `by_array` (each array's
+`chrom`, `start`, `end` and `id`, the number of `windows` tested and the `share` of them that repeat
+at the monomer's period), and `trfind`, as `catalog`'s does. The manifest holds each input's MD5.
 
 ### prepare
 

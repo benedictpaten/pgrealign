@@ -40,8 +40,8 @@ names the binary:
   formats, and in replace when it reads or writes one;
 - abPOA, a partial-order sequence aligner (`--abpoa`), version 1.5 or later (1.5.7 is tested), in
   realign, qc and run;
-- a C compiler, for `catalog --reference`, which compiles its repeat finders on first use, trfind
-  and, with `--strf`, strf, unless `--trfind` and `--strf` name ones built elsewhere
+- a C compiler, for `catalog --reference` and `arrays`, which compile their repeat finders on first
+  use, trfind and, with `--strf`, strf, unless `--trfind` and `--strf` name ones built elsewhere
   ([docs/reference.md](docs/reference.md#catalog) says which compiler and where the build is kept);
 - TRF, Tandem Repeats Finder, for `catalog --trf`, which names the binary. `catalog --strf` runs
   strf, pgrealign's own reimplementation of the part of TRF that catalog uses, in its place.
@@ -106,6 +106,7 @@ picks. Only a region that is `ok` at all three is replaced; every other region k
 | stage | what it does |
 |---|---|
 | `catalog` | builds a reference's tandem-repeat catalogue from its RepeatMasker annotation, its FASTA, or both; `--trf` runs TRF on the FASTA as RepeatMasker would, for a reference with no annotation, and `--strf` runs pgrealign's reimplementation of it instead |
+| `arrays` | lists a reference's long tandem arrays of one monomer, such as the alpha-satellite arrays of its centromeres, from its FASTA, as a BED of targets |
 | `prepare` | cuts one contig's component, the connected part of the graph that holds its reference walk, out of a whole-genome GBZ, with its snarls and the reference walk's node positions, and by default drops the gref_CHM13 cover ([Known gaps](#known-gaps)); with `--graph`, writes the snarls and positions of a graph that is already the contig's, such as a Minigraph-Cactus chromosome `.vg` |
 | `regions` | places each target between two anchor nodes, and merges regions that would interfere |
 | `extract` | reads the contig's walks once, and writes the alleles and fragments of each `ok` region as a package |
@@ -209,14 +210,15 @@ end-to-end test takes a two-contig genome through run and merge, and needs both 
 
 ```
 pyproject.toml    the package's build settings and the pgrealign command
-pgrealign/        the package: one module per stage, except run (pipeline.py) and project (union.py)
+pgrealign/        the package: one module per stage, except run (pipeline.py), project (union.py) and
+                  arrays (catalog.py)
   star.py         the star alignment, which reads no graph and no file
   induce.py       the graph of an alignment, used by replace
   graph.py        reading a graph as a stream of GFA lines
   memory.py       abPOA's memory, and running regions in parallel within a memory budget
   provenance.py   the manifest written beside each stage's output
   cli.py          the pgrealign command line
-  c/trfind.c      the tandem-repeat finder that catalog compiles
+  c/trfind.c      the tandem-repeat finder that catalog and arrays compile
   c/strf.c        the reimplementation of TRF's short repeats that catalog compiles for --strf
 catalogs/         the CHM13 v2.0 tandem-repeat catalogue and its manifest
 docs/             method.md, reference.md and whole-genome.md
